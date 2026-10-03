@@ -50,7 +50,7 @@ work=$(cd "$work" && pwd)
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
 # the replay build, in the target directory cargo builds into (CARGO_TARGET_DIR too)
-easel=$("$repo/scripts/replay_easel")
+easel=$("$repo/scripts/replay_easel" ${EASEL_NO_BUILD:+--no-build})  # atelier: EASEL_NO_BUILD=1 uses the easel tools/build-engine.sh built
 
 cp "$log" "$work/paintings/lua/painting.lua"
 cp "$log" "$work/out/easel/painting/committed.lua"

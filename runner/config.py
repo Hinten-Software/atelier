@@ -35,11 +35,12 @@ LIMIT_GIVE_UP_S = 7 * 24 * 3600  # ... and stop after this long (not-finished)
 MAX_INVOLUNTARY = 12             # involuntary ends of one work before it stops as not-finished
 
 
-def artist_env(config_dir: Path) -> dict:
-    """The environment Claude Code runs in for an artist (RUN-13): nothing from the operator's shell."""
+def artist_env(config_dir: Path, root: Path | None = None) -> dict:
+    """The environment Claude Code runs in for an artist (RUN-13): nothing from the operator's shell. With the
+    token login, HOME is the artist's own root, not the operator's home (QA Q21)."""
     env = {
         "PATH": "/usr/bin:/bin",
-        "HOME": str(Path.home()),
+        "HOME": str(root) if (root and TOKEN.exists()) else str(Path.home()),
         "LANG": "en_US.UTF-8",
         "CLAUDE_CONFIG_DIR": str(config_dir),
         "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",

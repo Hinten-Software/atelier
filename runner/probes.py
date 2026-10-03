@@ -27,6 +27,19 @@ import audit  # noqa: E402
 from config import CLAUDE, CLAUDE_VERSION, DATA, EFFORT, MODEL, ROOTS, TOOLS, artist_env  # noqa: E402
 from studio import Artist, prepare  # noqa: E402
 from works import claude_cmd, last_result, messages, slug, strip_profile  # noqa: E402
+import hashlib  # noqa: E402
+from config import EASEL_MCP, PAINTER_EASEL, REPO, TEXTS  # noqa: E402
+
+
+def harness_fingerprint() -> str:
+    """Everything the probes vouch for: the Claude Code version and every file that shapes what the artist is given
+    or can do. A probe pass counts only for the fingerprint it was made with (QA Q24, ENG-5)."""
+    h = hashlib.sha256(CLAUDE_VERSION.encode())
+    for f in sorted(TEXTS.glob("*")) + [EASEL_MCP, REPO / "easel-mcp/src/upstream/easel-client.ts",
+                                        REPO / "easel-mcp/src/upstream/journal.ts", PAINTER_EASEL, REPO / "runner/config.py",
+                                        REPO / "runner/works.py"]:
+        h.update(f.name.encode() + f.read_bytes())
+    return h.hexdigest()[:16]
 
 CANVAS = ('canvas{size=300, aspect=1.25, linen=18, seed=7, ground={{pile={{"lead white", 3}}, um=60, '
           'apply="knife", texture=0.3}}}')
@@ -47,9 +60,11 @@ PROBES = {
 class Probe(Artist):
     """A throwaway artist: a root under /Users/Shared, never registered."""
     def __init__(self, config: Path | None):
-        r = "p" + secrets.token_hex(1)[:1]
+        r = "probe" + secrets.token_hex(6)  # never an artist's two-letter name (QA Q11)
         self.id, self.rec = "probe", {"studio_name": "probe"}
         self.root = ROOTS / r
+        if self.root.exists():
+            raise SystemExit(f"{self.root} exists; not touching it")
         self.studio = self.root / "studio"
         self.config = config or self.root / ".config"
         self.home = self.root / ".home"
@@ -71,11 +86,12 @@ def run(name: str, config: Path | None) -> list[str]:
         prepare(p, None)
         sid = str(uuid.uuid4())
         strip_profile(p.config)
-        cmd = claude_cmd(p.studio, run_dir, message, sid, MODEL, effort)
+        replies = run_dir / "replies.jsonl"
+        cmd = claude_cmd(p.studio, run_dir, message, sid, MODEL, effort, replies)
         stream = run_dir / "stream.jsonl"
         t0 = time.time()
         with open(stream, "w") as out:
-            rc = subprocess.run(cmd, cwd=p.studio, env=artist_env(p.config), stdin=subprocess.DEVNULL, stdout=out,
+            rc = subprocess.run(cmd, cwd=p.studio, env=artist_env(p.config, p.root), stdin=subprocess.DEVNULL, stdout=out,
                                 stderr=subprocess.STDOUT, timeout=1800).returncode
         problems = []
         init = next((json.loads(l) for l in stream.read_text().splitlines() if '"subtype":"init"' in l), {})
@@ -89,7 +105,7 @@ def run(name: str, config: Path | None) -> list[str]:
             problems.append(f"no transcript (exit {rc}): {stream.read_text()[-500:]}")
             return problems
         msgs = set(messages().values()) | {message}
-        problems += audit.check_transcript(transcript, msgs, p.config)
+        problems += audit.check_transcript(transcript, msgs, p.config, replies)
         res = last_result(stream) or {}
         reply = res.get("result") or ""
         problems += [f"reply: {h}" for h in audit.private_hits(reply)]
@@ -124,7 +140,7 @@ def run(name: str, config: Path | None) -> list[str]:
 
 def main():
     import os
-    config = Path(os.environ["ATELIER_CONFIG_DIR"]) if os.environ.get("ATELIER_CONFIG_DIR") else None
+    config = Path(os.environ["ATELIER_CONFIG_DIR"]) if os.environ.get("ATELIER_TEST") == "1" and os.environ.get("ATELIER_CONFIG_DIR") else None
     if not CLAUDE.exists():
         raise SystemExit(f"no pinned Claude Code at {CLAUDE}")
     names = sys.argv[1:] or list(PROBES)
@@ -135,8 +151,8 @@ def main():
         results[n] = problems
         print(f"  {'ok' if not problems else 'FAILED'}", *[f"  - {x}" for x in problems], sep="\n" if problems else "", flush=True)
     if all(not v for v in results.values()) and set(names) == set(PROBES):
-        out = DATA / "run" / f"probe-ok-{CLAUDE_VERSION}.json"
-        out.write_text(json.dumps({"claude_code": CLAUDE_VERSION, "at": time.strftime("%F %T"),
+        out = DATA / "run" / f"probe-ok-{harness_fingerprint()}.json"
+        out.write_text(json.dumps({"claude_code": CLAUDE_VERSION, "fingerprint": harness_fingerprint(), "at": time.strftime("%F %T"),
                                    "login": "token" if not config else "config dir", "probes": list(PROBES)}, indent=1))
         print(f"all probes passed: {out}")
     sys.exit(0 if all(not v for v in results.values()) else 1)

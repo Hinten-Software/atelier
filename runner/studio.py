@@ -55,8 +55,10 @@ class Artist:
         self.id, self.rec = id, reg[id]
         self.root = Path(self.rec["root"])
         self.studio = self.root / "studio"
-        # ATELIER_CONFIG_DIR: tests only (a config dir that is already logged in)
-        self.config = Path(os.environ.get("ATELIER_CONFIG_DIR", self.root / ".config"))
+        # ATELIER_CONFIG_DIR: tests only (a config dir that is already logged in), and only with ATELIER_TEST=1, so a
+        # variable left in the operator's shell can't give every artist one shared config (QA Q21)
+        test_config = os.environ.get("ATELIER_CONFIG_DIR") if os.environ.get("ATELIER_TEST") == "1" else None
+        self.config = Path(test_config) if test_config else self.root / ".config"
         self.home = DATA / "artists" / id
 
     @property

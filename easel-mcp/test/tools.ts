@@ -2,14 +2,15 @@
 //   node test/tools.ts <studio>     (a studio made by the runner or spike/run_sitting.py, with no painting yet)
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { symlinkSync, writeFileSync } from "node:fs";
+import { readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const studio = process.argv[2];
 symlinkSync("/etc", join(studio, "notes", "escape"));
 writeFileSync(join(studio, "notes", "blob.dat"), Buffer.from([1, 2, 0, 3]));
 const client = new Client({ name: "tools-test", version: "0" });
-await client.connect(new StdioClientTransport({ command: "node", args: [new URL("../src/server.ts", import.meta.url).pathname, studio] }));
+const replies = join(studio, "..", `${studio.split("/").pop()}-replies.jsonl`);
+await client.connect(new StdioClientTransport({ command: "node", args: [new URL("../src/server.ts", import.meta.url).pathname, studio, replies] }));
 let failed = 0;
 async function check(what: string, name: string, args: any, ok: (text: string, err: boolean) => boolean) {
 	const r: any = await client.callTool({ name, arguments: args });
@@ -43,6 +44,18 @@ await check("write toolkit", "write", { path: "toolkit.lua", text: "function dab
 await check("paint toolkit", "paint", { file: "toolkit.lua" }, (t, e) => !e && t.endsWith("ok"));
 await check("toolkit defined globals", "paint", { lua: "dab(1, 2)" }, (t, e) => !e && t.includes("dab"));
 await check("toolkit is in the log", "log", {}, (t, e) => t.includes("function dab"));
+// QA Q1, Q2, Q3, Q16
+for (const v of ["OUT", "Out/easel/painting", "OUT/easel/painting/server.log", "BIN", "Bin/easel", "out/easel/painting/lock"])
+	await check(`case variant ${v} refused`, "read", { path: v }, (t, e) => e);
+await check("painting.lua read without chunk numbers", "read", { path: "paintings/lua/painting.lua" },
+	(t, e) => !e && t.includes("--@ chunk") && !/--@ chunk \d/.test(t));
+await check("NOTEBOOK.md writes notebook.md", "write", { path: "NOTEBOOK.md", text: "case\n" }, (t, e) => !e);
+await check("notebook.md has it", "read", { path: "notebook.md" }, (t, e) => t.includes("case"));
+await check("offset past the end", "read", { path: "notebook.md", offset: 99 }, (t, e) => !e && t.includes("ends before"));
+await check("long print is capped", "paint", { lua: 'for i=1,20000 do print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx") end' },
+	(t, e) => !e && t.length < 21_000 && t.includes("left out"));
 await client.close();
+const logged = readFileSync(replies, "utf8").trim().split("\n").length;
+if (logged < 30) { failed++; console.log(`FAIL reply log has ${logged} entries`); } else console.log("ok   every reply is logged");
 console.log(failed ? `${failed} failed` : "all passed");
 process.exit(failed ? 1 : 0);

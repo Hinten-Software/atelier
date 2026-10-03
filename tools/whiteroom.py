@@ -16,7 +16,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 # what an artist reads: the studio's files and every text the tools put in front of it
-DEFAULT = ["materials", "spike/BRIEF.md", "spike/system_prompt.md", "easel-mcp/src/server.ts"]
+DEFAULT = ["materials", "runner/texts", "easel-mcp/src/server.ts", "easel-mcp/src/upstream/easel-client.ts",
+           "easel-mcp/src/upstream/journal.ts"]
+# in code files only what reaches the artist counts: string literals; comments and imports never leave the machine
+CODE = (".ts",)
 
 WORDS = [
     r"view(er|ers|ing public)", r"audience", r"spectator", r"visitor", r"public", r"watch(ed|ing|er|ers)?",
@@ -48,18 +51,28 @@ ALLOW = {
     ("oil_paint_physics.md", "Leveling of a model paint"): "a cited paper",
     ("oil_paint_physics.md", "artists' brushes"): "a cited brush guide",
     ("oil_paint_physics.md", "https://"): "a cited source's URL",
-    ("easel-mcp/src/server.ts", "limit"): "the read tool's line limit parameter",
-    ("easel-mcp/src/server.ts", " * "): "code comment: never sent to the artist",
-    ("easel-mcp/src/server.ts", "// "): "code comment: never sent to the artist",
-    ("easel-mcp/src/server.ts", "import "): "code",
+    ("server.ts", "limit: how many lines"): "the read tool's line limit parameter",
+    ("server.ts", "limit: z.number()"): "the read tool's line limit parameter",
+    ("server.ts", "p.limit"): "the read tool's line limit parameter",
+    ("easel-client.ts", "the easel's limit on a chunk's machine time"): "comment inside a regex replacement (hideCounters)",
+    ("easel-client.ts", "the chunk ran longer than"): "the pattern hideCounters removes",
+    ("easel-client.ts", "crop exceeds 1200 pixels"): "the pattern toolWords rewrites",
 }
+
+
+LITERAL = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|`(?:[^`\\]|\\.)*`')
+
+
+def is_comment(line: str) -> bool:
+    t = line.strip()
+    return t.startswith(("//", "/*", "*", "import "))
 
 
 def files(paths):
     for p in paths:
         p = (REPO / p) if not Path(p).is_absolute() else Path(p)
         if p.is_dir():
-            yield from sorted(f for f in p.rglob("*") if f.is_file() and f.suffix in (".md", ".ts", ".txt", ".lua"))
+            yield from sorted(f for f in p.rglob("*") if f.is_file() and f.suffix in (".md", ".ts", ".txt", ".lua", ".json"))
         else:
             yield p
 
@@ -69,6 +82,10 @@ def main():
     for f in files(sys.argv[1:] or DEFAULT):
         rel = str(f.relative_to(REPO)) if f.is_relative_to(REPO) else str(f)
         for n, line in enumerate(f.read_text(errors="replace").splitlines(), 1):
+            if f.suffix in CODE:
+                if is_comment(line):
+                    continue
+                line = " ".join(LITERAL.findall(line))  # only strings reach the artist, never names in code
             for m in PATTERN.finditer(line):
                 hits += 1
                 why = next((w for (sfx, sub), w in ALLOW.items() if rel.endswith(sfx) and sub in line), None)

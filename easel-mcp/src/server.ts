@@ -13,8 +13,8 @@
  * notebook.md and toolkit.lua, keeping every change; `paint` can run toolkit.lua as its chunk.
  * Nothing here counts the artist's work or times the machine (see upstream/easel-client.ts).
  */
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { dirname, extname, relative, resolve, sep } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -30,8 +30,18 @@ if (!existsSync(resolve(studio, "bin", "easel"))) {
 }
 
 type Content = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
-const say = (t: string) => ({ content: [{ type: "text", text: t }] as Content[] });
-const fail = (t: string) => ({ content: [{ type: "text", text: t }] as Content[], isError: true });
+// the runner's audit compares every tool result in the transcript with what this server sent (requirements NFR-10):
+// each reply's text goes to a log outside the studio, given as the second argument
+const replyLog = process.argv[3];
+function sent(r: { content: Content[]; isError?: boolean }) {
+	if (replyLog) {
+		const text = r.content.filter((c) => c.type === "text").map((c) => (c as { text: string }).text);
+		appendFileSync(replyLog, JSON.stringify({ text, error: !!r.isError }) + "\n");
+	}
+	return r;
+}
+const say = (t: string) => sent({ content: [{ type: "text", text: t }] as Content[] });
+const fail = (t: string) => sent({ content: [{ type: "text", text: t }] as Content[], isError: true });
 
 /** One tool call at a time: the easel is one hand at one canvas (pi ran these with executionMode "sequential"). */
 let queue: Promise<unknown> = Promise.resolve();
@@ -42,6 +52,10 @@ function serial<A>(fn: (a: A) => Promise<{ content: Content[]; isError?: boolean
 		return run;
 	};
 }
+
+/** What a chunk printed, kept under Claude Code's output limit: its end, as a terminal keeps it (requirements Q3). */
+const PRINT_MAX = 20_000;
+const capped = (t: string) => (t.length <= PRINT_MAX ? t : "(the beginning of what the chunk printed is left out)\n" + t.slice(-PRINT_MAX));
 
 const server = new McpServer({ name: "easel", version: "0.1.0" });
 
@@ -62,7 +76,7 @@ server.registerTool("paint", {
 		lua = readFileSync(path, "utf8"); // it runs, and is logged, as an ordinary chunk
 	}
 	try {
-		return say(paintReply(await atEasel(studio, ["do", "-"], lua!)));
+		return say(capped(paintReply(await atEasel(studio, ["do", "-"], lua!))));
 	} catch (e) {
 		return fail(hideCounters((e as Error).message));
 	}
@@ -90,7 +104,7 @@ server.registerTool("look", {
 	let path: string;
 	({ said, path } = renameLook(studio, said));
 	const data = readFileSync(resolve(studio, path)).toString("base64");
-	return { content: [{ type: "text", text: said }, { type: "image", data, mimeType: "image/png" }] as Content[] };
+	return sent({ content: [{ type: "text", text: said }, { type: "image", data, mimeType: "image/png" }] as Content[] });
 }));
 
 server.registerTool("note", {
@@ -137,10 +151,11 @@ const MAX_CHARS = 60_000;
 const HIDDEN = new Set(["bin", "out"]);
 
 /** The studio-relative path of a resolved real path ("" for the studio itself). */
-const inStudio = (real: string) => relative(realpathSync(studio), real);
+// the studio's disk ignores case (APFS): `OUT/` is `out/`, so every comparison here is in lower case (QA Q1)
+const inStudio = (real: string) => relative(realpathSync.native(studio), real);
 const hidden = (real: string) => {
-	const first = inStudio(real).split(sep)[0];
-	return HIDDEN.has(first) || first.startsWith(".");
+	const parts = inStudio(real).split(sep);
+	return HIDDEN.has(parts[0].toLowerCase()) || parts.some((x) => x.startsWith("."));
 };
 /** Text, as far as a reader can tell: no NUL byte in the first 8 KB. */
 const isText = (buf: Buffer) => !buf.subarray(0, 8192).includes(0);
@@ -150,21 +165,33 @@ server.registerTool("read", {
 		"or an image. A folder gives what is in it.",
 	inputSchema: { path: z.string(), offset: z.number().int().optional(), limit: z.number().int().optional() },
 }, serial(async (p: { path: string; offset?: number; limit?: number }) => {
-	const real = studioPath(studio, p.path);
-	if (!real || (inStudio(real) !== "" && hidden(real))) return fail(`${p.path} is outside the studio`);
-	if (!existsSync(real)) return fail(`${p.path}: no such file in the studio`);
-	if (statSync(real).isDirectory()) {
+	const found = studioPath(studio, p.path);
+	if (!found || !existsSync(found)) return fail(found ? `${p.path}: no such file in the studio` : `${p.path} is outside the studio`);
+	const real = realpathSync.native(found); // the true case of the path
+	if (inStudio(real) !== "" && hidden(real)) return fail(`${p.path} is outside the studio`);
+	let st;
+	try {
+		st = statSync(real);
+	} catch {
+		return fail(`${p.path} can't be read`);
+	}
+	if (!st.isDirectory() && !st.isFile()) return fail(`${p.path} can't be read`);
+	if (st.isDirectory()) {
 		const names = readdirSync(real, { withFileTypes: true })
-			.filter((d) => !d.name.startsWith(".") && !(inStudio(real) === "" && HIDDEN.has(d.name)))
+			.filter((d) => !d.name.startsWith(".") && !(inStudio(real) === "" && HIDDEN.has(d.name.toLowerCase())))
 			.map((d) => (d.isDirectory() ? `${d.name}/` : d.name))
 			.sort();
 		return say(names.length ? names.join("\n") : "(empty)");
 	}
 	const mime = IMAGES[extname(real).toLowerCase()];
-	if (mime) return { content: [{ type: "image", data: readFileSync(real).toString("base64"), mimeType: mime }] as Content[] };
+	if (mime) return sent({ content: [{ type: "image", data: readFileSync(real).toString("base64"), mimeType: mime }] as Content[] });
 	const buf = readFileSync(real);
 	if (!isText(buf)) return fail(`${p.path} isn't text or an image`);
-	const lines = buf.toString("utf8").split("\n");
+	let body = buf.toString("utf8");
+	// the log as the log tool gives it: without chunk numbers (requirements RUN-8, QA Q2)
+	if (inStudio(real).toLowerCase() === join("paintings", "lua", "painting.lua")) body = logReply(body);
+	const lines = body.split("\n");
+	if ((p.offset ?? 1) > lines.length) return say(`(${p.path} ends before line ${p.offset})`);
 	const from = Math.max(1, p.offset ?? 1);
 	let n = Math.max(1, Math.min(p.limit ?? MAX_LINES, MAX_LINES));
 	let shown = lines.slice(from - 1, from - 1 + n).map((l, i) => `${String(from + i).padStart(6)}\t${l}`);
@@ -173,7 +200,9 @@ server.registerTool("read", {
 		shown = shown.slice(0, n);
 	}
 	const more = from - 1 + n < lines.length ? `\n(${lines.length - (from - 1 + n)} more lines; read on with offset ${from + n})` : "";
-	return say(shown.join("\n").slice(0, MAX_CHARS) + more);
+	const whole = shown.join("\n");
+	const cut = whole.length > MAX_CHARS ? `\n(line ${from} goes on past what one read shows)` : "";
+	return say(whole.slice(0, MAX_CHARS) + cut + more);
 }));
 
 /** The painter's own files, which it may write: they stay in the studio from one painting to the next. */
@@ -191,8 +220,15 @@ function keep(path: string, before: string, after: string) {
 
 function writable(path: string): string | undefined {
 	const real = studioPath(studio, path);
-	const rel = real && inStudio(real);
+	const rel = real && relative(realpathSync.native(studio), real).toLowerCase();
 	return rel && WRITABLE.has(rel) ? rel : undefined;
+}
+
+/** Replace a file whole or not at all: a kill mid-write never leaves half a notebook. */
+function atomicWrite(path: string, text: string) {
+	const tmp = `${path}.${process.pid}.tmp`;
+	writeFileSync(tmp, text);
+	renameSync(tmp, path);
 }
 
 server.registerTool("write", {
@@ -204,7 +240,7 @@ server.registerTool("write", {
 	const path = resolve(studio, rel);
 	const before = existsSync(path) ? readFileSync(path, "utf8") : "";
 	keep(rel, before, p.text);
-	writeFileSync(path, p.text);
+	atomicWrite(path, p.text);
 	return say(`wrote ${rel}`);
 }));
 
@@ -223,7 +259,7 @@ server.registerTool("edit", {
 	if (before.indexOf(p.replaces, at + 1) >= 0) return fail(`edit: the passage is in ${rel} more than once; give more of it`);
 	const after = before.slice(0, at) + p.text + before.slice(at + p.replaces.length);
 	keep(rel, before, after);
-	writeFileSync(path, after);
+	atomicWrite(path, after);
 	return say(`changed ${rel}`);
 }));
 

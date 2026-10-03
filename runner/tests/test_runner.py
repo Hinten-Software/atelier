@@ -15,7 +15,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 RUNNER = HERE.parent / "atelier.py"
-DATA = Path("/Users/Shared/atelier/t-data")
+DATA = Path(f"/Users/Shared/atelier/t{os.getpid() % 10000}")  # one folder per run: runs can't break each other (QA Q25)
 ENV = os.environ | {"ATELIER_DATA": str(DATA), "ATELIER_CLAUDE": str(HERE / "fake_claude.py"), "ATELIER_WAIT_SCALE": "0.005"}
 failed = 0
 
@@ -42,7 +42,7 @@ def wait(work, until=("finished", "not-finished", "stopped"), timeout=300):
     while time.time() - t0 < timeout:
         s = state(work)
         pid = DATA / "run" / work / "runner.pid"
-        if s["state"] in until and not (pid.exists() and _alive(int(pid.read_text()))):
+        if s["state"] in until and not (pid.exists() and _alive(json.loads(pid.read_text())["pid"])):
             return s
         time.sleep(1)
     raise SystemExit(f"{work} stuck in {state(work)['state']}")
@@ -130,6 +130,55 @@ def main():
         s = wait("i-003")
         check("resumed work ends", s["state"] in ("finished", "not-finished"), s["state"])
         check("the cut-off sitting is recorded as interrupted", s["sittings"][0]["how"] == "interrupted", s["sittings"][0])
+        # 5. a tool result the easel never sent (a harness notice) stops the sitting (QA Q3, Q7)
+        modes(root, "injected")
+        atelier("paint", "i", "--by", "operator")
+        s = wait("i-004")
+        check("an injected tool result stops it", s["state"] == "stopped" and any("didn't send" in h for h in s["hits"]), s["hits"])
+        atelier("resume", "--clear", "test: injected")
+        modes(root, "voluntary")
+        wait("i-004")
+
+        # 6. finishing fails midway; resume finishes it without a new sitting (QA Q8)
+        modes(root, "voluntary")
+        hist = DATA / "artists/i/history"
+        shutil.rmtree(hist)
+        hist.write_text("not a folder")  # finish() can't write the history copies
+        atelier("paint", "i", "--by", "operator")
+        s = wait("i-005", until=("finishing",), timeout=120)
+        time.sleep(3)
+        hist.unlink()
+        n_before = len(s["sittings"])
+        atelier("resume")
+        s = wait("i-005")
+        check("resumed finishing adds no sitting", len(s["sittings"]) == n_before, [x["how"] for x in s["sittings"]])
+        check("and finishes", s["state"] == "finished", s["state"])
+
+        # 7. kill -9 of the runner leaves Claude Code running; resume stops it first (QA Q9)
+        modes(root, "hang", "voluntary")
+        atelier("paint", "i", "--by", "operator")
+        time.sleep(4)
+        st = state("i-006")
+        runner = json.loads((DATA / "run/i-006/runner.pid").read_text())["pid"]
+        os.kill(runner, 9)
+        pgid = st["sittings"][-1]["pgid"]
+        check("the orphan is still running", _alive(pgid))
+        atelier("resume")
+        time.sleep(3)
+        check("resume stopped the orphan", not _alive(pgid))
+        wait("i-006")
+
+        # 8. limit reset times (QA Q10)
+        sys.path.insert(0, str(HERE.parent))
+        os.environ["ATELIER_DATA"] = str(DATA)
+        from datetime import datetime
+        import works
+        ref = datetime(2026, 10, 3, 13, 55)  # a Saturday
+        check("'resets 1pm' read at 13:55 means now", works.reset_time("resets 1pm", ref) - ref.timestamp() < 120)
+        check("'resets Sat 1pm' read at 13:55 means now", works.reset_time("resets Sat 1pm", ref) - ref.timestamp() < 120)
+        check("'resets 9am' read at 13:55 is tomorrow", 18 * 3600 < works.reset_time("resets 9am", ref) - ref.timestamp() < 20 * 3600)
+        check("'resets Mon 9am' is Monday", 1.7 * 86400 < works.reset_time("resets Mon 9am", ref) - ref.timestamp() < 1.9 * 86400)
+        check("a 429 is not a usage limit", not works.is_limit("429 rate_limit_error"))
     finally:
         if os.environ.get("KEEP"):
             print(f"kept {DATA} and {roots}")

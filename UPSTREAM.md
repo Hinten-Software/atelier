@@ -24,5 +24,8 @@ don't use; her runners, records and paintings.
 
 ## Changes
 
-None to the engine yet. Engine changes are atelier events (requirements ENG-5)
-and are listed here with their date and reason.
+Engine changes are atelier events (requirements ENG-5), listed here with their date and reason.
+
+- 2026-10-03 `engine/scripts/check_painting`: with `EASEL_NO_BUILD=1` it uses the replay easel
+  already built (by `tools/build-engine.sh`, with no local paths inside) instead of rebuilding it
+  with plain `cargo build`. The painting engine itself is unchanged.

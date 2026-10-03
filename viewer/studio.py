@@ -458,8 +458,18 @@ TITLE_LINE = re.compile(r"[ \t]*(?:#{1,6}[ \t]*)?(\*\*?|__?)([^*_\n]{2,100}?)\1[
 
 
 def title_of(say):
-    """The painting's title from the painter's last words, if they begin with one or have one alone on a line among
-    their first three paragraphs; else None."""
+    """The painting's title from the painter's last words; None if there is none. A label ("**Note:**") or a
+    heading-like phrase ending in a colon is never a title (atelier QA Q17)."""
+    t = _title_of(say)
+    return None if t is None or t.endswith(":") or t.lower() in ("note", "notes", "why i stopped") else t
+
+
+def _title_of(say):
+    # the atelier's painters most often name it in their first sentence: "... and called it **Estuary, Last Light**."
+    first = next((p for p in re.split(r"\n\s*\n", say or "") if p.strip()), "")
+    m = re.search(r"\b(?:called|titled|named|call|title)\s+(?:it\s+)?\*\*([^*\n]{2,80})\*\*", first)
+    if m:
+        return m.group(1).strip()
     m = TITLE.match(say or "")
     if m:
         return m.group(2).strip()
@@ -467,10 +477,7 @@ def title_of(say):
         m = TITLE_LINE.fullmatch(para.strip("\n"))
         if m:
             return m.group(2).strip()
-    # the atelier's painters often name it in their first sentence: "... and called it **Estuary, Last Light**."
-    first = next((p for p in re.split(r"\n\s*\n", say or "") if p.strip()), "")
-    m = re.search(r"\b(?:called|titled|named|call|title)\s+(?:it\s+)?\*\*([^*\n]{2,80})\*\*", first)
-    return m.group(1).strip() if m else None
+    return None
 
 
 REFERENCE = object()  # in a glance's calls: a read of a reference picture

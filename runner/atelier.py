@@ -38,8 +38,17 @@ def open_work() -> Work | None:
 
 
 def runner_alive(w: Work) -> bool:
-    pid = w.run / "runner.pid"
-    return pid.exists() and alive(int(pid.read_text()))
+    """The runner of this work is running: its pid is alive, the machine hasn't restarted since it was recorded, and
+    the process is that runner (a pid can be reused after a reboot, QA Q15)."""
+    from works import boot_time
+    f = w.run / "runner.pid"
+    if not f.exists():
+        return False
+    rec = json.loads(f.read_text())
+    if rec.get("boot") != boot_time() or not alive(rec["pid"]):
+        return False
+    cmd = subprocess.run(["/bin/ps", "-o", "command=", "-p", str(rec["pid"])], capture_output=True, text=True).stdout
+    return f"run {w.id}" in cmd
 
 
 def detach(w: Work):
@@ -51,9 +60,10 @@ def detach(w: Work):
 
 
 def cmd_birth(a):
-    ok = sorted(DATA.glob("run/probe-ok-*.json"))
+    from probes import harness_fingerprint
+    ok = (DATA / "run" / f"probe-ok-{harness_fingerprint()}.json").exists()
     if not ok and not a.without_probes:
-        raise SystemExit("the probe suite hasn't passed for this harness yet (RUN-16): run tools/probes.py first")
+        raise SystemExit("the probe suite hasn't passed for this harness yet (RUN-16): run runner/probes.py first")
     artist = birth()
     event(f"{artist.name} born ({artist.id}), model and effort in its birth record")
     print(f"{artist.name} ({artist.id}) is born")
@@ -103,6 +113,10 @@ def cmd_resume(a):
         event(f"work {w.id}: operator cleared the audit stop: {a.clear}")
     elif st in TERMINAL:
         raise SystemExit(f"{w.id} is {st}")
+    elif st == "finishing":  # the artist had finished: finish it, never a new sitting (QA Q8)
+        event(f"work {w.id}: finishing resumed by a person")
+        detach(w)
+        return
     elif st in ("sitting", "interrupted"):
         last = w.state["sittings"][-1] if w.state["sittings"] else None
         if last and not last.get("how"):  # the sitting the reboot or the runner's death cut off
