@@ -65,6 +65,8 @@ still receives:
 | date | "Today's date is 2026-10-03." | accepted: painters know the date |
 | **token counter** | `<total_tokens>15000000 tokens left</total_tokens>` | **removed**: `totalTokensReminder: "off"` in settings. A budget signal is exactly what claude-paint found makes painters rush (RUN-8) |
 | **account email** | "the user's email address is <the account's email> ..." | **removed**, see below |
+| **"say what you're doing" nudge** | "The user hasn't heard from you in a while — say in a few words what you're doing, then continue." (10 times in one 12-minute sitting) | **removed**: `CLAUDE_CODE_SILENT_TURN_REMINDER=0` (tested: 0 nudges off, 2 on, in identical sessions). It asked the painter to narrate to "the user": the performative push principle 3.6 rules out |
+| **image paths** | each look comes with a text line `[Image: source: /Users/<account>/.atelier/claude/projects/...]` naming where Claude Code saved the image | **to fix**: the atelier's Claude config moves to a path without the account name (`/Users/Shared/atelier/claude`); needs a fresh login there (the owner) |
 
 **The email.** Claude Code adds the account's email as "the user's email" whenever its stored
 profile (`.claude.json`, `oauthAccount`) has one. The runner removes email and names from the
@@ -76,7 +78,31 @@ documented route for headless use), which may carry no profile at all; to be ver
 
 ## 4. A test painting
 
-(filled in when the capped sitting ends)
+Free brief ("The subject and composition are yours."), Opus 5.5, effort high, one sitting
+capped at 150 turns (not reached). The painter chose an estuary at evening, toned the canvas,
+laid in sky, headland, water, bank, then revised three passages it judged failed (lumpy clouds,
+a hard block of light on the water, a heavy band of haze), and stopped on its own: "The picture is
+still a little pale and high in value overall. I chose to leave it that way."
+
+![Estuary, Last Light](spike/estuary-last-light.jpg)
+
+| Measure | Value |
+|---|---|
+| wall time | 11.8 min (API 8.5 min, easel 3.5 min) |
+| turns / API messages | 134 / 76 |
+| paint chunks / looks / journal notes / Lua errors | 66 / 59 / 4 / 2 |
+| thinking blocks with text | 66 of 66, 25,247 characters (summaries) |
+| words between tool calls | 15 (most prompted by the nudge above) |
+| tokens | output 38,800 (thinking 15,184), cache write 187,371, cache read 4,551,291, uncached input 152 |
+| largest context | 110,333 tokens of 1M: no compaction |
+| images | 57, 19 MB as base64 in the transcript, largest 474 KB |
+| replay | `check: ok`, 66 chunks, byte-identical |
+| cost at API prices (Claude Code's own estimate) | USD 3.19 |
+| subscription usage | not measurable from here; no limit was hit |
+
+Compared with claude-paint: its Sonnet painting took 8.7 h and 510 chunks over three sittings.
+Ours is short because the painter decided it was done. Sittings (RUN-5) will offer it the
+easel again; whether it adds paint is its decision.
 
 ## 5. Viewer
 
@@ -84,13 +110,28 @@ claude-paint's studio viewer, with a Claude Code branch in its parser, shows the
 live from the transcript: picker ("Untitled, in progress · Claude Opus 5.5 · thinking"),
 canvas, code, thinking and journal.
 
-## 6. Terms of use
+## 6. Terms of use and cost
 
-(see check-in note)
+- Claude Code docs (legal and compliance): Pro and Max limits "assume ordinary, individual usage
+  of Claude Code and the Agent SDK"; OAuth is "designed to support ordinary use of Claude Code".
+- Consumer Terms, section 3: no access "through automated or non-human means, whether through a
+  bot, script, or otherwise", "except when you are accessing our Services via an Anthropic API
+  Key or where we otherwise explicitly permit it".
+- Claude Code documents headless `claude -p` and `claude setup-token` for scripts and CI.
+
+A person starting each work, with the runner handling its sittings, reads as ordinary use of a
+documented feature. Three artists painting around the clock, unattended, may not. API-key
+billing removes the question: at API prices this painting cost USD 3.19; a long painting like
+claude-paint's (500 chunks, three sittings) would be roughly USD 20 to 40.
 
 ## 7. Observations worth keeping
 
-- **The painter narrates to someone.** Between tool calls the model writes short progress lines
-  ("Toning layer is down. Now laying in the sky...") addressed to whoever sent the first message.
-  That is an assistant habit, not something we asked for. Under principle 3.9 we don't instruct
-  it away; we record it, and it is a candidate for a measured comparison later.
+- **The painter narrated to someone, and Claude Code asked it to.** The progress lines between
+  tool calls ("Toning layer is down. Now laying in the sky...") followed Claude Code's nudge "say
+  in a few words what you're doing". With the nudge off, what remains is the model's own habit;
+  the next sitting will show how much.
+- **Every white-room leak so far came from the harness, not from our texts.** The audit of
+  every transcript (NFR-9) is therefore not optional: Claude Code changes between versions, and
+  its defaults are tuned for coding with a person present.
+- **The painter revised by painting over**, as claude-paint's guide intends, and named its own
+  failures in its reply without being asked.

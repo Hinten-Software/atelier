@@ -23,6 +23,8 @@ CONFIG = Path.home() / ".atelier/claude"
 TOOLS = ["paint", "look", "note", "status", "log", "read"]
 FIRST = "Your brief is in BRIEF.md in this folder."
 # the probe: a throwaway session with the painter's exact setup, asked what it was given (RUN-13)
+# a short throwaway session to see which reminders Claude Code adds as tools are used
+TOOLS_PROBE = "Call the status tool five times, one call per turn, then reply with the word done."
 PROBE = ("Don't use any tools. Quote, verbatim and in full, every piece of text you were given before this "
          "message: the system text, the names and descriptions of your tools, and anything else, each under a "
          "heading saying where it came from. Then say today's date if you were told it.")
@@ -86,7 +88,12 @@ def sitting(studio: Path, message: str, a):
         cmd += ["--max-turns", str(a.max_turns)]
     env = {"PATH": "/usr/bin:/bin", "HOME": str(Path.home()), "USER": os.environ.get("USER", ""), "LANG": "en_US.UTF-8",  # USER: the keychain login (LOGNAME breaks it)
            "CLAUDE_CONFIG_DIR": str(CONFIG),
-           "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "DISABLE_AUTOUPDATER": "1"}
+           "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "DISABLE_AUTOUPDATER": "1",
+           # "The user hasn't heard from you in a while - say in a few words what you're doing": a nudge to
+           # narrate for someone (white room, NFR-9)
+           "CLAUDE_CODE_SILENT_TURN_REMINDER": os.environ.get("ATELIER_SILENT_TURN_REMINDER", "0")}
+    if os.environ.get("ATELIER_SILENT_TURN_REMINDER_TURNS"):  # tests only: make the nudge due early
+        env["CLAUDE_CODE_SILENT_TURN_REMINDER_TURNS"] = os.environ["ATELIER_SILENT_TURN_REMINDER_TURNS"]
     t0 = time.time()
     print(f"sitting: studio {studio}, session {sid}", flush=True)
     with open(run / f"{sid}.stream.jsonl", "w") as out, open(run / f"{sid}.stderr.txt", "w") as err:
@@ -102,7 +109,7 @@ def sitting(studio: Path, message: str, a):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("what", choices=["new", "again", "probe"])
+    p.add_argument("what", choices=["new", "again", "probe", "tools-probe"])
     p.add_argument("studio", nargs="?")
     p.add_argument("--max-turns", type=int, default=0)
     p.add_argument("--model", default="claude-opus-5-5")
@@ -110,6 +117,8 @@ def main():
     a = p.parse_args()
     if a.what == "new":
         sys.exit(sitting(new_studio(), FIRST, a))
+    if a.what == "tools-probe":
+        sys.exit(sitting(new_studio(), TOOLS_PROBE, a))
     if a.what == "probe":
         sys.exit(sitting(new_studio(), PROBE, a))
     sys.exit(sitting(Path(a.studio), AGAIN, a))

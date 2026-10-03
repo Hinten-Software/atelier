@@ -27,6 +27,7 @@ are numbered after the last. Section 0 lists every change.
 | C13 | **Licensing stated plainly:** code MIT, art and texts CC BY 4.0, and the engine's Mixbox dependency is CC BY-NC 4.0, so the engine as a whole is non-commercial. | Found in claude-paint's THIRD_PARTY_NOTICES.md; the owner kept the default (keep Mixbox, say so). |
 | C14 | **Research layer: record everything from day one, analyze later.** EXP-2/3/5/7/8 move to "after launch" except their data capture. | the owner accepted the default. |
 | C15 | Closing statement is **optional** (COM-4). | the owner: "a statement by the artist if they desire to produce one". |
+| C16 | **Harness leaks closed** (RUN-13, NFR-10): Claude Code by default gave the painter a token countdown, the account's email as "the user's email", a recurring "say in a few words what you're doing" nudge, and image paths with the account name. | Spike, 2026-10-03 (docs/spike-report.md). |
 
 -----
 
@@ -163,8 +164,8 @@ Priority: **M** must (MVP: M1 and M2), **S** should (v1: M3), **C** could (later
 | RUN-10 | One artist paints at a time; a queue takes turns across artists. | S |
 | RUN-11 | Model and effort per artist, recorded per work. Default Opus 5.5, effort high. | S |
 | RUN-12 | Optional artists on other vendors' CLIs, each under its own terms. | C |
-| RUN-13 | **Isolation from the host's Claude Code (new).** Own config dir (`CLAUDE_CONFIG_DIR=~/.atelier/claude`), `--setting-sources ""` plus an atelier settings file, `--strict-mcp-config`, `--disable-slash-commands`, `--system-prompt` (full replacement), auto-memory off, auto-update off. The spike verifies what the model actually receives (system prompt, tools, injected reminders). | M |
-| RUN-14 | **Thinking summaries on (new):** the atelier settings file sets `showThinkingSummaries: true`; the run uses `--output-format stream-json --verbose`. | M |
+| RUN-13 | **Isolation from the host's Claude Code (new).** Own config dir at a path without the account name (`CLAUDE_CONFIG_DIR=/Users/Shared/atelier/claude`: Claude Code shows the model each image's saved path), `--tools ""`, `--setting-sources ""` plus an atelier settings file, `--strict-mcp-config`, `--disable-slash-commands`, `--system-prompt` (full replacement), auto-memory off, auto-update off, `totalTokensReminder: "off"`, `CLAUDE_CODE_SILENT_TURN_REMINDER=0`, account email and names removed from the stored profile before each launch. Verified by the spike (docs/spike-report.md, section 3). | M |
+| RUN-14 | **Thinking summaries on (new):** `--thinking-display summarized` (headless runs force "omitted" otherwise; the `showThinkingSummaries` setting alone is not enough), with `--output-format stream-json --verbose`. | M |
 
 ### 5.3 Artists (ART)
 
@@ -269,6 +270,7 @@ Priority: **M** must (MVP: M1 and M2), **S** should (v1: M3), **C** could (later
 | NFR-6 Observability | Runner logs for the operator (sittings, pauses, errors, counts), never shown to artists. |
 | NFR-7 Simplicity | Files and static pages over databases and services. |
 | NFR-8 Isolation integrity | Tested: an artist's tools refuse paths outside its studio (done for `read`); the artist's session holds nothing from the host's Claude Code (RUN-13, spike). |
+| NFR-10 Transcript audit (new) | After every sitting the runner audits the transcript: every attachment and injected text Claude Code added is compared with the known list (environment, model, date, identity line); anything new, the account's email or name, a token counter or a "say what you're doing" nudge stops the atelier until the operator clears it. Every leak found in the spike came from the harness, not from our texts. |
 | NFR-9 White room (new) | Every artist-facing text (system prompt, brief, guide, notes, tool descriptions, tool replies, sitting messages, errors) is checked against principle 3.6 by a script with a word list (viewers, audience, watch, observe, evaluate, score, judge, budget, cost, counter, other painters, operator, Claude Code, ...) and by review. |
 
 ## 7. Data model
