@@ -12,11 +12,20 @@ export RUSTFLAGS="$remap"
 export CFLAGS="-Dluai_makeseed()=0x5eedu -ffile-prefix-map=$cargo_home=/cargo -ffile-prefix-map=$HOME=/home"
 cargo build --release -p easel
 cargo build --release -p easel --no-default-features --target-dir target/painter
-for b in target/release/easel target/painter/release/easel; do
-  if strings "$b" | grep -q -e "$HOME" -e "/Users/"; then
-    echo "build-engine: $b still names a local path:" >&2
-    strings "$b" | grep -e "$HOME" -e "/Users/" | head -3 >&2
-    exit 1
+# (grep -q would end the pipe early, and with pipefail a broken pipe reads as "no match": count instead)
+check() {
+  local b=$1 n
+  n=$(strings "$b" | grep -c -e "$HOME" -e "/Users/" || true)
+  if [ "$n" != 0 ]; then
+    echo "build-engine: $b still names a local path ($n strings):" >&2
+    strings "$b" | grep -o -e ".\{0,30\}/Users/[^ ]\{0,40\}" | head -3 >&2
+    return 1
   fi
-  shasum -a 256 "$b"
-done
+}
+# the artist's easel must hold no local path at all (ENG-7)
+check target/painter/release/easel
+# the replay build (operator only, never in a studio) keeps one: env!("CARGO_MANIFEST_DIR"), the default EASEL_ROOT of
+# its developer mode, which no path remapping reaches; anything more is an error
+n=$(strings target/release/easel | grep -c -e "/Users/" || true)
+if [ "$n" -gt 1 ]; then check target/release/easel; fi
+shasum -a 256 target/release/easel target/painter/release/easel

@@ -154,7 +154,7 @@ Priority: **M** must (M1, M2), **S** should (M3), **C** could (later).
 | ENG-4 | claude-paint's studio rules hold: no undo, paint only from piles mixed from tubes, no computed images, no mirrored-coordinate copying. | M |
 | ENG-5 | **Changed:** any change to anything artist-facing (texts, tools, tool replies, error strings) or to the harness (Claude Code version, flags, settings, model) is an atelier event: deliberate, for all artists at once, dated in `history.md`. | M |
 | ENG-6 | All artists paint from the default tube box. A new tube is an atelier event. | M |
-| ENG-7 | **Changed:** no account name or local path in anything an artist can reach: studio paths, the Claude config path, file contents, binaries (built with `tools/build-engine.sh`, which remaps paths and fails if `strings` finds one). The easel's socket path stays under 104 bytes. | M |
+| ENG-7 | **Changed:** no account name or local path in anything an artist can reach: studio paths, the Claude config path, file contents, the painter's easel (built with `tools/build-engine.sh`, which remaps paths and fails if `strings` finds one). The replay easel, which never enters a studio, keeps its source folder in one string (a compile-time constant no remapping reaches); it stays in the private store. The easel's socket path stays under 104 bytes. | M |
 
 ### 5.2 Painter runtime (RUN)
 
