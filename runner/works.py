@@ -166,15 +166,7 @@ class Work:
         for f in (NOTEBOOK, TOOLKIT):
             if (a.studio / f).exists():
                 shutil.copy2(a.studio / f, snap / f)
-        mcp = self.run / "mcp.json"
-        mcp.write_text(json.dumps({"mcpServers": {"easel": {"command": str(NODE), "args": [str(EASEL_MCP), str(a.studio)]}}}))
-        cmd = [str(CLAUDE), "-p", message, "--session-id", sid, "--model", a_model(a), "--effort", a_effort(a),
-               "--system-prompt", (TEXTS / "system_prompt.md").read_text().strip(),
-               "--tools", "", "--allowedTools", ",".join(f"mcp__easel__{t}" for t in TOOLS),
-               "--strict-mcp-config", "--mcp-config", str(mcp),
-               "--setting-sources", "", "--settings", str(TEXTS / "settings.json"),
-               "--disable-slash-commands", "--thinking-display", "summarized",
-               "--output-format", "stream-json", "--verbose"]
+        cmd = claude_cmd(a.studio, self.run, message, sid, a_model(a), a_effort(a))
         strip_profile(a.config)
         transcript = a.config / "projects" / slug(a.studio) / f"{sid}.jsonl"
         rec = {"n": n, "session": sid, "message": message, "start": now(), "end": None, "how": None,
@@ -344,6 +336,19 @@ class Watcher(threading.Thread):
                 os.killpg(self.proc.pid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
+
+
+def claude_cmd(studio: Path, run: Path, message: str, sid: str, model: str, effort: str) -> list[str]:
+    """Claude Code for one sitting, isolated (RUN-13, RUN-14); its MCP config is written to the run folder."""
+    mcp = run / "mcp.json"
+    mcp.write_text(json.dumps({"mcpServers": {"easel": {"command": str(NODE), "args": [str(EASEL_MCP), str(studio)]}}}))
+    return [str(CLAUDE), "-p", message, "--session-id", sid, "--model", model, "--effort", effort,
+            "--system-prompt", (TEXTS / "system_prompt.md").read_text().strip(),
+            "--tools", "", "--allowedTools", ",".join(f"mcp__easel__{t}" for t in TOOLS),
+            "--strict-mcp-config", "--mcp-config", str(mcp),
+            "--setting-sources", "", "--settings", str(TEXTS / "settings.json"),
+            "--disable-slash-commands", "--thinking-display", "summarized",
+            "--output-format", "stream-json", "--verbose"]
 
 
 def a_model(a: Artist) -> str:

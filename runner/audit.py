@@ -106,6 +106,8 @@ def check_line(d: dict, messages: set[str], config_dir: Path) -> list[str]:
                 if text.startswith("[Image: source: "):  # Claude Code's note of where it saved an image
                     if not text.startswith(f"[Image: source: {config_dir}/"):
                         hits.append(f"image note outside the artist's config: {text[:200]!r}")
+                elif text.startswith("Your response above was stopped by a safety classifier"):
+                    hits.append(f"a safety classifier's notice reached the model: {text[:200]!r}")
                 elif text.strip() and text not in messages:
                     hits.append(f"text the runner didn't send: {text[:300]!r}")
             elif x.get("type") == "tool_result":

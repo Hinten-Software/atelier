@@ -143,3 +143,12 @@ claude-paint's (500 chunks, three sittings) would be roughly USD 20 to 40.
   the new build identical to the old build's replay (`check: ok`).
 - Still open, first tasks of M1 (requirements RUN-16): production login (`setup-token`), a
   forced usage limit, a 5-minute chunk, `read` of a folder, the pinned Claude Code binary.
+- Probe suite (runner/probes.py) with the production flags, settings and environment, on the
+  spike login: **context ok, tools ok, long ok**. The context probe's reply lists only the
+  accepted signals (requirements 3.2): system text, identity line, the eight easel tools,
+  harness boilerplate; no email, no account name, no counters.
+- **A safety classifier can inject text.** The first long-chunk probe used a bare counting loop;
+  a classifier stopped the model's response and Claude Code added a user turn: "Your response
+  above was stopped by a safety classifier ... Do not produce that content again, even reworded."
+  The audit caught it as text the runner didn't send. It is now named as its own kind of hit
+  (stops the sitting; the operator decides, NFR-10). The probe now uses a real painting pass.
