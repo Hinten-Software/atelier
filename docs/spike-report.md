@@ -36,8 +36,8 @@ claude -p <message> --session-id <uuid> --model claude-opus-5-5 --effort high
   --disable-slash-commands
   --thinking-display summarized
   --output-format stream-json --verbose
-env: PATH=/usr/bin:/bin HOME USER LANG CLAUDE_CONFIG_DIR=~/.atelier/claude
-     CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 DISABLE_AUTOUPDATER=1
+env: PATH=/usr/bin:/bin HOME USER LANG CLAUDE_CONFIG_DIR=<a path without the account name>
+     CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 DISABLE_AUTOUPDATER=1 CLAUDE_CODE_SILENT_TURN_REMINDER=0
 ```
 
 - **Login.** The atelier's Claude Code has its own config dir, logged in to the Max subscription
@@ -66,13 +66,13 @@ still receives:
 | **token counter** | `<total_tokens>15000000 tokens left</total_tokens>` | **removed**: `totalTokensReminder: "off"` in settings. A budget signal is exactly what claude-paint found makes painters rush (RUN-8) |
 | **account email** | "the user's email address is <the account's email> ..." | **removed**, see below |
 | **"say what you're doing" nudge** | "The user hasn't heard from you in a while — say in a few words what you're doing, then continue." (10 times in one 12-minute sitting) | **removed**: `CLAUDE_CODE_SILENT_TURN_REMINDER=0` (tested: 0 nudges off, 2 on, in identical sessions). It asked the painter to narrate to "the user": the performative push principle 3.6 rules out |
-| **image paths** | each look comes with a text line `[Image: source: /Users/<account>/.atelier/claude/projects/...]` naming where Claude Code saved the image | **to fix**: the atelier's Claude config moves to a path without the account name (`/Users/Shared/atelier/claude`); needs a fresh login there (the owner) |
+| **image paths** | each look comes with a text line `[Image: source: /Users/<account>/.atelier/claude/projects/...]` naming where Claude Code saved the image | **fixed**: the Claude config moved to a path without the account name (fresh login there); verified, 0 occurrences |
 
 **The email.** Claude Code adds the account's email as "the user's email" whenever its stored
 profile (`.claude.json`, `oauthAccount`) has one. The runner removes email and names from the
 atelier's own config before each launch, and the probe then shows an empty session context.
 But Claude Code refetches the profile during a session and writes the email back, so the
-removal is not trusted: every transcript is audited after every sitting (NFR-9), and a hit stops
+removal is not trusted: every transcript is audited (NFR-10), and a hit stops
 the atelier. Recommended for production: log the atelier in with `claude setup-token` (the
 documented route for headless use), which may carry no profile at all; to be verified.
 
@@ -135,3 +135,11 @@ claude-paint's (500 chunks, three sittings) would be roughly USD 20 to 40.
   its defaults are tuned for coding with a person present.
 - **The painter revised by painting over**, as claude-paint's guide intends, and named its own
   failures in its reply without being asked.
+
+## 8. After the independent review (2026-10-03)
+
+- The painter's easel binary held the account's home path 69 times (Rust source paths). Fixed:
+  `tools/build-engine.sh` remaps paths and fails if any remain; the spike painting replays from
+  the new build identical to the old build's replay (`check: ok`).
+- Still open, first tasks of M1 (requirements RUN-16): production login (`setup-token`), a
+  forced usage limit, a 5-minute chunk, `read` of a folder, the pinned Claude Code binary.
