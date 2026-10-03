@@ -10,7 +10,7 @@ Prints each hit with its file and line, and exits 1 if there is any hit not on t
 A hit is not automatically wrong: "look at your painting" is the artist observing its own work.
 Allowed hits are listed in ALLOW with the reason, so every exception is a decision on record.
 """
-import re, sys
+import os, re, sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -27,6 +27,10 @@ WORDS = [
     r"experiment", r"stud(y|ies) (of|on) (you|painters|models)", r"\bClaude\b", r"Anthropic", r"\bAI\b", r"model",
     r"round \d+", r"stillwet", r"claude-paint", r"Friedrich",
 ]
+# the owner's names, account names and addresses: kept outside the public repository, one regex a line
+PRIVATE = Path(os.environ.get("ATELIER_PRIVATE_WORDS", Path.home() / ".atelier/private-words.txt"))
+if PRIVATE.exists():
+    WORDS += [w.strip() for w in PRIVATE.read_text().splitlines() if w.strip() and not w.startswith("#")]
 PATTERN = re.compile(r"\b(" + "|".join(WORDS) + r")", re.I)
 
 # (file suffix, line substring) -> why it's fine

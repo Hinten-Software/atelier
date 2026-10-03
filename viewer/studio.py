@@ -466,7 +466,10 @@ def title_of(say):
         m = TITLE_LINE.fullmatch(para.strip("\n"))
         if m:
             return m.group(2).strip()
-    return None
+    # the atelier's painters often name it in their first sentence: "... and called it **Estuary, Last Light**."
+    first = next((p for p in re.split(r"\n\s*\n", say or "") if p.strip()), "")
+    m = re.search(r"\b(?:called|titled|named|call|title)\s+(?:it\s+)?\*\*([^*\n]{2,80})\*\*", first)
+    return m.group(1).strip() if m else None
 
 
 REFERENCE = object()  # in a glance's calls: a read of a reference picture
@@ -497,6 +500,9 @@ def _glance_file(path):
                     continue
                 if d.get("type") == "session":
                     g["cwd"] = d.get("cwd", "")
+                if d.get("type") in ("assistant", "user") and "sessionId" in d:
+                    _glance_claude_code(g, d, at)  # a Claude Code transcript (the atelier's artists)
+                    continue
                 m = (d.get("message") or {}) if d.get("type") == "message" else {}
                 content = m.get("content")
                 if not isinstance(content, list):
@@ -523,6 +529,41 @@ def _glance_file(path):
         return g
 
 
+def _cc_images(d):
+    """The image blocks of a Claude Code user line's tool results, in order, each with its tool_use_id."""
+    out = []
+    for x in (d.get("message") or {}).get("content") or []:
+        if isinstance(x, dict) and x.get("type") == "tool_result" and isinstance(x.get("content"), list):
+            out += [(x.get("tool_use_id"), p) for p in x["content"] if p.get("type") == "image" and _cc_image(p)]
+    return out
+
+
+def _glance_claude_code(g, d, at):
+    """_glance_file for one line of a Claude Code transcript."""
+    if not g["cwd"] and d.get("cwd"):
+        g["cwd"] = d["cwd"]
+    content = (d.get("message") or {}).get("content")
+    if not isinstance(content, list):
+        return
+    if d["type"] == "assistant":
+        for x in content:
+            if x.get("type") == "text" and x.get("text", "").strip():
+                g["say"] = x["text"]
+            elif x.get("type") == "tool_use":
+                m = EASEL_TOOL.match(x.get("name", ""))
+                name, a = (m.group(1) if m else x.get("name")), x.get("input") or {}
+                g["calls"][x.get("id")] = (look_text(a) if name == "look" else REFERENCE
+                                           if name == "read" and in_reference(a.get("path", ""), g["cwd"]) else None)
+        return
+    for k, (call, _) in enumerate(_cc_images(d)):
+        look = g["calls"].get(call)
+        if look is not REFERENCE:
+            g["last"] = (g["n"], at, k)
+            if is_whole(look):
+                g["whole"] = g["last"]
+        g["n"] += 1
+
+
 def glance(files):
     """A painter's picture and title for the picker: {"look": its newest whole look (or, before the look tool, the
     last picture it saw; never a reference picture; None if it has seen none of its own) as a stream image index,
@@ -546,6 +587,9 @@ def glance_image(src):
     with open(path, "rb") as fh:
         fh.seek(at)
         d = json.loads(fh.readline())
+    if d.get("type") == "user" and "sessionId" in d:  # Claude Code
+        imgs = [_cc_image(p) for _, p in _cc_images(d)]
+        return (imgs[k][0], base64.b64decode(imgs[k][1])) if k < len(imgs) else None
     imgs = [x for x in d["message"]["content"] if x.get("type") == "image" and x.get("data")]
     return (imgs[k].get("mimeType", "image/jpeg"), base64.b64decode(imgs[k]["data"])) if k < len(imgs) else None
 

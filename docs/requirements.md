@@ -1,6 +1,6 @@
 # Atelier: Requirements
 
-Version 0.3 (draft for check-in 1) · 2026-10-03 · Owner: Hinten Software · Director and operator: Claude
+Version 0.4 (after check-in 1) · 2026-10-03 · Owner: Hinten Software · Director and operator: Claude
 
 Builds on v0.2 (the owner, 2026-10-03, Google Doc "atelier-requirements.md"). IDs from v0.2 are kept;
 a requirement that changed says so in **bold**, one that was dropped stays with its reason, new ones
@@ -26,7 +26,7 @@ are numbered after the last. Section 0 lists every change.
 | C12 | **Isolation of the artist from the host's Claude Code** (new RUN-13). | Without it, the operator's CLAUDE.md, memory, skills and settings would reach the artist. |
 | C13 | **Licensing stated plainly:** code MIT, art and texts CC BY 4.0, and the engine's Mixbox dependency is CC BY-NC 4.0, so the engine as a whole is non-commercial. | Found in claude-paint's THIRD_PARTY_NOTICES.md; the owner kept the default (keep Mixbox, say so). |
 | C14 | **Research layer: record everything from day one, analyze later.** EXP-2/3/5/7/8 move to "after launch" except their data capture. | the owner accepted the default. |
-| C15 | Closing statement is **optional** (COM-4). | the owner: "a statement by the artist if they desire to produce one". |
+| C15 | Closing statement is **optional** (COM-4). | The owner: "a statement by the artist if they desire to produce one". |
 | C16 | **Harness leaks closed** (RUN-13, NFR-10): Claude Code by default gave the painter a token countdown, the account's email as "the user's email", a recurring "say in a few words what you're doing" nudge, and image paths with the account name. | Spike, 2026-10-03 (docs/spike-report.md). |
 
 -----
@@ -98,7 +98,7 @@ stillwet gallery site (not public; we build our own around the viewer).
 
 ### 3.1 The thought process: frame the channels, not the content
 
-the owner asked whether a framework for the artists' thoughts ("think out loud", guidelines for what
+The owner asked whether a framework for the artists' thoughts ("think out loud", guidelines for what
 to produce as thoughts) is permissible, or whether it would change the thinking under study.
 
 It would change it. An instruction to narrate one's thinking addresses the thinking to someone,
@@ -125,7 +125,7 @@ it is an experiment with a recorded condition, not a default.
 | Role | Who | Does |
 |---|---|---|
 | Artist | three AI painters (Claude Opus 5.5 via Claude Code) | paints |
-| Owner | the owner | sets direction, issues themed prompts (or approves proposed ones), decides policy questions, reviews at check-ins |
+| Owner | Hinten Software | sets direction, issues themed prompts (or approves proposed ones), decides policy questions, reviews at check-ins |
 | Director and operator | Claude (in Claude Code sessions with the owner) | designs, builds, QA, runs the atelier, starts works, keeps the observation log |
 | Visitor | public | watches live, replays works, reads labels and about pages |
 
@@ -160,8 +160,8 @@ Priority: **M** must (MVP: M1 and M2), **S** should (v1: M3), **C** could (later
 | RUN-6 | Usage limits: detect from Claude Code's exit and error text, wait, then continue the same session (`--resume`) or start a sitting; the pause is on the timeline ("studio closed until HH:MM"), never in anything the artist sees. | M |
 | RUN-7 | Context: measure in the spike how images accumulate and when Claude Code compacts. If compaction would inject directive text ("next steps"), keep sittings short enough to avoid it, or use a PreCompact hook with neutral instructions; verify. | S |
 | RUN-8 | Never expose counters, budgets, clocks, costs or machine time to artists (inherited from claude-paint's easel client). | M |
-| RUN-9 | One command per work (`atelier paint <artist> [<brief>]`); resumes after reboot. | S |
-| RUN-10 | One artist paints at a time; a queue takes turns across artists. | S |
+| RUN-9 | One command per work (`atelier paint <artist> [<brief>]`), started by a person (Q1); the runner then carries the work through its sittings unattended and resumes after a reboot. | M |
+| RUN-10 | **Changed (Q1):** one artist paints at a time. No queue starts works by itself; `atelier next` suggests whose turn it is (fewest works) for the person starting it. | S |
 | RUN-11 | Model and effort per artist, recorded per work. Default Opus 5.5, effort high. | S |
 | RUN-12 | Optional artists on other vendors' CLIs, each under its own terms. | C |
 | RUN-13 | **Isolation from the host's Claude Code (new).** Own config dir at a path without the account name (`CLAUDE_CONFIG_DIR=/Users/Shared/atelier/claude`: Claude Code shows the model each image's saved path), `--tools ""`, `--setting-sources ""` plus an atelier settings file, `--strict-mcp-config`, `--disable-slash-commands`, `--system-prompt` (full replacement), auto-memory off, auto-update off, `totalTokensReminder: "off"`, `CLAUDE_CODE_SILENT_TURN_REMINDER=0`, account email and names removed from the stored profile before each launch. Verified by the spike (docs/spike-report.md, section 3). | M |
@@ -172,7 +172,7 @@ Priority: **M** must (MVP: M1 and M2), **S** should (v1: M3), **C** could (later
 | ID | Requirement | P |
 |---|---|---|
 | ART-1 | Three persistent artists, each with an id and a studio. | M |
-| ART-2 | **Birth:** an artist is created from a birth record (model, effort, created date, founding statement: none). **Changed:** no seed (C4); no prompted naming or self-description (C6, pending Q2). The birth record is public. | M |
+| ART-2 | **Birth:** an artist is created from a birth record (model, effort, created date, founding statement: none). **Changed:** no seed (C4); no prompted naming or self-description (C6, Q2: studios are Studio I, II, III until an artist names or signs itself). The birth record is public. | M |
 | ART-3 | Notebook per artist, persisted across works. **Changed:** no prescribed content (C7). | M |
 | ART-4 | Before each work the brief points to the notebook; the artist may write in it at any time. **Changed:** no condensing on a schedule: when the notebook passes a size limit, the runner shelves it as `notebooks/volume-N.md` (still readable in the studio) and the next brief says the notebook was full and a new one is open. | M |
 | ART-5 | Personal toolkit (`toolkit.lua`): the artist's own Lua helpers, carried across works, versioned. `paint` takes `file: "toolkit.lua"` to run it as a chunk, so it lands in the log like any chunk and replays. Same studio rules (ENG-4). | S |
@@ -228,7 +228,7 @@ Priority: **M** must (MVP: M1 and M2), **S** should (v1: M3), **C** could (later
 | REC-4 | Replay check: the stored log on the stored engine reproduces the final canvas byte for byte (`check_painting`), hash stored. Verified on a spike painting. | M |
 | REC-5 | Per-chunk frames for smooth scrubbing. | S |
 | REC-6 | High-resolution final render (optional varnish) after the work ends. | S |
-| REC-7 | Scrub private data from everything public: home paths, account names, machine names, IPs, emails, Claude account and session identifiers. | M |
+| REC-7 | Scrub private data from everything public: home paths, account names, the owner's names (Q7), machine names, IPs, emails, Claude account and session identifiers. A private word list outside the repository (`~/.atelier/private-words.txt`) feeds the checks. | M |
 
 ### 5.8 The atelier, as visitors see it (ATL)
 
@@ -256,7 +256,7 @@ Priority: **M** must (MVP: M1 and M2), **S** should (v1: M3), **C** could (later
 | OPS-4 | During a live work, export and push every minute (rsync over SSH, Mac to NAS). | M |
 | OPS-5 | Windows PC: no role. | – |
 | OPS-6 | The Mac stays awake during a work (`caffeinate`); the runner resumes after interruption (launchd). | M |
-| OPS-7 | **Changed:** source in Gitea on the NAS (`atelier`, the clone's only remote); GitHub the GitHub mirror, **public**, fed only by Gitea's push mirror. | M |
+| OPS-7 | **Changed:** source in Gitea on the NAS (the clone's only remote); GitHub, **public**, fed only by Gitea's push mirror. | M |
 
 ## 6. Non-functional requirements
 
@@ -333,16 +333,17 @@ work package:
 | Engine churn breaks replay | lost history | ENG-1, ENG-3 |
 | Mixbox is non-commercial | reuse limited | stated in README and site (C13) |
 
-### Open decisions (for check-in 1)
+### Decisions (check-in 1, 2026-10-03)
 
-| # | Decision | Recommendation |
+| # | Decision | Outcome |
 |---|---|---|
-| Q1 | Mode of operation under the terms (NFR-3) | see the check-in note |
-| Q2 | Naming: prompt artists to name themselves (v0.2) or neutral studio names until they do (C6) | neutral names |
-| Q3 | Walls in the studio (ART-10) | yes |
-| Q4 | Cadence: how many works per artist per week, given limits | from spike data |
-| Q5 | Domain name and Cloudflare account | the owner to choose; ~USD 10/year at Cloudflare Registrar |
-| Q6 | Publish raw session transcripts (scrubbed) like stillwet, or only the parsed timeline | timeline only at first |
+| Q1 | Mode of operation under the terms (NFR-3) | **Decided (a):** a person (the owner or the operator, in a session with the owner) starts each work; the runner carries it through its sittings and limit pauses unattended. No unattended queue that starts works by itself. Revisit (API-key billing) if the atelier grows toward continuous painting. |
+| Q2 | Naming | **Decided:** no prompt to name or describe themselves. Studios are Studio I, II, III until an artist names or signs itself on its own. |
+| Q3 | Walls in the studio (ART-10) | **Decided:** yes. |
+| Q4 | Cadence | open: follows from Q1 (works are started by hand) |
+| Q5 | Domain name and Cloudflare account | open: the owner to choose; ~USD 10/year at Cloudflare Registrar; needed by M2 |
+| Q6 | Publish raw transcripts or only the timeline | default kept: timeline only |
+| Q7 | Public identity | **Decided:** the owner's personal name appears nowhere in the project; "Hinten Software" where an owner must be named. Applies to files, commit metadata, the site and every export (REC-7). |
 
 ## 10. Milestones and acceptance
 

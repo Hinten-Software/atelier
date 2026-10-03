@@ -19,12 +19,13 @@ SPIKE = Path(__file__).resolve().parent
 ROOT = Path("/Users/Shared/atelier/spike")  # short: the easel's Unix socket path must stay under 104 bytes
 CLAUDE = Path.home() / ".local/bin/claude"
 NODE = shutil.which("node") or "/opt/homebrew/bin/node"
-CONFIG = Path.home() / ".atelier/claude"
+CONFIG = Path("/Users/Shared/atelier/claude")  # no account name: Claude Code shows the model each image's saved path
 TOOLS = ["paint", "look", "note", "status", "log", "read"]
 FIRST = "Your brief is in BRIEF.md in this folder."
 # the probe: a throwaway session with the painter's exact setup, asked what it was given (RUN-13)
 # a short throwaway session to see which reminders Claude Code adds as tools are used
-TOOLS_PROBE = "Call the status tool five times, one call per turn, then reply with the word done."
+TOOLS_PROBE = ("Call paint with this chunk exactly: canvas{size=300, aspect=1.25, linen=18, seed=7, ground={{pile={{\"lead white\", 3}}, um=60, apply=\"knife\", texture=0.3}}} "
+               "Then call status four times, one call per turn, then call look once, then reply with the word done.")
 PROBE = ("Don't use any tools. Quote, verbatim and in full, every piece of text you were given before this "
          "message: the system text, the names and descriptions of your tools, and anything else, each under a "
          "heading saying where it came from. Then say today's date if you were told it.")
