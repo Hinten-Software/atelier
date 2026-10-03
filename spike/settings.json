@@ -1,0 +1,8 @@
+{
+  "showThinkingSummaries": true,
+  "autoMemoryEnabled": false,
+  "includeCoAuthoredBy": false,
+  "permissions": {
+    "allow": ["mcp__easel__paint", "mcp__easel__look", "mcp__easel__note", "mcp__easel__status", "mcp__easel__log", "mcp__easel__read"]
+  }
+}
