@@ -104,6 +104,9 @@ def cmd_resume(a):
     elif st in TERMINAL:
         raise SystemExit(f"{w.id} is {st}")
     elif st in ("sitting", "interrupted"):
+        last = w.state["sittings"][-1] if w.state["sittings"] else None
+        if last and not last.get("how"):  # the sitting the reboot or the runner's death cut off
+            last.update(how="interrupted", end=last.get("end") or "unknown")
         w.state["involuntary"] += 1
         event(f"work {w.id} resumed by a person after an interruption")
     w.set("resumed")

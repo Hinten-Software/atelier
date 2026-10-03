@@ -121,6 +121,7 @@ def main():
         (DATA / "run/current").write_text("i-003")
         s = state("i-003")
         s["state"] = "sitting"
+        s["sittings"][-1].update(how=None, end=None)  # as a reboot leaves it: the sitting never ended
         (DATA / "run/i-003/state.json").write_text(json.dumps(s))
         st = atelier("status")
         check("status names the interruption", "interrupted" in st, st)
@@ -128,6 +129,7 @@ def main():
         atelier("resume")
         s = wait("i-003")
         check("resumed work ends", s["state"] in ("finished", "not-finished"), s["state"])
+        check("the cut-off sitting is recorded as interrupted", s["sittings"][0]["how"] == "interrupted", s["sittings"][0])
     finally:
         if os.environ.get("KEEP"):
             print(f"kept {DATA} and {roots}")
