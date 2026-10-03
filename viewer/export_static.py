@@ -110,10 +110,16 @@ def write(path, data):
     return True
 
 
+PRIVATE = []  # the atelier's private words (--private-words): no exported text may contain one (REC-7)
+
+
 def text(path, data):
     body = S.scrub(data if isinstance(data, bytes) else data.encode())
     if S.HOME.encode() in body or re.search(re.escape(S.USER.encode()), body, re.I):
         sys.exit(f"export: {path} still names the home folder or account after scrubbing")
+    for w in PRIVATE:
+        if re.search(w.encode(), body, re.I):
+            sys.exit(f"export: {path} contains a private word ({w}); nothing written past it")
     write(path, body)
 
 
@@ -121,7 +127,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
     ap.add_argument("--skip", nargs="*", default=[], help="painter folders to leave out (test runs)")
+    ap.add_argument("--sessions", help="where the session logs are (the atelier: its session farm, runner/export.py)")
+    ap.add_argument("--private-words", help="a file of words (regexes) no exported file may contain (the atelier, REC-7)")
     a = ap.parse_args()
+    if a.sessions:
+        S.SESSIONS = os.path.abspath(a.sessions)
+    if a.private_words and os.path.isfile(a.private_words):
+        with open(a.private_words) as fh:
+            PRIVATE.extend(w.strip() for w in fh if w.strip() and not w.startswith("#"))
     S.PUBLIC = True
     out = os.path.abspath(a.out)
     before = owned(out)
@@ -183,8 +196,7 @@ def main():
         page = fh.read().replace(b'<label id="allwrap"', b'<label id="allwrap" hidden')
     page = page.replace(b"<script>\nconst $ =", b"<script>window.STUDIO_STATIC = true;</script>\n<script>\nconst $ =", 1)
     assert b"STUDIO_STATIC = true" in page, "index.html changed: the static switch didn't go in"
-    # the gallery's page-view counter (Plausible, served from stillwet.art/v/), on the public copy only
-    page = page.replace(b"</head>", PLAUSIBLE + b"</head>", 1)
+    # (claude-paint's public copy adds the stillwet gallery's page-view counter here; the atelier has none: ATL-12)
     text(os.path.join(out, "index.html"), page)
     with open(os.path.join(S.HERE, "stream.css"), "rb") as fh:  # the livestream's layout, for ?stream=1
         text(os.path.join(out, "stream.css"), fh.read())

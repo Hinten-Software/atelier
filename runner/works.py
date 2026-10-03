@@ -124,6 +124,14 @@ class Work:
         stopped for the operator."""
         (self.run / "runner.pid").write_text(str(os.getpid()))
         subprocess.Popen(["/usr/bin/caffeinate", "-i", "-w", str(os.getpid())])  # OPS-6
+        exporter = Exporter()
+        exporter.start()
+        try:
+            self._loop()
+        finally:
+            exporter.stop()
+
+    def _loop(self):
         while self.state["state"] not in TERMINAL | {"stopped"}:
             st = self.state["state"]
             if st in ("prepared", "between", "interrupted", "resumed"):
@@ -273,6 +281,33 @@ class Work:
             subprocess.run([str(sync)], capture_output=True)
         event(f"work {self.id} {'finished' if finished else 'ended unfinished'}: {title or 'untitled'} ({verdict})")
         self.set("finished" if finished else "not-finished")
+
+
+EXPORT_EVERY = 120  # seconds (OPS-4, REC-3)
+
+
+def export_now():
+    """The public export (runner/export.py), with Pillow for the web copies of looks."""
+    r = subprocess.run(["/opt/homebrew/bin/uv", "run", "-q", "--with", "pillow", "python3", str(REPO / "runner" / "export.py")],
+                       capture_output=True, text=True, env=os.environ | {"ATELIER_DATA": str(DATA)})
+    if r.returncode:
+        log(f"export failed ({r.returncode}): {(r.stderr or r.stdout).strip()[:500]}")
+
+
+class Exporter(threading.Thread):
+    """Exports while a work is open, and once more when the runner stops."""
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self._stop = threading.Event()
+
+    def run(self):
+        while not self._stop.wait(EXPORT_EVERY):
+            export_now()
+
+    def stop(self):
+        self._stop.set()
+        export_now()
 
 
 class Watcher(threading.Thread):

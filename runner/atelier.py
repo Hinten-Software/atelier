@@ -8,6 +8,8 @@
     atelier resume [--clear REASON]            continue an interrupted work (a person, after a reboot or a crash);
                                                --clear: continue a work the white-room audit stopped (logged)
     atelier next                               whose turn it is (fewest works)
+    atelier export                             export the site now (the runner does every 2 minutes during a work)
+    atelier serve [--host H] [--port P]        serve the export on the LAN
     atelier run <work>                         (internal) the runner itself
 """
 import argparse
@@ -108,6 +110,21 @@ def cmd_resume(a):
     detach(w)
 
 
+def cmd_serve(a):
+    """The export, served on this machine's network (M1: the live view on the LAN)."""
+    import functools
+    import http.server
+    site = DATA / "site"
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(site))
+    print(f"serving {site} on http://{a.host}:{a.port}/studio/")
+    http.server.ThreadingHTTPServer((a.host, a.port), handler).serve_forever()
+
+
+def cmd_export(a):
+    from works import export_now
+    export_now()
+
+
 def cmd_next(a):
     reg = registry()
     if not reg:
@@ -131,6 +148,10 @@ def main():
     rs = sub.add_parser("resume")
     rs.add_argument("--clear")
     sub.add_parser("next")
+    sv = sub.add_parser("serve")
+    sv.add_argument("--host", default="0.0.0.0")
+    sv.add_argument("--port", type=int, default=8800)
+    sub.add_parser("export")
     a = p.parse_args()
     DATA.mkdir(parents=True, exist_ok=True)
     DATA.chmod(0o700)
