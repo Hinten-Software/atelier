@@ -1,0 +1,17 @@
+{
+  "name": "easel-mcp",
+  "version": "1.0.0",
+  "description": "claude-paint easel served as an MCP server",
+  "scripts": {
+    "start": "node src/server.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "type": "module",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.0",
+    "zod": "^4.6.5"
+  },
+  "private": true
+}

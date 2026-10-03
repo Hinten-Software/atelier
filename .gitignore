@@ -1,0 +1,6 @@
+target/
+node_modules/
+.DS_Store
+# runtime data never lives in the repo
+/data/
+*.local.*
