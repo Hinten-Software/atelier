@@ -413,7 +413,8 @@ def _parse_claude_code(c, d, ts):
         if isinstance(parts, str):
             parts = [{"type": "text", "text": parts}]
         parts = parts or []
-        txt = _text(parts)
+        # Claude Code's note of where it saved an image names its config folder and the session: not the painter's
+        txt = "\n".join(l for l in _text(parts).split("\n") if not l.startswith("[Image: source: "))
         if parent is not None and (txt or x.get("is_error")):
             if txt:
                 c["events"][parent]["out"] = txt[-1500:]

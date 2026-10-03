@@ -78,7 +78,7 @@ def scan(site: Path) -> list[str]:
                 hits.append(f"{f.relative_to(site)}: {h}")
             for rx, what in ((UUID_RE, "a session id"), (IP_RE, "a local IP")):
                 for m in rx.finditer(text):
-                    if m.group(0) != CANARY:
+                    if m.group(0) != CANARY and not text.startswith(".png", m.end()):  # a look's file name
                         hits.append(f"{f.relative_to(site)}: {what} {m.group(0)!r}")
                         break
     return hits
