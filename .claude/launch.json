@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "viewer",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["viewer/studio.py", "--sessions", "~/.atelier/claude/projects", "--port", "8765"],
+      "port": 8765
+    }
+  ]
+}

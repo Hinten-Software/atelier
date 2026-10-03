@@ -196,19 +196,21 @@ def in_reference(path, cwd):
     return len(parts) > 1 and parts[0].lower() == "reference"
 
 
-PAINTER = re.compile(r"^(paint-studio-[0-9a-f]+|paint-r\d+-p\d+|claude-paint-r\d+-(arm\d|tree\d|astra|fable|flash|p\d))$")
+PAINTER = re.compile(r"^(studio-[0-9a-f]+|paint-studio-[0-9a-f]+|paint-r\d+-p\d+|claude-paint-r\d+-(arm\d|tree\d|astra|fable|flash|p\d))$")
 
 
 def short(d):
     """A session folder's short name: --Users-<you>-src-a-paint-studio-cfa19c-- -> paint-studio-cfa19c."""
-    return d.strip("-").split("-src-a-")[-1]
+    d = d.strip("-")
+    m = re.search(r"-atelier-(?:[a-z]+-)*?(studio-[0-9a-f]+)$", d)  # the atelier's studios: /Users/Shared/atelier/.../studio-<hex>
+    return m.group(1) if m else d.split("-src-a-")[-1]
 
 
 def list_sessions():
     """One entry per painter folder (its sittings stitched: {"p": short name}) and, for
     everything else, one per session file ({"s": path}); newest activity first."""
     files = {}
-    for f in glob.glob(os.path.join(SESSIONS, "*paint*", "*.jsonl")):
+    for f in glob.glob(os.path.join(SESSIONS, "*[ps][at][iu]*", "*.jsonl")):
         files.setdefault(os.path.basename(os.path.dirname(f)), []).append(f)
     out = []
     for d, fs in files.items():
