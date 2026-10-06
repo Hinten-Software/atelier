@@ -59,3 +59,13 @@ any change is an atelier event (history.md).
   folder. Fix the cause (it is ours, not the artist's), log it, then either
   `atelier resume --clear "what was found and fixed"` (the work stays contaminated: not hung, not
   exported) or leave it. The artist's notebook edits from that sitting are already rolled back.
+
+## Later (noted 2026-10-06)
+
+- **Cache Rule for pages and data** (Cloudflare): HTML and JSON are "dynamic" by default, so every page view
+  reaches the NAS. One Cache Rule ("eligible for cache", edge TTL from the origin's Cache-Control; /api/notes
+  excluded) would let the NAS serve each page about once per 5 minutes per data center.
+- **Traffic review**, after the first weeks: the NAS's outbound traffic (DSM Resource Monitor -> Network,
+  with history on), the home line's upload (router), Cloudflare's data transfer for notart.fyi and www only
+  (filter out screen.notart.fyi), and the cache hit rate. Expected: little; worth seeing.
+- **Optional WAF rule** against scanner noise (.env, wp-, .php paths), if the stats get too noisy.
