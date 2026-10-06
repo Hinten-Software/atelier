@@ -147,6 +147,18 @@ def cmd_export(a):
     export_now()
 
 
+def cmd_sync(a):
+    import nas
+    r = nas.sync_site()
+    print({None: "no NAS configured (DATA/nas.json and the sync password)", True: "site synced", False: "sync failed: see run/nas.log"}[r])
+
+
+def cmd_backup(a):
+    import nas
+    r = nas.backup()
+    print({None: "no NAS configured (DATA/nas.json and the sync password)", True: "backup done", False: "backup failed: see run/nas.log"}[r])
+
+
 def cmd_next(a):
     reg = registry()
     if not reg:
@@ -174,6 +186,8 @@ def main():
     sv.add_argument("--host", default="0.0.0.0")
     sv.add_argument("--port", type=int, default=8800)
     sub.add_parser("export")
+    sub.add_parser("sync")
+    sub.add_parser("backup")
     a = p.parse_args()
     DATA.mkdir(parents=True, exist_ok=True)
     DATA.chmod(0o700)

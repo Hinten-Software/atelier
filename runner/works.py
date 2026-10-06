@@ -19,6 +19,7 @@ from pathlib import Path
 
 import audit
 import budget
+import nas
 from config import (CHECK_PAINTING, CLAUDE, CLAUDE_VERSION, CONTEXT_LIMIT, CRASH_WAITS, DATA, EASEL_MCP, LIMIT_GIVE_UP_S,
                     LIMIT_RETRY_S, MAX_INVOLUNTARY, NODE, PAINTER_EASEL, REPLAY_EASEL, REPO, TEXTS, TOOLS, artist_env)
 from studio import NOTEBOOK, TOOLKIT, Artist, hang, now, prepare, sha256
@@ -360,9 +361,11 @@ class Work:
         tmp.write_text(json.dumps(manifest, indent=1))
         tmp.replace(pkg / "manifest.json")
         CURRENT.unlink(missing_ok=True)
-        sync = DATA / "sync.sh"  # OPS-2: the NAS sync, once the NAS side exists
-        if sync.exists():
-            subprocess.run([str(sync)], capture_output=True)
+        export_now()  # the finished work on the site at once, then to the NAS with a backup (OPS-2, OPS-9)
+        try:
+            nas.backup()
+        except Exception as e:  # a missing NAS never keeps a work from finishing
+            nas.note(f"backup error: {e}")
         event(f"work {self.id} {'finished' if finished else 'ended unfinished'}: {title or 'untitled'} ({self.state.get('verdict')})")
         self.set("finished" if finished else "not-finished")
 
@@ -390,11 +393,16 @@ EXPORT_EVERY = 120  # seconds (OPS-4, REC-3)
 
 
 def export_now():
-    """The public export (runner/export.py), with Pillow for the web copies of looks."""
+    """The public export (runner/export.py), with Pillow for the web copies of looks; then the NAS's copy."""
     r = subprocess.run(["/opt/homebrew/bin/uv", "run", "-q", "--with", "pillow", "python3", str(REPO / "runner" / "export.py")],
                        capture_output=True, text=True, env=os.environ | {"ATELIER_DATA": str(DATA)})
     if r.returncode:
         log(f"export failed ({r.returncode}): {(r.stderr or r.stdout).strip()[:500]}")
+        return
+    try:
+        nas.sync_site()
+    except Exception as e:  # the NAS being away never stops a painting
+        nas.note(f"site sync error: {e}")
 
 
 class Exporter(threading.Thread):
