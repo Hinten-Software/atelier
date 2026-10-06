@@ -16,12 +16,13 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 RUNNER = HERE.parent / "atelier.py"
 DATA = Path(f"/Users/Shared/atelier/t{os.getpid() % 10000}")  # one folder per run: runs can't break each other (QA Q25)
-ENV = os.environ | {"ATELIER_DATA": str(DATA), "ATELIER_CLAUDE": str(HERE / "fake_claude.py"), "ATELIER_WAIT_SCALE": "0.005"}
+ENV = os.environ | {"ATELIER_DATA": str(DATA), "ATELIER_CLAUDE": str(HERE / "fake_claude.py"), "ATELIER_WAIT_SCALE": "0.005",
+                    "ATELIER_WINDOW": "always"}
 failed = 0
 
 
-def atelier(*args, ok=True):
-    r = subprocess.run([sys.executable, str(RUNNER), *args], env=ENV, capture_output=True, text=True)
+def atelier(*args, ok=True, env=None):
+    r = subprocess.run([sys.executable, str(RUNNER), *args], env=ENV | (env or {}), capture_output=True, text=True)
     if ok and r.returncode:
         raise SystemExit(f"atelier {' '.join(args)} failed:\n{r.stdout}{r.stderr}")
     return r.stdout + r.stderr
@@ -42,7 +43,8 @@ def wait(work, until=("finished", "not-finished", "stopped"), timeout=300):
     while time.time() - t0 < timeout:
         s = state(work)
         pid = DATA / "run" / work / "runner.pid"
-        if s["state"] in until and not (pid.exists() and _alive(json.loads(pid.read_text())["pid"])):
+        settled = s["state"] == "closed" or not (pid.exists() and _alive(json.loads(pid.read_text())["pid"]))
+        if s["state"] in until and settled:  # a closed studio's runner waits on purpose
             return s
         time.sleep(1)
     raise SystemExit(f"{work} stuck in {state(work)['state']}")
@@ -167,6 +169,41 @@ def main():
         time.sleep(3)
         check("resume stopped the orphan", not _alive(pgid))
         wait("i-006")
+
+        # 9. guardrails (the owner, 2026-10-05): window, daily budget, work ceiling
+        def stop_runner(work):
+            pidf = DATA / "run" / work / "runner.pid"
+            if pidf.exists():
+                os.kill(json.loads(pidf.read_text())["pid"], 9)
+            st = state(work)
+            if st["sittings"] and st["sittings"][-1].get("pgid") and _alive(st["sittings"][-1]["pgid"]):
+                os.killpg(st["sittings"][-1]["pgid"], 9)
+            (DATA / "run/current").unlink(missing_ok=True)
+        h = time.localtime().tm_hour
+        closed_window = f"{(h + 2) % 24}-{(h + 3) % 24}"
+        modes(root, "voluntary")
+        atelier("paint", "i", "--by", "operator", env={"ATELIER_WINDOW": closed_window})
+        s = wait("i-007", until=("closed",), timeout=60)
+        check("outside the window the studio stays closed", s["state"] == "closed" and not s["sittings"]
+              and s["closed_why"] == "window", s)
+        st = atelier("status", env={"ATELIER_WINDOW": closed_window})
+        check("status says closed and why", "studio closed until" in st and "(window)" in st, st)
+        stop_runner("i-007")
+
+        modes(root, "hang")
+        spent = sum(json.loads((DATA / "run/ledger.json").read_text())["days"].values())
+        atelier("paint", "i", "--by", "operator", env={"ATELIER_DAILY_USD": f"{spent + 0.02:.4f}"})
+        s = wait("i-008", until=("closed",), timeout=120)
+        check("today's budget ends the sitting at a safe point", s["sittings"] and s["sittings"][-1]["how"] == "closed (daily)", s["sittings"])
+        check("and it isn't counted as involuntary", s["involuntary"] == 0, s["involuntary"])
+        led = json.loads((DATA / "run/ledger.json").read_text())
+        check("the ledger booked the sitting", led["works"].get("i-008", 0) > 0, led)
+        stop_runner("i-008")
+
+        modes(root, "hang")
+        atelier("paint", "i", "--by", "operator", env={"ATELIER_WORK_USD": "0.02"})
+        s = wait("i-009", timeout=120)
+        check("the work ceiling ends the work", s["state"] == "not-finished" and "ceiling" in s.get("why", ""), s.get("why"))
 
         # 8. limit reset times (QA Q10)
         sys.path.insert(0, str(HERE.parent))

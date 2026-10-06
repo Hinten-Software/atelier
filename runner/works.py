@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import audit
+import budget
 from config import (CHECK_PAINTING, CLAUDE, CLAUDE_VERSION, CONTEXT_LIMIT, CRASH_WAITS, DATA, EASEL_MCP, LIMIT_GIVE_UP_S,
                     LIMIT_RETRY_S, MAX_INVOLUNTARY, NODE, PAINTER_EASEL, REPLAY_EASEL, REPO, TEXTS, TOOLS, artist_env)
 from studio import NOTEBOOK, TOOLKIT, Artist, hang, now, prepare, sha256
@@ -158,8 +159,15 @@ class Work:
     def _loop(self):
         while self.state["state"] not in TERMINAL | {"stopped"}:
             st = self.state["state"]
-            if st in ("prepared", "between", "interrupted", "resumed"):
-                self.sitting()
+            if st in ("prepared", "between", "interrupted", "resumed", "closed"):
+                why = budget.may_paint(self.id)
+                if why == "work":
+                    event(f"work {self.id} reached its ceiling of ${budget.WORK_USD:.0f}")
+                    self.set("not-finished", why="the work's budget ceiling")
+                elif why:
+                    self.close(why)
+                else:
+                    self.sitting()
             elif st == "limit-wait":
                 self.wait_limit()
             elif st == "crash-wait":
@@ -177,6 +185,16 @@ class Work:
     def sleep(self, seconds: float, why: str):
         log(f"{self.id}: {why}, {int(seconds)} s")
         time.sleep(seconds)
+
+    def close(self, why: str):
+        """The studio is closed (outside the painting window, or today's budget spent) until it may open again; the
+        work goes on in a fresh sitting then, like a painter's next working day. The artist never hears why."""
+        until = budget.next_open()
+        start = now()
+        self.set("closed", closed_until=until.strftime("%F %T"), closed_why=why)
+        self.sleep(max(1.0, (until - datetime.now()).total_seconds()), f"studio closed ({why}) until {until:%F %H:%M}")
+        self.state["pauses"].append({"from": start, "to": now(), "why": "painting window" if why == "window" else "daily budget"})
+        self.save()
 
     def wait_limit(self):
         since = self.state["limit_since"] or time.time()
@@ -225,11 +243,12 @@ class Work:
                                     stdout=out, stderr=err, start_new_session=True)
             rec["pgid"] = proc.pid
             self.save()
-            watch = Watcher(proc, transcript, set(msgs.values()), a.config, replies)
+            watch = Watcher(proc, transcript, set(msgs.values()), a.config, replies, self.id)
             watch.start()
             rc = proc.wait()
             watch.stop()
-        rec.update(end=now(), exit=rc, date_shown=watch.date_shown)
+        rec.update(end=now(), exit=rc, date_shown=watch.date_shown, usd=round(watch.meter.usd, 4))
+        budget.spend(watch.meter.usd, self.id)
         result = last_result(stream)
         text = ((result or {}).get("result") or "") + "\n" + errf.read_text(errors="replace")
         if watch.hits:
@@ -241,6 +260,12 @@ class Work:
             self.state["contaminated"] = True
             event(f"work {self.id} sitting {n} stopped by the white-room audit: {watch.hits[0]}")
             return self.set("stopped")
+        if watch.budget_end:  # the window closed or a budget ran out: planned, not counted as involuntary
+            rec["how"] = f"closed ({watch.budget_end})"
+            if watch.budget_end == "work":
+                event(f"work {self.id} reached its ceiling of ${budget.WORK_USD:.0f}")
+                return self.set("not-finished", why="the work's budget ceiling")
+            return self.set("closed", closed_why=watch.budget_end)
         if result and result.get("subtype") == "success" and not result.get("is_error") and not watch.context_end:
             rec["how"] = "voluntary"
             self.state["reply"] = result.get("result", "")
@@ -392,8 +417,9 @@ class Watcher(threading.Thread):
     """Tails a sitting's transcript: the live white-room audit (NFR-10) and the context threshold (RUN-7).
     It fails closed: a line it can't check, or a transcript that never appears, is a hit (QA Q6)."""
 
-    def __init__(self, proc, transcript: Path, messages: set[str], config: Path, replies: Path):
+    def __init__(self, proc, transcript: Path, messages: set[str], config: Path, replies: Path, work: str = ""):
         super().__init__(daemon=True)
+        self.work, self.meter, self.budget_end = work, budget.Meter(), None
         self.proc, self.path, self.messages, self.config = proc, transcript, messages, config
         self.replies = audit.Replies(replies)
         self.hits: list[str] = []
@@ -448,12 +474,15 @@ class Watcher(threading.Thread):
             if d.get("type") == "attachment" and (d.get("attachment") or {}).get("type") == "date":
                 m = re.search(r"\d{4}-\d{2}-\d{2}", "".join(x.get("content", "") for x in d.get("rendered") or []))
                 self.date_shown = m.group(0) if m else None
+            self.meter.add(d)
+            if self.work and not self.budget_end:
+                self.budget_end = budget.may_paint(self.work, self.meter.usd)
             usage = (d.get("message") or {}).get("usage") if d.get("type") == "assistant" else None
             if usage:
                 ctx = sum(usage.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
                 self._over = self._over or ctx > CONTEXT_LIMIT
-            if self._over and d.get("type") == "user":  # right after a tool result: nothing half done
-                self.context_end = True
+            if (self._over or self.budget_end) and d.get("type") == "user":  # right after a tool result: nothing half done
+                self.context_end = self._over and not self.budget_end
                 stop = True
         if stop:
             self.kill()

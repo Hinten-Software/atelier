@@ -42,6 +42,12 @@ Everything below runs on the painter host (the Mac). `atelier` is `python3 runne
 - The runner exports the site every 2 minutes; `atelier serve` shows it on the LAN at
   `http://<mac>:8800/studio/`.
 
+**Guardrails (requirements RUN-17):** USD 40 a day for all artists together, USD 60 per work,
+painting only 23:00-07:00. A work started in the day waits for the window; a sitting that reaches the
+end of the window or of today's budget ends at a safe point and the work goes on the next night. Change
+them with ATELIER_DAILY_USD, ATELIER_WORK_USD, ATELIER_WINDOW (e.g. "23-7") in the runner's environment;
+any change is an atelier event (history.md).
+
 **When something happens:**
 - *Usage limit:* nothing to do; the runner waits for the reset and starts a fresh sitting.
 - *Crash:* nothing to do; the runner retries after 90 s, 3, 5, 10, 15, 20 min, then stops the

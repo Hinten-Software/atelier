@@ -86,10 +86,15 @@ def cmd_status(a):
     for id in reg:
         art = Artist(id)
         print(f"{art.name} ({id}): {len(art.finished())} finished, {len(art.works())} works")
+    import budget
+    print(f"today: ${budget.spent_today():.2f} of ${budget.DAILY_USD:.0f}; painting window {budget.WINDOW} "
+          f"({'open' if budget.in_window() else 'closed'})")
     w = open_work()
     if not w:
         print("no open work")
         return
+    print(f"this work: ${budget.spent_on(w.id):.2f} of ${budget.WORK_USD:.0f}"
+          + (f"; studio closed until {w.state.get('closed_until')} ({w.state.get('closed_why')})" if w.state["state"] == "closed" else ""))
     st = w.state["state"]
     if st not in TERMINAL and st != "stopped" and not runner_alive(w):
         st = f"{st} -> interrupted (no runner: `atelier resume` continues it)"
