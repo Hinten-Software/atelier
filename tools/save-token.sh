@@ -9,6 +9,8 @@
 #                                               ~/atelier-data/secrets/tunnel.env for the NAS (deploy/nas)
 #   bash tools/save-token.sh tunnel FILE        read the token from FILE instead of the clipboard (for a
 #                                               token typed or pasted there); FILE is deleted after saving
+#   bash tools/save-token.sh turnstile [FILE]   the Turnstile widget's secret key (deploy/notes), starts 0x
+#   bash tools/save-token.sh cloudflare [FILE]  the Cloudflare API token that deploys the notes service
 #   bash tools/save-token.sh nas [FILE]         the NAS sync user's password (deploy/nas), saved as
 #                                               ~/atelier-data/secrets/nas-sync-password
 #
@@ -17,6 +19,10 @@
 set -euo pipefail
 if [ "${1:-}" = tunnel ]; then
   f="${ATELIER_TOKEN_FILE:-$HOME/atelier-data/secrets/tunnel.env}"; start=eyJ; re='eyJ[A-Za-z0-9_=+/-]{100,}'; pre=TUNNEL_TOKEN=
+elif [ "${1:-}" = turnstile ]; then
+  f="${ATELIER_TOKEN_FILE:-$HOME/atelier-data/secrets/turnstile-secret}"; start="0x"; re='0x[A-Za-z0-9_-]{20,}'; pre=
+elif [ "${1:-}" = cloudflare ]; then
+  f="${ATELIER_TOKEN_FILE:-$HOME/atelier-data/secrets/cloudflare-api-token}"; start="its first character"; re='[A-Za-z0-9_-]{30,}'; pre=
 elif [ "${1:-}" = nas ]; then
   f="${ATELIER_TOKEN_FILE:-$HOME/atelier-data/secrets/nas-sync-password}"; start="its first character"; re='[^[:space:]]{8,}'; pre=
 else

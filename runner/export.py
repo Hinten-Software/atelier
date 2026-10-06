@@ -28,7 +28,8 @@ FARM = DATA / "run" / "farm"
 ALLOWED = re.compile(r"^(studio/(index\.html|stream\.css|data/sessions\.json|data/w-[a-z]+-\d{3}/(events\.json|"
                      r"(img|t|v)/\d+\.(png|jpg|webp)|file/paintings/lua/painting\.lua|final\.png|final(-t)?\.jpg)))$|^data/works\.json$"
                      # the atelier's own pages (site/ in the repository)
-                     r"|^(index\.html|robots\.txt|(about|walls|work|how|studio-room)/index\.html|assets/atelier\.(css|js))$")
+                     r"|^(index\.html|robots\.txt|(about|walls|work|how|studio-room|notes)/index\.html|assets/atelier\.(css|js))$")
+NOTES_SETTINGS = DATA / "notes.json"  # {"sitekey": "<the Turnstile widget's public site key>"} (deploy/notes)
 PAGES = REPO / "site"
 FINAL_WEB = {"final.jpg": 1600, "final-t.jpg": 640}  # the walls' and the door's copies of a finished painting
 PUBLIC_MANIFEST = ("id", "studio", "number", "title", "mode", "theme", "start", "end", "model", "effort", "claude_code",
@@ -173,6 +174,10 @@ def main() -> int:
             dst = SITE_ / f.relative_to(PAGES)
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(f, dst)
+            if f.suffix == ".html" and NOTES_SETTINGS.exists():  # the bot check's public key, where a note can be left
+                key = json.loads(NOTES_SETTINGS.read_text()).get("sitekey", "")
+                if re.fullmatch(r"[0-9A-Za-z_-]{10,64}", key):
+                    dst.write_text(dst.read_text().replace("TURNSTILE_SITE_KEY", key))
     (SITE_ / "data").mkdir(exist_ok=True)
     (SITE_ / "data" / "works.json").write_text(json.dumps(works_json(works), indent=1))
     hits = scan(SITE_)
