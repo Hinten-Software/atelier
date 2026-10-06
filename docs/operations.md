@@ -68,4 +68,7 @@ any change is an atelier event (history.md).
 - **Traffic review**, after the first weeks: the NAS's outbound traffic (DSM Resource Monitor -> Network,
   with history on), the home line's upload (router), Cloudflare's data transfer for notart.fyi and www only
   (filter out screen.notart.fyi), and the cache hit rate. Expected: little; worth seeing.
+- **GitHub identity**: issues and comments always show the owner's personal username; rename it to something
+  neutral, or keep contact to email (3dcubesweeper@gmail.com) — owner to decide.
+- **Present the repository**: README for visitors, screenshots, a first release.
 - **Optional WAF rule** against scanner noise (.env, wp-, .php paths), if the stats get too noisy.
