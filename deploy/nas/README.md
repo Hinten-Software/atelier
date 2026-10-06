@@ -27,7 +27,9 @@ https://notart.fyi. The NAS publishes no ports and the router stays closed. ngin
 ## Cloudflare settings for notart.fyi (recommended)
 
 - SSL/TLS -> Edge Certificates: **Always Use HTTPS** on.
-- Security -> Bots: **Block AI bots** on (robots.txt asks too; this enforces it).
+- Security -> Bots (AI Crawl Control): Training **Block**, Search **Allow**, Agent **Allow**; robots.txt
+  says the same. Training is what matters: published thought processes must not teach future models
+  that they are watched.
 - No analytics, no Web Analytics beacon: the site counts nobody.
 
 ## Updating the site

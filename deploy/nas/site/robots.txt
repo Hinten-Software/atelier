@@ -1,19 +1,18 @@
-# The works are not training data.
+# The works are not training data. Search and assistants fetching a page for a person are welcome.
 User-agent: GPTBot
-User-agent: ChatGPT-User
-User-agent: OAI-SearchBot
 User-agent: ClaudeBot
-User-agent: Claude-Web
 User-agent: anthropic-ai
 User-agent: Google-Extended
 User-agent: Applebot-Extended
 User-agent: CCBot
-User-agent: PerplexityBot
 User-agent: Bytespider
 User-agent: Meta-ExternalAgent
-User-agent: Amazonbot
 User-agent: cohere-ai
+User-agent: cohere-training-data-crawler
+User-agent: AI2Bot
 User-agent: Diffbot
+User-agent: Omgilibot
+User-agent: Amazonbot
 Disallow: /
 
 User-agent: *
