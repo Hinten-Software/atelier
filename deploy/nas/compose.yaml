@@ -1,0 +1,23 @@
+# The atelier's public site on the NAS (Container Manager -> Project).
+# Nothing is published on the NAS's ports: visitors reach nginx only through the Cloudflare Tunnel,
+# which cloudflared opens outward. The tunnel token lives in tunnel.env, never in this file.
+name: atelier
+services:
+  web:
+    image: nginx:stable-alpine
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/var/cache/nginx, /var/run, /tmp]
+    volumes:
+      - ./site:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks: [atelier]
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    env_file: tunnel.env
+    depends_on: [web]
+    networks: [atelier]
+networks:
+  atelier: {}
