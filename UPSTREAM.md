@@ -41,3 +41,7 @@ Engine changes are atelier events (requirements ENG-5), listed here with their d
   - Measured on i-001 replayed at 4800: the same picture (mean difference 1.3 of 255), finer edges and
     texture, about 3.5 times the compute.
   - `materials/easel_guide.md`: "A crop shows the canvas at its full detail" now reads "close up".
+- 2026-10-06 time limits scaled with the width (found by the long probe at 4800 px: a chunk that fit at
+  2400 outran the tool's wait): `session.rs` `chunk_limit_for` (10 minutes at 2400, 40 at 4800);
+  `easel-mcp/src/upstream/easel-client.ts` `WAIT_MS` (`do` 12 -> 42 minutes, `rebuild` 30 -> 120);
+  `runner/config.py` `MCP_TOOL_TIMEOUT` 15 -> 45 minutes.

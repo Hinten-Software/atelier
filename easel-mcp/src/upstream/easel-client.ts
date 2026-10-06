@@ -17,9 +17,10 @@ export interface Ran {
 }
 
 /** Tool budgets include opening, except advancing log rebuilds get a separate stall budget.
- * A chunk may run 10 minutes (the easel's own limit).
+ * A chunk may run 40 minutes at 4800 px (the easel's own limit, 10 minutes at 2400 scaled with the
+ * pixel count; atelier change, 2026-10-06), and a rebuild replays at that width too.
  */
-export const WAIT_MS = { do: 12 * 60_000, other: 3 * 60_000, rebuild: 30 * 60_000 };
+export const WAIT_MS = { do: 42 * 60_000, other: 3 * 60_000, rebuild: 120 * 60_000 };
 
 /** Run the studio's easel client with `args`, `input` on stdin; stdout and stderr together, in order. */
 export function easel(studio: string, args: string[], input?: string, signal?: AbortSignal, waitMs?: number): Promise<Ran> {

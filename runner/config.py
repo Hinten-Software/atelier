@@ -48,7 +48,7 @@ def artist_env(config_dir: Path, root: Path | None = None) -> dict:
         "DISABLE_AUTO_COMPACT": "1",
         # "The user hasn't heard from you in a while - say in a few words what you're doing": a nudge to narrate
         "CLAUDE_CODE_SILENT_TURN_REMINDER": "0",
-        "MCP_TOOL_TIMEOUT": str(15 * 60 * 1000),  # the easel allows a chunk 10 minutes
+        "MCP_TOOL_TIMEOUT": str(45 * 60 * 1000),  # the easel allows a chunk 40 minutes at 4800 px (10 at 2400)
         "MAX_MCP_OUTPUT_TOKENS": "40000",
     }
     if TOKEN.exists():

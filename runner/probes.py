@@ -9,7 +9,7 @@ as DATA/run/probe-ok-<claude version>.json, which `atelier birth` requires.
 
   context    the model is asked to report everything it was given; transcript and reply must be clean
   tools      exactly the eight easel tools; paint, status, look, read of a folder, write of the notebook
-  long       a chunk that runs about five minutes (the MCP tool timeout must not cut it)
+  long       a chunk that runs about 15 minutes at 4800 px (the tool timeouts must not cut it)
 A usage limit can't be forced; its handling is covered by runner/tests (fake Claude Code) and is watched for in
 the first real limit (RUN-6).
 """
@@ -92,7 +92,7 @@ def run(name: str, config: Path | None) -> list[str]:
         t0 = time.time()
         with open(stream, "w") as out:
             rc = subprocess.run(cmd, cwd=p.studio, env=artist_env(p.config, p.root), stdin=subprocess.DEVNULL, stdout=out,
-                                stderr=subprocess.STDOUT, timeout=1800).returncode
+                                stderr=subprocess.STDOUT, timeout=3600).returncode
         problems = []
         init = next((json.loads(l) for l in stream.read_text().splitlines() if '"subtype":"init"' in l), {})
         tools = sorted(init.get("tools") or [])

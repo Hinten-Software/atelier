@@ -37,6 +37,12 @@ pub const WIDTHS: [usize; 2] = [2400, 4800];
 /// did is kept. Replays have no limit: a chunk in the log succeeded once and must replay the
 /// same on a slower or busier machine.
 pub const CHUNK_LIMIT: Duration = Duration::from_secs(600);
+
+/// A chunk's limit at a width: `CHUNK_LIMIT` at the legacy width, scaled with the pixel count
+/// above it (atelier change, 2026-10-06), so a chunk that fit at 2400 px still fits at 4800.
+pub fn chunk_limit_for(width: usize) -> Duration {
+    if width > LEGACY_WIDTH { CHUNK_LIMIT * ((width * width).div_ceil(LEGACY_WIDTH * LEGACY_WIDTH)) as u32 } else { CHUNK_LIMIT }
+}
 /// Lua instructions between two looks at the clock.
 const HOOK_EVERY: u32 = 1_000_000;
 
@@ -144,16 +150,16 @@ impl Session {
         api::install(&lua, st.clone())?;
         let deadline = Rc::new(Cell::new(None::<Instant>));
         let d = deadline.clone();
+        let limit_min = chunk_limit_for(width).as_secs() / 60;
         lua.set_hook(mlua::HookTriggers::new().every_nth_instruction(HOOK_EVERY), move |_, _| match d.get() {
             Some(t) if Instant::now() > t => Err(mlua::Error::runtime(format!(
-                "the chunk ran longer than {} minutes and was stopped; nothing it did was kept",
-                CHUNK_LIMIT.as_secs() / 60
+                "the chunk ran longer than {limit_min} minutes and was stopped; nothing it did was kept"
             ))),
             _ => Ok(mlua::VmState::Continue),
         })?;
         let own = global_values(&lua)?;
         let globals = own.iter().map(|(k, v)| (k.clone(), (v.clone(), 0))).collect();
-        Ok(Session { lua: ManuallyDrop::new(lua), state, st, log: Vec::new(), replay: false, deadline, chunk_limit: CHUNK_LIMIT, heap: Some((snap_f, restore_f)), prelude: Some(prelude), stale: false, unrestored: false, globals, own, _serials: serials, #[cfg(test)] fail_at: Cell::new(None) })
+        Ok(Session { lua: ManuallyDrop::new(lua), state, st, log: Vec::new(), replay: false, deadline, chunk_limit: chunk_limit_for(width), heap: Some((snap_f, restore_f)), prelude: Some(prelude), stale: false, unrestored: false, globals, own, _serials: serials, #[cfg(test)] fail_at: Cell::new(None) })
     }
 
     /// A session that replays a program from the default box (tests;
@@ -1456,6 +1462,8 @@ mod tests {
         let mut b = Session::new(LEGACY_WIDTH).unwrap();
         b.run(CANVAS).unwrap();
         assert!(!b.program("t").contains(WIDTH_MARK));
+        assert_eq!(chunk_limit_for(4800), CHUNK_LIMIT * 4);
+        assert_eq!(chunk_limit_for(LEGACY_WIDTH), CHUNK_LIMIT);
         for bad in ["--@ width 1000", "--@ width x", "--@ width 4800\n--@ width 4800"] {
             assert!(logged_width(&format!("{bad}\n\n--@ chunk 1\n")).is_err(), "{bad}");
         }
