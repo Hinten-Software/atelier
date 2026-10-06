@@ -168,7 +168,7 @@ fn log_path(name: &str) -> PathBuf {
     root().join("paintings/lua").join(format!("{name}.lua"))
 }
 fn journal_path() -> PathBuf {
-    root().join("notes/journal.md")
+    root().join("journal") // atelier: the studio names things without file paths (2026-10-06)
 }
 
 #[cfg(feature = "replay")]

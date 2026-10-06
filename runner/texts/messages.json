@@ -1,8 +1,8 @@
 {
-  "first": "Your brief is in BRIEF.md in this folder.",
-  "again": "You're back at the easel. The painting is as you left it. Your brief is in BRIEF.md and your journal in notes/journal.md.",
+  "first": "Your brief is in this folder: brief.",
+  "again": "You're back at the easel. The painting is as you left it. Your brief and your journal are where they were.",
   "direction_free": "The subject and composition are yours.",
   "direction_themed": "{THEME}. Within it, everything is yours to decide.",
-  "notebook_first": "notebook.md is yours. It stays in this studio from one painting to the next.",
-  "notebook_later": "notebook.md is yours. It stays in this studio from one painting to the next.\nwalls/ holds the paintings you have finished here."
+  "notebook_first": "The notebook is yours. It stays in this studio from one painting to the next.",
+  "notebook_later": "The notebook is yours. It stays in this studio from one painting to the next.\nThe walls hold the paintings you have finished here; walls/list names them."
 }

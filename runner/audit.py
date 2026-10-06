@@ -13,7 +13,7 @@ import re
 import sys
 from pathlib import Path
 
-from config import PRIVATE_WORDS, REPO
+from config import NOTES, PRIVATE_WORDS, REPO
 
 sys.path.insert(0, str(REPO / "tools"))
 import whiteroom  # noqa: E402  (its WORDS already include the private list)
@@ -48,13 +48,18 @@ def private_hits(text: str) -> list[str]:
     return hits
 
 
+# the studio's names for the repository's texts (config.NOTES): "easel guide" is materials/easel_guide.md
+SOURCE_NAMES = {dst: src for src, dst in NOTES.items()}
+
+
 def scan_text(name: str, text: str, ours: bool) -> list[str]:
     """NFR-9 for one text the artist will read. ours: we wrote it (full word list), else the artist did (private words)."""
     found = [f"{name}: {h}" for h in private_hits(text)]
     if ours:
         for n, line in enumerate(text.splitlines(), 1):
             for m in whiteroom.PATTERN.finditer(line):
-                allowed = any(name.endswith(sfx) and sub in line for (sfx, sub) in whiteroom.ALLOW)
+                src = SOURCE_NAMES.get(name, name)  # a text in the studio is allowed what its source in the repository is
+                allowed = any(src.endswith(sfx) and sub in line for (sfx, sub) in whiteroom.ALLOW)
                 if not allowed:
                     found.append(f"{name}:{n}: {m.group(0)!r} in {line.strip()[:100]!r}")
     return found
@@ -65,10 +70,10 @@ def scan_studio(studio: Path, ours: set[str]) -> list[str]:
     found = []
     for f in sorted(studio.rglob("*")):
         rel = f.relative_to(studio)
-        if not f.is_file() or rel.parts[0] in ("bin", "out") or any(p.startswith(".") for p in rel.parts):
+        if not f.is_file() or rel.parts[0] in ("bin", "out", "paintings") or any(p.startswith(".") for p in rel.parts):
             continue
-        if f.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
-            continue
+        if f.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp") or b"\0" in f.read_bytes()[:8192]:
+            continue  # the paintings on the walls (named without an extension) are images
         found += scan_text(str(rel), f.read_text(errors="replace"), str(rel) in ours)
     return found
 

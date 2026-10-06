@@ -114,8 +114,8 @@ export async function atEasel(studio: string, args: string[], input: string | un
 export const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: {} });
 
 /** At most `max` characters: the end of `t`, as bash's output was cut. */
-export function tail(t: string, max = 50_000, whole = "paintings/lua/painting.lua"): string {
-	return t.length <= max ? t : `(the first ${t.length - max} characters are left out; read ${whole} for all of it)\n` + t.slice(-max);
+export function tail(t: string, max = 50_000, whole = "`log` with an offset shows them"): string {
+	return t.length <= max ? t : `(the first ${t.length - max} characters are left out; ${whole})\n` + t.slice(-max);
 }
 
 /**

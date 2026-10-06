@@ -73,7 +73,7 @@ def main():
         root = Path(reg["i"]["root"])
         roots.append(root)
         check("artist root is neutral", root.parent == Path("/Users/Shared") and len(root.name) == 2, root)
-        check("studio starts with an empty notebook and toolkit", (root / "studio/notebook.md").read_text() == "")
+        check("studio starts with an empty notebook and toolkit", (root / "studio/notebook").read_text() == "")
 
         # 1. every kind of end, then the artist stops
         modes(root, "crash", "limit", "context", "voluntary")
@@ -87,29 +87,28 @@ def main():
         check("title from the reply", m["title"] == "Test Study", m["title"])
         check("date shown is recorded", all(x["date_shown"] for x in m["sittings"]), m["sittings"])
         walls = root / "studio/walls"
-        check("hung on the walls", (walls / "001.png").exists() and (walls / "001.md").exists(), list(walls.glob("*")))
-        check("walls index lists it", "001.png · Test Study" in (walls / "index.md").read_text())
+        check("walls list names it", "1 Test Study" in (walls / "list").read_text() and (walls / "1 Test Study").exists())
         check("package has the painting, journal, transcripts, final",
               all((DATA / "works/i-001" / f).exists() for f in ("painting.lua", "journal.md", "final.png", "brief.md", "sessions")))
         check("no open work afterwards", "no open work" in atelier("status"))
 
         # 2. the second work: the brief points to the walls; a leak mid-sitting stops it and rolls the notebook back
-        (root / "studio/notebook.md").write_text("the artist's own note\n")
+        (root / "studio/notebook").write_text("the artist's own note\n")
         modes(root, "notebook", "voluntary")
         atelier("paint", "i", "--by", "operator", "--theme", "A quiet morning")
         s = wait("i-002")
-        brief = (root / "studio/BRIEF.md").read_text()
-        check("second brief mentions walls/", "walls/ holds the paintings you have finished here." in brief)
+        brief = (root / "studio/brief").read_text()
+        check("second brief mentions the walls", "The walls hold the paintings you have finished here" in brief)
         check("themed brief", "A quiet morning. Within it, everything is yours to decide." in brief)
         check("leak stops the sitting", s["state"] == "stopped" and s["sittings"][-1]["how"] == "audit", s["state"])
         check("the hit names the reminder", any("silent_turn_reminder" in h for h in s["hits"]), s["hits"])
-        check("notebook rolled back", (root / "studio/notebook.md").read_text() == "the artist's own note\n")
+        check("notebook rolled back", (root / "studio/notebook").read_text() == "the artist's own note\n")
         out = atelier("resume", ok=False)
         check("resume refuses without --clear", "--clear" in out, out)
         atelier("resume", "--clear", "test: fake leak")
         s = wait("i-002")
         check("cleared work ends, contaminated, not hung", s["state"] == "not-finished", s["state"])
-        check("contaminated work not on the walls", not (walls / "002.png").exists())
+        check("contaminated work not on the walls", not any(walls.glob("2*")))
         hist = (DATA / "history.md").read_text()
         check("history logs start, audit stop and clearing", "stopped by the white-room audit" in hist and "cleared" in hist)
 

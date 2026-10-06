@@ -8,7 +8,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-export const JOURNAL = "notes/journal.md";
+export const JOURNAL = "journal"; // atelier: the studio names things without file paths (2026-10-06)
 export const REVISIONS = "out/easel/journal-revisions.jsonl";
 
 /** Replace the one occurrence of `old` in the studio's journal with `text`; the tool's reply. Throws a reply for the painter on a bad request. */

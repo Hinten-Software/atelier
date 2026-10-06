@@ -19,6 +19,6 @@ await call("look", { crop: "100,100,400,300" });
 await call("note", { text: "a first band of blue" });
 await call("status");
 await call("log");
-await call("read", { path: "notes/journal.md" });
+await call("read", { path: "journal" });
 await call("read", { path: "../../../etc/hosts" });
 await client.close();

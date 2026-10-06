@@ -54,6 +54,7 @@ ALLOW = {
     ("server.ts", "limit: how many lines"): "the read tool's line limit parameter",
     ("server.ts", "limit: z.number()"): "the read tool's line limit parameter",
     ("server.ts", "p.limit"): "the read tool's line limit parameter",
+    ("server.ts", "With offset (the first line, from 1) and limit"): "the log tool's line limit parameter (as read's)",
     ("easel-client.ts", "the easel's limit on a chunk's machine time"): "comment inside a regex replacement (hideCounters)",
     ("easel-client.ts", "the chunk ran longer than"): "the pattern hideCounters removes",
     ("easel-client.ts", "crop exceeds 1200 pixels"): "the pattern toolWords rewrites",

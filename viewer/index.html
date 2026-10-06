@@ -479,8 +479,9 @@ function stripEnd() { const s = $('strip'); s.scrollLeft = s.scrollWidth; }
 const paintOK = e => e.out !== undefined && !e.err;
 // the studio's files by what they are in the studio, not by their file names
 const THINGS = [[/(^|\/)journal(\.md)?$/i, 'its journal'], [/(^|\/)notebook(\.md)?$/i, 'its notebook'], [/(^|\/)toolkit(\.lua)?$/i, 'its toolkit'],
-  [/oil_paint_physics(\.md)?$/i, 'the notes on oil paint'], [/easel_guide(\.md)?$/i, 'the easel guide'], [/(^|\/)brief(\.md)?$/i, 'the brief'],
-  [/walls\/index(\.md)?$/i, 'the list of its finished paintings'], [/walls\/\d+\.md$/i, 'the card of a finished painting'], [/walls\/\d+\.(png|jpe?g)$/i, 'a finished painting on its wall'],
+  [/oil_paint_physics(\.md)?$|notes on oil paint$/i, 'the notes on oil paint'], [/easel_guide(\.md)?$|easel guide$/i, 'the easel guide'], [/(^|\/)brief(\.md)?$/i, 'the brief'],
+  [/walls\/(index(\.md)?|list)$/i, 'the list of its finished paintings'], [/walls\/\d+\.md$/i, 'the card of a finished painting'],
+  [/walls\/\d+(\.(png|jpe?g)| .+)?$/i, 'a finished painting on its wall'],
   [/painting(\.lua)?$/i, 'the record of its strokes'], [/^\.?\/?$|^studio$/i, 'around the studio'], [/(^|\/)notes\/?$/i, 'its shelf of notes'], [/(^|\/)walls\/?$/i, 'its walls']];
 const thing = (p) => { for (const [re, w] of THINGS) if (re.test(p || '')) return w; return null; };
 function kindOf(e) {

@@ -22,7 +22,7 @@ import budget
 import nas
 from config import (CHECK_PAINTING, CLAUDE, CLAUDE_VERSION, CONTEXT_LIMIT, CRASH_WAITS, DATA, EASEL_MCP, LIMIT_GIVE_UP_S,
                     LIMIT_RETRY_S, MAX_INVOLUNTARY, NODE, PAINTER_EASEL, REPLAY_EASEL, REPO, TEXTS, TOOLS, artist_env)
-from studio import NOTEBOOK, TOOLKIT, Artist, hang, now, prepare, sha256
+from studio import BRIEF, JOURNAL, NOTEBOOK, NOTES, PACKAGE_NAMES, TOOLKIT, Artist, hang, now, prepare, sha256
 
 # claude-paint's viewer (its transcript parser and title rule), loaded by path: it is also called studio.py
 _spec = importlib.util.spec_from_file_location("viewer_studio", REPO / "viewer" / "studio.py")
@@ -32,7 +32,6 @@ _spec.loader.exec_module(viewer)
 TERMINAL = {"finished", "not-finished"}
 RUN = DATA / "run"
 CURRENT = RUN / "current"
-JOURNAL = "notes/journal.md"
 TRANSCRIPT_GRACE = 90  # seconds: a sitting whose transcript hasn't appeared by then can't be audited (QA Q6)
 KILL_GRACE = 30        # seconds between SIGTERM and SIGKILL (QA Q21)
 
@@ -121,8 +120,9 @@ class Work:
             raise SystemExit("white-room scan of the prepared studio failed (NFR-9); fix the cause and start again:\n  "
                              + "\n  ".join(hits))
         for f, data in befores.items():
-            (pkg / f"{Path(f).stem}.before{Path(f).suffix}").write_bytes(data)
-        shutil.copy2(artist.studio / "BRIEF.md", pkg / "brief.md")
+            name = PACKAGE_NAMES[f]
+            (pkg / f"{Path(name).stem}.before{Path(name).suffix}").write_bytes(data)
+        shutil.copy2(artist.studio / BRIEF, pkg / "brief.md")
         state = {"id": id, "artist": artist.id, "number": number, "theme": theme, "mode": "themed" if theme else "free",
                  "started_by": started_by, "created": now(), "state": "prepared", "sittings": [], "crashes": 0,
                  "involuntary": 0, "limit_since": None, "pauses": [], "hashes": hashes, "hits": []}
@@ -534,7 +534,7 @@ def claude_cmd(studio: Path, run: Path, message: str, sid: str, model: str, effo
 def whiteroom(artist: Artist) -> list[str]:
     """NFR-9: the prepared studio, the messages and the system prompt. Our texts get the full word list; the
     artist's own (notebook, toolkit, its wall cards and the index made from its titles) only private words (QA Q5)."""
-    ours = {"BRIEF.md", "notes/easel_guide.md", "notes/research/oil_paint_physics.md", "notes/journal.md"}
+    ours = {BRIEF, JOURNAL, *NOTES.values()}
     hits = audit.scan_studio(artist.studio, ours)
     for name, text in messages().items():
         hits += audit.scan_text(f"messages.{name}", text, True)

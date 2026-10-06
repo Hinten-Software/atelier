@@ -20,7 +20,8 @@ PAINTER_EASEL = REPO / "engine" / "target" / "painter" / "release" / "easel"
 REPLAY_EASEL = REPO / "engine" / "target" / "release" / "easel"
 CHECK_PAINTING = REPO / "engine" / "scripts" / "check_painting"
 MATERIALS = REPO / "materials"
-NOTES = {"easel_guide.md": "easel_guide.md", "research/oil_paint_physics.md": "research/oil_paint_physics.md"}
+# the studio names things as a painter would (owner, 2026-10-06): no file names with extensions
+NOTES = {"easel_guide.md": "easel guide", "research/oil_paint_physics.md": "notes on oil paint"}
 PRIVATE_WORDS = Path(os.environ.get("ATELIER_PRIVATE_WORDS", Path.home() / ".atelier" / "private-words.txt"))
 
 MODEL = "claude-opus-5-5"

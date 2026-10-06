@@ -18,7 +18,9 @@ from pathlib import Path
 from config import CLAUDE_VERSION, DATA, EFFORT, MATERIALS, MODEL, NOTES, PAINTER_EASEL, ROOTS, TEXTS
 
 ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"]
-NOTEBOOK, TOOLKIT = "notebook.md", "toolkit.lua"
+NOTEBOOK, TOOLKIT, JOURNAL, BRIEF = "notebook", "toolkit", "journal", "brief"
+# the files of earlier studios (before 2026-10-06), for the package names
+PACKAGE_NAMES = {NOTEBOOK: "notebook.md", TOOLKIT: "toolkit.lua", JOURNAL: "journal.md", BRIEF: "brief.md"}
 
 
 def now() -> str:
@@ -108,47 +110,60 @@ def brief_text(artist: Artist, theme: str | None) -> str:
 
 
 def prepare(artist: Artist, theme: str | None) -> dict:
-    """Set the studio up for a new work (RUN-4): the easel, the notes, this work's brief, an empty journal and
-    easel. The notebook, toolkit and walls stay as the artist left them. Returns hashes for the manifest."""
+    """Set the studio up for a new work (RUN-4): the easel, the two texts, this work's brief, an empty journal and
+    easel. The notebook, toolkit and walls stay as the artist left them. Returns hashes for the manifest.
+    The studio names things as a painter would: brief, notebook, toolkit, journal, easel guide, notes on oil paint,
+    walls/ (list, and each painting by its number and title). The easel's record of the painting
+    (paintings/lua/painting.lua) is out of the painter's reach; its `log` tool shows it."""
     s = artist.studio
-    for d in ("bin", "notes/research", "paintings/lua", "walls"):
+    for d in ("bin", "paintings/lua", "walls"):
         (s / d).mkdir(parents=True, exist_ok=True)
     shutil.copy2(PAINTER_EASEL, s / "bin" / "easel")
     for src, dst in NOTES.items():
-        (s / "notes" / dst).write_text(strip_comments((MATERIALS / src).read_text()))
-    (s / "notes" / "journal.md").write_text("")
+        (s / dst).write_text(strip_comments((MATERIALS / src).read_text()))
+    (s / JOURNAL).write_text("")
     for leftover in (s / "paintings" / "lua").glob("*"):
         leftover.unlink()
     shutil.rmtree(s / "out", ignore_errors=True)
-    (s / "BRIEF.md").write_text(brief_text(artist, theme))
+    (s / BRIEF).write_text(brief_text(artist, theme))
     for f in (NOTEBOOK, TOOLKIT):
         (s / f).touch()
-    write_walls_index(artist)
-    return {"easel": sha256(s / "bin" / "easel"), "brief": sha256(s / "BRIEF.md"),
-            "guide": sha256(s / "notes" / "easel_guide.md")}
+    write_walls_list(artist)
+    return {"easel": sha256(s / "bin" / "easel"), "brief": sha256(s / BRIEF), "guide": sha256(s / NOTES["easel_guide.md"])}
 
 
-def write_walls_index(artist: Artist):
-    """walls/index.md: the finished works hanging here, oldest first, so the artist can find them (ART-10)."""
+def wall_name(number: int, title: str | None) -> str:
+    """A painting on the walls by its number and title, as a painter would label it: "1 Low Water, Evening"."""
+    t = re.sub(r"[/\\:\x00-\x1f]", " ", title or "").strip(" .")
+    return f"{number} {t}" if t else str(number)
+
+
+def write_walls_list(artist: Artist):
+    """walls/list: the finished works hanging here, oldest first, each with what the artist said of it (ART-10).
+    Made from the cards kept in the private store (DATA/artists/<id>/walls/)."""
     walls = artist.studio / "walls"
     walls.mkdir(parents=True, exist_ok=True)
-    cards = sorted(walls.glob("[0-9][0-9][0-9].md"))
+    cards = sorted((artist.home / "walls").glob("*.json"))
     if not cards:
-        (walls / "index.md").unlink(missing_ok=True)
+        (walls / "list").unlink(missing_ok=True)
         return
-    lines = []
+    parts = []
     for c in cards:
-        title = next((l[2:].strip() for l in c.read_text().splitlines() if l.startswith("# ")), "")
-        lines.append(f"- {c.stem}.png{(' · ' + title) if title else ''}")
-    (walls / "index.md").write_text("\n".join(lines) + "\n")
+        card = json.loads(c.read_text())
+        parts.append(card["name"] + ("\n\n" + card["words"].strip() if card["words"].strip() else ""))
+    (walls / "list").write_text("\n\n\n".join(parts) + "\n")
 
 
 def hang(artist: Artist, number: int, image: Path, title: str | None, reply: str):
-    """A finished work on the walls: NNN.png (the replay render, 1000 px wide) and NNN.md (title and reply)."""
+    """A finished work on the walls: the replay render, 1000 px wide, named by its number and title, and its card
+    (title and the artist's closing words) in the private store, from which walls/list is written."""
     walls = artist.studio / "walls"
     walls.mkdir(parents=True, exist_ok=True)
-    png = walls / f"{number:03d}.png"
-    subprocess.run(["/usr/bin/sips", "--resampleWidth", "1000", str(image), "--out", str(png)], check=True, capture_output=True)
-    card = (f"# {title}\n\n" if title else "") + reply.strip() + "\n"
-    (walls / f"{number:03d}.md").write_text(card)
-    write_walls_index(artist)
+    name = wall_name(number, title)
+    tmp = walls / f".{number}.png"
+    subprocess.run(["/usr/bin/sips", "--resampleWidth", "1000", str(image), "--out", str(tmp)], check=True, capture_output=True)
+    tmp.rename(walls / name)
+    cards = artist.home / "walls"
+    cards.mkdir(parents=True, exist_ok=True)
+    (cards / f"{number:03d}.json").write_text(json.dumps({"number": number, "title": title, "name": name, "words": reply.strip()}, indent=1))
+    write_walls_list(artist)

@@ -12,8 +12,8 @@ Three things hold for every session:
 - **A chunk that stops with an error changes nothing.** The canvas, your
   variables, the paint on your brushes and the clock are as they were
   before it, and it isn't written to the log.
-- **The log is the painting.** Every chunk that ran is appended to
-  `paintings/lua/painting.lua`, and replaying it paints the same canvas.
+- **The log is the painting.** Every chunk that ran is appended to the
+  painting's log (`log` shows it), and replaying it paints the same canvas.
 
 ## Starting
 
@@ -440,7 +440,7 @@ ruled over a drawing to transfer it.
 
 ## The journal
 
-`notes/journal.md` is your working journal. `note` appends an entry
+Your journal holds your working notes. `note` appends an entry
 stamped with the painting's time, such as `day 2, 09:40`. To revise what
 is already there, call `note` with `replaces`, the exact passage to
 change, and `text`, what takes its place. Writing a note doesn't advance
