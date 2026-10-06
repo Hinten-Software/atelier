@@ -28,7 +28,7 @@ FARM = DATA / "run" / "farm"
 ALLOWED = re.compile(r"^(studio/(index\.html|stream\.css|data/sessions\.json|data/w-[a-z]+-\d{3}/(events\.json|"
                      r"(img|t|v)/\d+\.(png|jpg|webp)|file/paintings/lua/painting\.lua|final\.png|final(-t)?\.jpg)))$|^data/works\.json$"
                      # the atelier's own pages (site/ in the repository)
-                     r"|^(index\.html|robots\.txt|(about|walls|work)/index\.html|assets/atelier\.(css|js))$")
+                     r"|^(index\.html|robots\.txt|(about|walls|work|how|studio-room)/index\.html|assets/atelier\.(css|js))$")
 PAGES = REPO / "site"
 FINAL_WEB = {"final.jpg": 1600, "final-t.jpg": 640}  # the walls' and the door's copies of a finished painting
 PUBLIC_MANIFEST = ("id", "studio", "number", "title", "mode", "theme", "start", "end", "model", "effort", "claude_code",

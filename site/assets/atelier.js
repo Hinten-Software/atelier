@@ -72,7 +72,7 @@ async function walls() {
       el("a", { href: `/studio/?p=${encodeURIComponent(open.viewer)}`, textContent: live ? "Watch" : "See it so far", class: "state" }));
   }
   const box = document.getElementById("walls");
-  const done = works.filter((w) => w.finished).sort((x, y) => y.number - x.number);
+  const done = works.filter((w) => w.finished).sort((x, y) => x.number - y.number);  // a timeline: oldest left
   if (!done.length) box.append(el("p", { class: "empty", textContent: "The walls are bare." }));
   for (const w of done)
     box.append(el("a", { href: `/work/?w=${encodeURIComponent(w.id)}` }, el("img", { src: finalImg(w, true), alt: w.title || "Untitled", loading: "lazy" }),

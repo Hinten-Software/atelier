@@ -29,10 +29,14 @@ h1, h2 { font-weight: normal; letter-spacing: .02em; }
 .studio h2 { font-size: 20px; margin: 12px 0 0; }
 .state { font: 13px/1.4 var(--sans); color: var(--muted); letter-spacing: .04em; }
 .state.live::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #b5452f; margin-right: 7px; vertical-align: 1px; }
-.walls { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 36px 28px; padding: 3vh 0 10vh; }
-.walls a { text-decoration: none; }
+.walls { display: flex; align-items: flex-end; gap: 36px; overflow-x: auto; padding: 3vh 0 0; scroll-snap-type: x proximity; }
+.walls a { text-decoration: none; flex: 0 0 auto; width: min(340px, 78vw); scroll-snap-align: start; }
 .walls img { width: 100%; display: block; border: 1px solid var(--line); background: var(--card); }
-.walls .t { margin-top: 10px; }
+.walls .t { margin-top: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.timeline { border-top: 1px solid var(--line); margin: 14px 0 10vh; }
+.prose h2 { font-size: 20px; margin-top: 2.2em; }
+.prose ul { padding-left: 1.2em; }
+.prose li { margin: .35em 0; }
 .easel { margin: 4vh 0 1vh; }
 .piece { padding: 4vh 0 2vh; }
 .piece img { width: 100%; height: auto; display: block; border: 1px solid var(--line); background: var(--card); }

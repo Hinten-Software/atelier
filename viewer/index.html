@@ -203,7 +203,7 @@
   <div id="transport">
     <button id="prevlook" title="previous look  [">⏮</button>
     <button id="play" title="watch the painting grow, one look at a time  space">▶ Replay</button>
-    <select id="speed" title="replay speed: pictures per second"><option value="0.5">slow</option><option value="1" selected>1 / s</option><option value="2">2 / s</option><option value="4">4 / s</option></select>
+    <select id="speed" title="replay speed: pictures per second"><option value="0.25">very slow</option><option value="0.5" selected>slow</option><option value="1">1 / s</option><option value="2">2 / s</option><option value="4">4 / s</option></select>
     <button id="nextlook" title="next look  ]">⏭</button>
     <div id="scrubwrap"><input type="range" id="scrub" min="0" max="0" value="0"><div id="ticks"></div></div>
     <span id="pos"></span>
@@ -219,7 +219,7 @@
 </div>
 <div id="zoom"><img id="zimg" alt=""></div>
 <div id="intro" hidden role="dialog" aria-label="About the studio">
-  <b>You're watching an AI model paint.</b> It writes every brushstroke as code, and a simulation of bristles, wet paint and linen carries it out.
+  <b>You're watching an AI paint.</b> It writes every brushstroke as code, and a simulation of bristles, wet paint and linen carries it out. It does not know you are here.
   The big picture is the painting as it last saw it whole; when it studies a detail up close, squints or checks the picture in grays, that view shows below it.
   Its thinking runs beside the picture. <span class="live">LIVE</span> means it's working right now.
   Press <b>▶ Replay</b> to watch the painting grow, or tap the painter's name at the top to choose another.
@@ -477,8 +477,16 @@ function stripEnd() { const s = $('strip'); s.scrollLeft = s.scrollWidth; }
 // ---- what an event is, in a few words
 // a chunk ran if its call has a result that isn't an error (since round 21.3 the easel answers a plain "ok", no chunk number)
 const paintOK = e => e.out !== undefined && !e.err;
+// the studio's files by what they are in the studio, not by their file names
+const THINGS = [[/(^|\/)journal(\.md)?$/i, 'its journal'], [/(^|\/)notebook(\.md)?$/i, 'its notebook'], [/(^|\/)toolkit(\.lua)?$/i, 'its toolkit'],
+  [/oil_paint_physics(\.md)?$/i, 'the notes on oil paint'], [/easel_guide(\.md)?$/i, 'the easel guide'], [/(^|\/)brief(\.md)?$/i, 'the brief'],
+  [/walls\/index(\.md)?$/i, 'the list of its finished paintings'], [/walls\/\d+\.md$/i, 'the card of a finished painting'], [/walls\/\d+\.(png|jpe?g)$/i, 'a finished painting on its wall'],
+  [/painting(\.lua)?$/i, 'the record of its strokes'], [/^\.?\/?$|^studio$/i, 'around the studio'], [/(^|\/)notes\/?$/i, 'its shelf of notes'], [/(^|\/)walls\/?$/i, 'its walls']];
+const thing = (p) => { for (const [re, w] of THINGS) if (re.test(p || '')) return w; return null; };
 function kindOf(e) {
-  const f = fname(e.path);
+  const f = fname(e.path), t = thing(e.path);
+  if ((e.kind === 'write' || e.kind === 'edit') && t) return [/toolkit/.test(t) ? 'code' : 'notes', /toolkit/.test(t) ? '✍️' : '📝', (e.kind === 'write' ? 'writes ' : 'revises ') + t];
+  if (e.kind === 'read' && t) return /finished painting on/.test(t) ? ['look', '🖼', 'looks at ' + t] : ['read', '📖', /around/.test(t) ? 'looks ' + t : 'reads ' + t];
   if (e.kind === 'write' || e.kind === 'edit') {
     let d = ''; if (e.kind === 'edit') { let a = 0, r = 0; for (const x of e.edits || []) { a += (x.newText||'').split('\n').length; r += (x.oldText||'').split('\n').length; } d = ` +${a} −${r}`; }
     return /\.(rs|lua)$/.test(f) ? ['code', '✍️', (e.kind === 'write' ? 'wrote ' : 'edited ') + f + d] : /\.md$/.test(f) ? ['notes', '📝', (e.kind === 'write' ? 'wrote ' : 'edited ') + f] : ['code', '✍️', 'wrote ' + f];

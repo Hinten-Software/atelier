@@ -16,8 +16,9 @@ from config import DATA
 
 DAILY_USD = float(os.environ.get("ATELIER_DAILY_USD", "40"))
 WORK_USD = float(os.environ.get("ATELIER_WORK_USD", "60"))
-# "23-7": from 23:00 to 07:00; "always": no window (tests)
-WINDOW = os.environ.get("ATELIER_WINDOW", "23-7")
+# "23-7": from 23:00 to 07:00; "always": no window. Daytime painting since 2026-10-06 (the owner: try it,
+# then see whether it needs throttling); the daily and per-work ceilings stay
+WINDOW = os.environ.get("ATELIER_WINDOW", "always")
 LEDGER = DATA / "run" / "ledger.json"
 
 # $ per million tokens: input, output, cache read, cache write (5 min), cache write (1 h)
