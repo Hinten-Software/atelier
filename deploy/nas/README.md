@@ -10,6 +10,8 @@ https://notart.fyi. The NAS publishes no ports and the router stays closed. ngin
    **Networks -> Tunnels -> Create a tunnel -> Cloudflared**, name `atelier`, Save.
 2. On "Install and run connectors", choose **Docker**, copy the whole command shown, then on the Mac:
    `bash ~/dev/atelier/tools/save-token.sh tunnel` (it waits; copy the command when it asks, press Enter).
+   No clipboard on the Mac (e.g. a remote session): paste or type the token into a plain-text file and run
+   `bash ~/dev/atelier/tools/save-token.sh tunnel FILE`; the token is checked and FILE deleted.
    This writes `~/atelier-data/secrets/tunnel.env`. Click **Next**.
 3. **Public hostname**: subdomain empty, domain `notart.fyi`, path empty; service **HTTP**, URL `web:80`.
    Save. (Optional, same tunnel: a second hostname `www` -> `web:80`.)
