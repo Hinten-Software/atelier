@@ -9,12 +9,16 @@
 #                                               ~/atelier-data/secrets/tunnel.env for the NAS (deploy/nas)
 #   bash tools/save-token.sh tunnel FILE        read the token from FILE instead of the clipboard (for a
 #                                               token typed or pasted there); FILE is deleted after saving
+#   bash tools/save-token.sh nas [FILE]         the NAS sync user's password (deploy/nas), saved as
+#                                               ~/atelier-data/secrets/nas-sync-password
 #
 # Copying the token only after this script waits matters: copying this command would otherwise
 # replace the token on the clipboard. Lines the terminal wrapped are joined; the clipboard is cleared.
 set -euo pipefail
 if [ "${1:-}" = tunnel ]; then
   f="${ATELIER_TOKEN_FILE:-$HOME/atelier-data/secrets/tunnel.env}"; start=eyJ; re='eyJ[A-Za-z0-9_=+/-]{100,}'; pre=TUNNEL_TOKEN=
+elif [ "${1:-}" = nas ]; then
+  f="${ATELIER_TOKEN_FILE:-$HOME/atelier-data/secrets/nas-sync-password}"; start="its first character"; re='[^[:space:]]{8,}'; pre=
 else
   f="${ATELIER_TOKEN_FILE:-$HOME/atelier-data/secrets/claude-oauth-token}"; start=sk-ant-; re='sk-ant-[A-Za-z0-9_-]{40,}'; pre=
 fi

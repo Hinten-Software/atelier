@@ -32,7 +32,27 @@ https://notart.fyi. The NAS publishes no ports and the router stays closed. ngin
   that they are watched.
 - No analytics, no Web Analytics beacon: the site counts nobody.
 
-## Updating the site
+## The faucet: the live feed from the Mac (DSM, the owner, once)
 
-Replace the contents of `docker/atelier/site`; nginx serves them at once (no restart). The export's
-automatic sync (`DATA/sync.sh`) comes with milestone 2.
+nginx serves the shared folder `atelier-site`; the Mac syncs the export into it every two minutes
+while a work paints, through DSM's rsync service and a user that can write nowhere else. (SSH on DSM is
+for administrators only, so the sync user does not get SSH.)
+
+1. Control Panel -> Shared Folder -> Create: `atelier-site`. Then a second one: `atelier-backup`.
+2. Control Panel -> File Services -> rsync: **Enable rsync service** (port 873). Nothing else there.
+3. Control Panel -> User & Group -> Create: `atelier-sync`, a long password of your choice, no email.
+   Groups: `users` only. Shared folder permissions: `atelier-site` and `atelier-backup` **Read/Write**,
+   every other folder **No access**. Applications: **rsync** allowed, everything else denied. No quota.
+4. On the Mac: `bash ~/dev/atelier/tools/save-token.sh nas` (copy the password when it asks), or with
+   a text file as for the tunnel: `... save-token.sh nas FILE`.
+5. Re-upload `compose.yaml` (its volume now points at `/volume1/atelier-site`) and in Container Manager
+   -> Project -> atelier -> Action -> **Build** (recreates the containers). Until the first sync lands,
+   the page is empty: put the `site` folder's files into `atelier-site` once by hand, or wait.
+6. Snapshot Replication (Package Center): daily snapshots of both shared folders, keep 30. The Mac can
+   write the folders, but only the NAS can delete snapshots.
+
+## The drain: backups
+
+`tools/backup.sh` (milestone 2) copies the studios and the atelier's data (never the secrets) to
+`atelier-backup` daily after the painting window closes and after every finished work. Offsite copies:
+Hyper Backup from the NAS to a cloud of the owner's choice (requirements Q9).
