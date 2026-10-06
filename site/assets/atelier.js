@@ -89,7 +89,7 @@ async function work() {
   box.append(el("div", { class: "piece" }, el("a", { href: `/studio/data/${w.viewer}/final.png` }, el("img", { src: finalImg(w), alt: w.title || "Untitled" })), label(w)));
   box.append(el("p", { class: "actions" }, el("a", { href: `/studio/?p=${encodeURIComponent(w.viewer)}`, textContent: "Watch it being painted" }),
     " · ", el("a", { href: `/walls/?s=${artistOf(w.id)}`, textContent: `${studioName(artistOf(w.id))}'s walls` })));
-  if (w.theme) box.append(el("div", { class: "words" }, el("h2", { textContent: "It was given" }), el("p", { textContent: w.theme })));
+  if (w.theme) box.append(el("div", { class: "words" }, el("h2", { textContent: "They were given" }), el("p", { textContent: w.theme })));
   if (w.reply) box.append(el("div", { class: "words" }, el("h2", { textContent: "The painter's words" }), el("p", { textContent: plain(w.reply) })));
 }
 

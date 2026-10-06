@@ -219,7 +219,7 @@
 </div>
 <div id="zoom"><img id="zimg" alt=""></div>
 <div id="intro" hidden role="dialog" aria-label="About the studio">
-  <b>You're watching an AI paint.</b> It writes every brushstroke as code, and a simulation of bristles, wet paint and linen carries it out. It does not know you are here.
+  <b>You're watching an AI paint.</b> It writes every brushstroke as code, and a simulation of bristles, wet paint and linen carries it out. They do not know you are here.
   The big picture is the painting as it last saw it whole; when it studies a detail up close, squints or checks the picture in grays, that view shows below it.
   Its thinking runs beside the picture. <span class="live">LIVE</span> means it's working right now.
   Press <b>▶ Replay</b> to watch the painting grow, or tap the painter's name at the top to choose another.
@@ -478,11 +478,11 @@ function stripEnd() { const s = $('strip'); s.scrollLeft = s.scrollWidth; }
 // a chunk ran if its call has a result that isn't an error (since round 21.3 the easel answers a plain "ok", no chunk number)
 const paintOK = e => e.out !== undefined && !e.err;
 // the studio's files by what they are in the studio, not by their file names
-const THINGS = [[/(^|\/)journal(\.md)?$/i, 'its journal'], [/(^|\/)notebook(\.md)?$/i, 'its notebook'], [/(^|\/)toolkit(\.lua)?$/i, 'its toolkit'],
+const THINGS = [[/(^|\/)journal(\.md)?$/i, 'their journal'], [/(^|\/)notebook(\.md)?$/i, 'their notebook'], [/(^|\/)toolkit(\.lua)?$/i, 'their toolkit'],
   [/oil_paint_physics(\.md)?$|notes on oil paint$/i, 'the notes on oil paint'], [/easel_guide(\.md)?$|easel guide$/i, 'the easel guide'], [/(^|\/)brief(\.md)?$/i, 'the brief'],
-  [/walls\/(index(\.md)?|list)$/i, 'the list of its finished paintings'], [/walls\/\d+\.md$/i, 'the card of a finished painting'],
-  [/walls\/\d+(\.(png|jpe?g)| .+)?$/i, 'a finished painting on its wall'],
-  [/painting(\.lua)?$/i, 'the record of its strokes'], [/^\.?\/?$|^studio$/i, 'around the studio'], [/(^|\/)notes\/?$/i, 'its shelf of notes'], [/(^|\/)walls\/?$/i, 'its walls']];
+  [/walls\/(index(\.md)?|list)$/i, 'the list of their finished paintings'], [/walls\/\d+\.md$/i, 'the card of a finished painting'],
+  [/walls\/\d+(\.(png|jpe?g)| .+)?$/i, 'a finished painting on their wall'],
+  [/painting(\.lua)?$/i, 'the record of their strokes'], [/^\.?\/?$|^studio$/i, 'around the studio'], [/(^|\/)notes\/?$/i, 'their shelf of notes'], [/(^|\/)walls\/?$/i, 'their walls']];
 const thing = (p) => { for (const [re, w] of THINGS) if (re.test(p || '')) return w; return null; };
 function kindOf(e) {
   const f = fname(e.path), t = thing(e.path);
