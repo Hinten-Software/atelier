@@ -84,7 +84,7 @@ laid in sky, headland, water, bank, then revised three passages it judged failed
 a hard block of light on the water, a heavy band of haze), and stopped on its own: "The picture is
 still a little pale and high in value overall. I chose to leave it that way."
 
-![Estuary, Last Light](spike/estuary-last-light.jpg)
+(The spike painting, "Estuary, Last Light", was removed in the reset before launch, 2026-10-06.)
 
 | Measure | Value |
 |---|---|
