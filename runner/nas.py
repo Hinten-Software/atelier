@@ -30,6 +30,10 @@ ROOT_EXCLUDES = [".config/backups/", ".config/policy-limits*", ".config/remote-s
                  "studio/out/easel/*.sock"]
 
 
+# DSM's own folders in every share (recycle bin, thumbnails): never touched, never deleted
+SYNOLOGY_OWN = ["--exclude=#recycle", "--exclude=@eaDir", "--exclude=#snapshot"]
+
+
 def settings() -> dict | None:
     if not (SETTINGS.exists() and PASSWORD.exists()):
         return None
@@ -45,7 +49,8 @@ def note(msg: str):
 
 def rsync(args: list[str], what: str, timeout: int) -> bool:
     PASSWORD.chmod(0o600)  # rsync refuses a password file others can read
-    r = subprocess.run([RSYNC, "-rlt", "--mkpath", "--chmod=D755,F644", f"--password-file={PASSWORD}", "--timeout=60", *args],
+    # no --mkpath: DSM's rsync is older; every destination is one folder below the share, which rsync makes itself
+    r = subprocess.run([RSYNC, "-rltp", "--chmod=D755,F644", *SYNOLOGY_OWN, f"--password-file={PASSWORD}", "--timeout=60", *args],
                        capture_output=True, text=True, timeout=timeout)
     if r.returncode:
         note(f"{what} failed ({r.returncode}): {(r.stderr or r.stdout).strip()[-400:]}")
@@ -80,6 +85,6 @@ def backup() -> bool | None:
     for a, rec in sorted((json.loads(reg.read_text()) if reg.exists() else {}).items()):
         root = Path(rec["root"])
         if root.exists():
-            ok &= rsync(["--delete", *[f"--exclude={e}" for e in ROOT_EXCLUDES], f"{root}/", url(s, "backup", f"roots/{a}/")],
+            ok &= rsync(["--delete", *[f"--exclude={e}" for e in ROOT_EXCLUDES], f"{root}/", url(s, "backup", f"root-{a}/")],
                         f"backup root {a}", 3600)
     return ok
