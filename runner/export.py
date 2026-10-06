@@ -26,7 +26,11 @@ FARM = DATA / "run" / "farm"
 # what may be published (REC-8): the viewer, its data per work (events, looks and their web copies, the painting's
 # log), the final renders, works.json
 ALLOWED = re.compile(r"^(studio/(index\.html|stream\.css|data/sessions\.json|data/w-[a-z]+-\d{3}/(events\.json|"
-                     r"(img|t|v)/\d+\.(png|jpg|webp)|file/paintings/lua/painting\.lua|final\.png)))$|^data/works\.json$")
+                     r"(img|t|v)/\d+\.(png|jpg|webp)|file/paintings/lua/painting\.lua|final\.png|final(-t)?\.jpg)))$|^data/works\.json$"
+                     # the atelier's own pages (site/ in the repository)
+                     r"|^(index\.html|robots\.txt|(about|walls|work)/index\.html|assets/atelier\.(css|js))$")
+PAGES = REPO / "site"
+FINAL_WEB = {"final.jpg": 1600, "final-t.jpg": 640}  # the walls' and the door's copies of a finished painting
 PUBLIC_MANIFEST = ("id", "studio", "number", "title", "mode", "theme", "start", "end", "model", "effort", "claude_code",
                    "replay_verified", "finished", "contaminated")
 CANARY = "35396958-eb10-44fe-8f7d-0720fe551f10"  # public on purpose (README, every page: REC-9)
@@ -65,6 +69,8 @@ def works_json(works):
             man = json.loads(m.read_text())
             pub = {k: man.get(k) for k in PUBLIC_MANIFEST}
             pub["reply"] = (w / "reply.md").read_text() if (w / "reply.md").exists() else ""
+            # the date of the painting as the atelier's calendar has it (the last sitting's day), not a visitor's
+            pub["date"] = (man.get("sittings") or [{}])[-1].get("date_shown")
         elif state.exists():  # the open work
             st = json.loads(state.read_text())
             pub = {"id": w.name, "number": st["number"], "mode": st["mode"], "theme": st["theme"], "start": st["created"],
@@ -72,9 +78,25 @@ def works_json(works):
         else:
             continue
         pub["viewer"] = f"w-{w.name}"
+        pub["artist"] = w.name.split("-")[0]
         out.append(pub)
     births = [json.loads(p.read_text()) for p in sorted((DATA / "artists").glob("*/birth.json"))]
     return {"works": out, "artists": births}
+
+
+def web_finals(png: Path, data: Path):
+    """JPEG copies of a finished painting for the pages, made once per painting."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return
+    for name, size in FINAL_WEB.items():
+        out = data / name
+        if out.exists() and out.stat().st_mtime >= png.stat().st_mtime:
+            continue
+        im = Image.open(png).convert("RGB")
+        im.thumbnail((size, size), Image.LANCZOS)
+        im.save(out, "JPEG", quality=86, optimize=True, progressive=True)
 
 
 def scan(site: Path) -> list[str]:
@@ -139,12 +161,18 @@ def main() -> int:
             (data / "file" / "paintings" / "lua" / "painting.lua").write_bytes(log.read_bytes())
         if (w / "final.png").exists():
             shutil.copy2(w / "final.png", data / "final.png")
+            web_finals(w / "final.png", data)
         ev = data / "events.json"  # the studio's path names its root on this machine: published as "studio"
         ev.write_text(re.sub(r"/Users/Shared/[a-z0-9]+/studio", "studio", ev.read_text()))
     keep = {f"w-{w.name}" for w in works}
     for stale in (SITE_ / "studio" / "data").glob("w-*"):
         if stale.name not in keep:
             shutil.rmtree(stale)
+    for f in PAGES.rglob("*"):  # the atelier's own pages, scanned and allowlisted like everything else
+        if f.is_file() and not f.name.startswith("."):
+            dst = SITE_ / f.relative_to(PAGES)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, dst)
     (SITE_ / "data").mkdir(exist_ok=True)
     (SITE_ / "data" / "works.json").write_text(json.dumps(works_json(works), indent=1))
     hits = scan(SITE_)

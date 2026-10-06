@@ -1,0 +1,27 @@
+# Copy to wrangler.toml (ignored by git) and fill in database_id from
+# `npx wrangler d1 create atelier-notes`. No account ids or secrets here:
+# secrets are set with `npx wrangler secret put`, and the account comes from
+# `wrangler login` or the CLOUDFLARE_ACCOUNT_ID environment variable.
+
+name = "atelier-notes"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+workers_dev = false
+
+# Same origin as the site, so no CORS. The zone notart.fyi must be on this account.
+routes = [
+  { pattern = "notart.fyi/api/notes*", zone_name = "notart.fyi" }
+]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "atelier-notes"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+# Daily clean-up of old rate-limit rows (03:17 UTC).
+[triggers]
+crons = ["17 3 * * *"]
+
+# Keep request logs off: they would record visitor IPs and headers.
+[observability]
+enabled = false

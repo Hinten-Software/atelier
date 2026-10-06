@@ -1,0 +1,51 @@
+/* The atelier's pages: a quiet room. The viewer (studio/) keeps its own styles. */
+:root {
+  --bg: #f3f0e9; --fg: #26241f; --muted: #77726a; --line: #d9d3c7; --card: #ebe6dc; --accent: #8a6a3b;
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --sans: -apple-system, "Segoe UI", system-ui, sans-serif;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --bg: #161513; --fg: #e9e5dc; --muted: #8f897e; --line: #2f2c27; --card: #1f1d1a; --accent: #c49a5c; }
+}
+:root[data-theme="dark"] { --bg: #161513; --fg: #e9e5dc; --muted: #8f897e; --line: #2f2c27; --card: #1f1d1a; --accent: #c49a5c; }
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 17px/1.65 var(--serif); min-height: 100vh; display: flex; flex-direction: column; }
+a { color: inherit; text-decoration-color: var(--line); text-underline-offset: 3px; }
+a:hover { text-decoration-color: var(--fg); }
+main { flex: 1; width: 100%; max-width: 1100px; margin: 0 auto; padding: 0 16px; }
+.narrow { max-width: 38rem; }
+header.top { max-width: 1100px; margin: 0 auto; width: 100%; padding: 22px 16px 0; font: 13px/1 var(--sans); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+header.top a { text-decoration: none; }
+h1, h2 { font-weight: normal; letter-spacing: .02em; }
+.door { min-height: 46vh; display: grid; place-items: center; text-align: center; padding: 8vh 0 4vh; }
+.door p { font-size: clamp(22px, 3.4vw, 34px); line-height: 1.35; max-width: 30ch; margin: 0; }
+.studios { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 28px; padding: 2vh 0 10vh; }
+.studio { display: block; text-decoration: none; }
+.studio .frame { aspect-ratio: 3 / 2; background: var(--card); border: 1px solid var(--line); display: grid; place-items: center; overflow: hidden; }
+.studio .frame img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.studio .frame span { color: var(--muted); font: 13px var(--sans); letter-spacing: .08em; }
+.studio h2 { font-size: 20px; margin: 12px 0 0; }
+.state { font: 13px/1.4 var(--sans); color: var(--muted); letter-spacing: .04em; }
+.state.live::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #b5452f; margin-right: 7px; vertical-align: 1px; }
+.walls { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 36px 28px; padding: 3vh 0 10vh; }
+.walls a { text-decoration: none; }
+.walls img { width: 100%; display: block; border: 1px solid var(--line); background: var(--card); }
+.walls .t { margin-top: 10px; }
+.easel { margin: 4vh 0 1vh; }
+.piece { padding: 4vh 0 2vh; }
+.piece img { width: 100%; height: auto; display: block; border: 1px solid var(--line); background: var(--card); }
+.label { font: 14px/1.6 var(--sans); color: var(--muted); margin: 18px 0 0; }
+.label .title { font: 22px/1.3 var(--serif); color: var(--fg); display: block; margin-bottom: 4px; }
+.label .fact { display: block; margin-top: 6px; font-style: italic; }
+.words { white-space: pre-wrap; max-width: 38rem; margin: 5vh 0; }
+.words h2 { font: 13px var(--sans); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+.actions { font: 14px var(--sans); margin: 3vh 0; }
+.prose { padding: 6vh 0 10vh; }
+.prose h1 { font-size: 28px; }
+footer { border-top: 1px solid var(--line); margin-top: 6vh; }
+footer div { max-width: 1100px; margin: 0 auto; padding: 22px 16px 34px; font: 13px/1.6 var(--sans); color: var(--muted); display: flex; gap: 24px; flex-wrap: wrap; justify-content: space-between; }
+footer p { margin: 0; max-width: 44rem; }
+footer nav a { margin-right: 16px; }
+.empty { color: var(--muted); font-style: italic; padding: 6vh 0; }
