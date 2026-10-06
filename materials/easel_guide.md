@@ -392,7 +392,7 @@ top of it.
 
 `look` shows you the canvas as it is now, with wet paint as laid. A whole
 view shows all of it, scaled down, like stepping back. A crop shows the
-canvas at its full detail, 2.4 pixels to a canvas unit, and may be at most
+canvas close up, 2.4 pixels to a canvas unit, and may be at most
 500 units on either side. `crop: "x0,y0,x1,y1"` gives two opposite corners
 in canvas units, not a position and width/height.
 

@@ -25,6 +25,12 @@ pub const BOX_MARK: &str = "--@ box";
 /// the head of its session file. A log without it was painted with engine 1:
 /// every log before the version was recorded.
 pub const ENGINE_MARK: &str = "--@ engine";
+/// The head line naming the width a painting is painted at (atelier change, 2026-10-06): a log
+/// without one was painted at `LEGACY_WIDTH`, so earlier paintings replay as they were painted.
+pub const WIDTH_MARK: &str = "--@ width";
+pub const LEGACY_WIDTH: usize = 2400;
+/// The widths a painting may be painted at.
+pub const WIDTHS: [usize; 2] = [2400, 4800];
 
 /// The longest a chunk of a live session may run (the longest of 2,502 painters' chunks on
 /// 2026-09-27 took 94 s). A chunk that runs longer is stopped like a failed one: nothing it
@@ -352,6 +358,11 @@ impl Session {
         let engine = self.st.borrow().tubes.engine;
         if engine != 1 {
             let _ = writeln!(s, "{ENGINE_MARK} {engine}");
+        }
+        // only a painting width other than the legacy one is named (test sessions use small widths)
+        let width = self.st.borrow().width;
+        if width != LEGACY_WIDTH && WIDTHS.contains(&width) {
+            let _ = writeln!(s, "{WIDTH_MARK} {width}");
         }
         for (i, c) in self.log.iter().enumerate() {
             let _ = writeln!(s, "\n{MARK} {}", i + 1);
@@ -690,6 +701,29 @@ pub fn logged_box(text: &str) -> Result<Option<String>, String> {
         }
     }
     Ok(found)
+}
+
+/// The width a session file names in its head (its `WIDTH_MARK` line before
+/// the first chunk): `LEGACY_WIDTH` if it names none.
+pub fn logged_width(text: &str) -> Result<usize, String> {
+    let mut found = None;
+    for l in text.lines() {
+        let l = l.trim();
+        if l.starts_with(MARK) {
+            break;
+        }
+        if let Some(rest) = l.strip_prefix(WIDTH_MARK) {
+            let v = rest.strip_prefix(' ').and_then(|v| v.trim().parse::<usize>().ok()).filter(|v| WIDTHS.contains(v));
+            let Some(v) = v else {
+                return Err(format!("the log's line {l:?} names no width this easel paints at ({WIDTH_MARK} <{}>)", WIDTHS.map(|w| w.to_string()).join("|")));
+            };
+            if found.is_some() {
+                return Err(format!("the log names its width twice ({WIDTH_MARK} lines)"));
+            }
+            found = Some(v);
+        }
+    }
+    Ok(found.unwrap_or(LEGACY_WIDTH))
 }
 
 /// The engine version a session file names in its head (its `ENGINE_MARK`
@@ -1407,6 +1441,24 @@ mod tests {
                   local v = w:view()
                   assert(v.form.parts == 2, 'mixed: ' .. v.form.parts)
                   assert(v:part(1) == 1 and v:part(2) == 0 and v:part(3) == 2)"#).unwrap();
+    }
+
+    /// A painting at 4800 px names its width; a log without the line was
+    /// painted at 2400 and replays at 2400 (atelier change, 2026-10-06).
+    #[test]
+    fn the_log_names_its_width() {
+        let mut a = Session::new(4800).unwrap();
+        a.run(CANVAS).unwrap();
+        let prog = a.program("t");
+        assert!(prog.contains(&format!("{WIDTH_MARK} 4800\n")), "{prog}");
+        assert_eq!(logged_width(&prog), Ok(4800));
+        assert_eq!(logged_width(&prog.replace(&format!("{WIDTH_MARK} 4800\n"), "")), Ok(LEGACY_WIDTH));
+        let mut b = Session::new(LEGACY_WIDTH).unwrap();
+        b.run(CANVAS).unwrap();
+        assert!(!b.program("t").contains(WIDTH_MARK));
+        for bad in ["--@ width 1000", "--@ width x", "--@ width 4800\n--@ width 4800"] {
+            assert!(logged_width(&format!("{bad}\n\n--@ chunk 1\n")).is_err(), "{bad}");
+        }
     }
 
     /// A new painting's log names the engine it is painted with; a log

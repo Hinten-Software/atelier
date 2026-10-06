@@ -41,8 +41,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-/// The one width a painting is painted, replayed and delivered at (px).
-const LIVE_WIDTH: usize = 2400;
+/// The width a new painting is painted at (px). A painting is replayed and delivered at the width
+/// its log names (session::logged_width): paintings begun before 2026-10-06 name none and stay 2400.
+const NEW_WIDTH: usize = 4800;
 
 /// The painter build's one session.
 #[cfg(not(feature = "replay"))]
@@ -77,7 +78,7 @@ const USAGE: &str = "easel: a live painting session (see notes/easel_guide.md)
   easel check         replay the log from scratch and compare with the live canvas
   easel close         end the session (the log stays)
   easel note '<text>' | easel note - (stdin)    append a dated entry to notes/journal.md
-  easel run <file.lua> [--out path.png] [--look] [--state-digest digests.txt]    replay at 2400px and write the PNG
+  easel run <file.lua> [--out path.png] [--look] [--state-digest digests.txt]    replay at the log's width and write the PNG
       [--frames-every <s> --frames-dir <dir> [--frame-width 1000]]   and a frame per <s> of hand time
   easel tubes [--markdown]   the tubes in the box a new painting takes (--markdown: as a table)
 
@@ -384,7 +385,7 @@ fn open_name(args: &[String]) -> Result<String, String> {
     let name = args.first().filter(|a| !a.starts_with('-')).ok_or("open <name>")?.clone();
     valid_name(&name)?;
     if args.len() != 1 {
-        return Err("open: live sessions are fixed at 2400px; no width option".into());
+        return Err("open: a live session's width is set by its painting; no width option".into());
     }
     Ok(name)
 }
@@ -561,7 +562,7 @@ fn serve(args: &[String]) -> Result<(), String> {
         return Err(format!("easel: fatal: this studio has one painting, {PAINTING:?}"));
     }
     if args.len() != 1 {
-        return Err("easel: fatal: live sessions are fixed at 2400px".into());
+        return Err("easel: fatal: a live session's width is set by its painting".into());
     }
     let _lock = serve_lock(&name).map_err(|e| format!("easel: fatal: {e}"))?;
     let mut srv = Server::resume(name.clone()).map_err(|e| format!("easel: fatal: {e}"))?;
@@ -785,7 +786,9 @@ impl Server {
         // an existing painting goes on with the box its log names; a new one takes the
         // configured box (session::box_for)
         let tubes = session::box_for(text.as_deref())?;
-        let mut srv = Self { name, s: Session::with_box(LIVE_WIDTH, tubes).map_err(|e| e.to_string())?, frames: false, written: None, replayed: 0 };
+        // an existing painting goes on at the width its log names; a new one is begun at NEW_WIDTH
+        let width = match &text { Some(t) => session::logged_width(t)?, None => NEW_WIDTH };
+        let mut srv = Self { name, s: Session::with_box(width, tubes).map_err(|e| e.to_string())?, frames: false, written: None, replayed: 0 };
         if let Some(text) = text {
             srv.written = Some(text.clone());
             let chunks = parse_program(&text);
@@ -972,7 +975,7 @@ fn deliver(c: &Canvas, out: &Path) -> Result<(), String> {
 }
 
 #[cfg(feature = "replay")]
-const RUN_USAGE: &str = "run <file.lua> [--out path.png] [--look] [--state-digest digests.txt] [--frames-every <s> --frames-dir <dir> [--frame-width 1000]] (replays at the live width, 2400px)";
+const RUN_USAGE: &str = "run <file.lua> [--out path.png] [--look] [--state-digest digests.txt] [--frames-every <s> --frames-dir <dir> [--frame-width 1000]] (replays at the width the log names)";
 
 #[cfg(feature = "replay")]
 fn run(args: &[String]) -> Result<(), String> {
@@ -985,8 +988,8 @@ fn run(args: &[String]) -> Result<(), String> {
             o => return Err(format!("run: unknown argument {o:?} ({RUN_USAGE})")),
         }
     }
-    let width = LIVE_WIDTH;
     let text = std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
+    let width = session::logged_width(&text).map_err(|e| format!("{file}: {e}"))?;
     let stem = Path::new(file).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or("easel".into());
     let out = flag(args, "--out").map(PathBuf::from).unwrap_or_else(|| root().join("out/lua").join(format!("{stem}.png")));
     let chunks = parse_program(&text);
