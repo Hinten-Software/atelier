@@ -5,8 +5,8 @@ https://notart.fyi. The NAS publishes no ports and the router stays closed. ngin
 
 ## Once: the tunnel (Cloudflare dashboard, the owner)
 
-1. dash.cloudflare.com -> **Zero Trust** (first time: pick the Free plan, a team name of your
-   choice; no card is needed for Free, skip if it asks for one and choose another way or stop) ->
+1. dash.cloudflare.com -> **Zero Trust** (first time: a team name of your choice, the Free plan;
+   Cloudflare may ask for a payment method even for the $0 plan, which is your call) ->
    **Networks -> Tunnels -> Create a tunnel -> Cloudflared**, name `atelier`, Save.
 2. On "Install and run connectors", choose **Docker**, copy the whole command shown, then on the Mac:
    `bash ~/dev/atelier/tools/save-token.sh tunnel` (it waits; copy the command when it asks, press Enter).
