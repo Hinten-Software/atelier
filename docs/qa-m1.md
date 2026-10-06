@@ -27,7 +27,7 @@ the table says how.
 | Q19 | minor | "as you left it" with no painting; journal not rolled back | first message until something is painted; journal in the rollback | – |
 | Q20 | minor | export looser than REC-7/8 | `/Users/` scan, studio path written as "studio", allowlist enforced, `final.png` published, contaminated read from the manifest too | test_export |
 | Q21 | minor | no SIGKILL fallback; fragile `model_seen`; test override honored in production; HOME | SIGKILL after 30 s; JSON parse; override only with ATELIER_TEST=1; HOME is the artist's root with the token login | – |
-| Q22 | minor | commit email public | the owner's choice (3dcubesweeper@gmail.com "for now") | – |
+| Q22 | minor | commit email public | the owner's choice: the commit email stays a project address | – |
 | Q23 | minor | the white-room check missed the runner's texts; allow rules too broad | scans runner/texts and the easel client; in code only string literals count | tools/whiteroom.py |
 | Q24 | minor | manifest and package gaps; probe pass not tied to the harness | engine commit, repo commit, MCP-config hash, pauses; engines archived by hash; `timeline.json` and `looks/` in every package; probe pass keyed to a harness fingerprint | test_runner |
 | Q25 | minor | test gaps; shared test folder | per-run folders; export, viewer and kill tests added | – |

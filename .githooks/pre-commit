@@ -1,0 +1,19 @@
+#!/bin/bash
+# Nothing private reaches a commit (requirements C17, REC-7): the repository is mirrored to public GitHub.
+# Checks what is staged for: the owner's private words (~/.atelier/private-words.txt, outside the repo),
+# home paths, local IP addresses and anything that looks like a secret. Installed by:
+#   git config core.hooksPath .githooks
+set -uo pipefail
+words="${ATELIER_PRIVATE_WORDS:-$HOME/.atelier/private-words.txt}"
+[ -f "$words" ] || { echo "pre-commit: $words is missing; refusing to commit unchecked" >&2; exit 1; }
+pattern=$(grep -v '^#' "$words" | grep -v '^$' | paste -sd'|' -)
+added=$(git diff --cached -U0 --no-color -- . ':!.githooks' | grep '^+' | grep -v '^+++')  # the guard's own patterns aside
+hits=""
+[ -n "$pattern" ] && hits+=$(printf '%s\n' "$added" | grep -i -n -E "$pattern" | sed 's/^/private word: /')
+hits+=$(printf '%s\n' "$added" | grep -n -E '/Users/[a-z]+/|\b(192\.168|10\.[0-9]{1,3})\.[0-9]{1,3}\.[0-9]{1,3}\b' | grep -v '/Users/Shared' | sed 's/^/path or IP: /')
+hits+=$(printf '%s\n' "$added" | grep -n -E 'sk-ant-[A-Za-z0-9_-]{20,}|eyJ[A-Za-z0-9_-]{60,}|ghp_[A-Za-z0-9]{20,}|github_pat_|0x4AAAAAA[A-Za-z0-9_-]{25,}' | sed 's/^/secret-like: /')
+if [ -n "$hits" ]; then
+  echo "pre-commit: not committed; the staged changes contain:" >&2
+  printf '%s\n' "$hits" | sed -E 's/(: [0-9]+:).*/\1 (line withheld)/' | head -20 >&2
+  exit 1
+fi
