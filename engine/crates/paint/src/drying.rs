@@ -105,6 +105,8 @@ pub mod drier {
     pub const MARS: f32 = 1.1;
     /// Viridian: no drier action reported; average. Estimate.
     pub const VIRIDIAN: f32 = 1.0;
+    pub const CHROMATE: f32 = 1.0;
+    pub const ZINC_YELLOW: f32 = 0.8;
     /// Indian yellow: an early account has it drying in oil "nearly as soon
     /// or sooner than" other colors (Artists' Pigments vol. 1 p.24); set near
     /// average. Uncertain.

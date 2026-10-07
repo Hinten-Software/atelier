@@ -11,7 +11,7 @@ export RUSTFLAGS="$remap"
 # engine/.cargo/config.toml sets CFLAGS for Lua's fixed hash seed; set here, it must carry that define too
 export CFLAGS="-Dluai_makeseed()=0x5eedu -ffile-prefix-map=$cargo_home=/cargo -ffile-prefix-map=$HOME=/home"
 cargo build --release -p easel
-cargo build --release -p easel --no-default-features --target-dir target/painter
+cargo build --release -p easel --no-default-features --features box-every --target-dir target/painter
 # (grep -q would end the pipe early, and with pipefail a broken pipe reads as "no match": count instead)
 check() {
   local b=$1 n

@@ -1418,13 +1418,14 @@ mod tests {
         assert!(e.contains("no tube \"rose madder\""), "{e}");
     }
 
-    /// The guide's tube table is the default box's.
+    /// The guide's tube table is the painters' box's: the every box (the atelier, 2026-10-07; the default
+    /// box before).
     #[test]
-    #[cfg(tube_box)]
-    fn the_guide_shows_the_default_box() {
+    #[cfg(feature = "box-every")]
+    fn the_guide_shows_the_painters_box() {
         let guide = include_str!("../../../notes/easel_guide.md");
         let table: String = guide.lines().skip_while(|l| !l.starts_with("| tube | pigment |")).take_while(|l| l.starts_with('|')).map(|l| format!("{l}\n")).collect();
-        assert_eq!(table, Palette::tube_box().table());
+        assert_eq!(table, Palette::named_box("every").unwrap().table());
     }
 
     // a view's form counts visible bodies only, not proxies

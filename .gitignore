@@ -4,3 +4,6 @@ node_modules/
 # runtime data never lives in the repo
 /data/
 *.local.*
+
+# the easel tests include the guide at upstream's path: a symlink to materials/, made locally for tests only
+engine/notes/

@@ -45,3 +45,13 @@ Engine changes are atelier events (requirements ENG-5), listed here with their d
   2400 outran the tool's wait): `session.rs` `chunk_limit_for` (10 minutes at 2400, 40 at 4800);
   `easel-mcp/src/upstream/easel-client.ts` `WAIT_MS` (`do` 12 -> 42 minutes, `rebuild` 30 -> 120);
   `runner/config.py` `MCP_TOOL_TIMEOUT` 15 -> 45 minutes.
+- 2026-10-07 the every box (the owner: after the default-position test, see docs/operations.md): upstream's
+  round-31 box of all 54 tubes (commit c0364ba), ported by hand onto our pin: six tubes added to the catalog
+  (strontium yellow, barium yellow, zinc yellow, carmine lake, yellow lake, vine black; two drier constants,
+  `CHROMATE` and `ZINC_YELLOW`), feature `box-every` on every tube and in `BOXES`, and the painter's easel
+  built for that box alone (`tools/build-engine.sh`), so a new painting takes it without a `box` file and
+  logs `--@ box every`; the replay easel keeps every box, so earlier paintings (the default box, no box
+  line) replay as painted. Not taken: upstream's later drying numbers for the first fourteen tubes (they
+  would change earlier paintings' replays) and `notes/research/every_materials.md` (it names painters).
+  `materials/easel_guide.md`: the tube table is the easel's own (`easel tubes --markdown`), 54 rows.
+

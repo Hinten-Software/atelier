@@ -98,6 +98,46 @@ The tube box:
 | green earth | celadonite and glauconite clay | 0.2 | 0.35 | 0.3 | 0.8 |
 | Rinmann's green | cobalt-zinc oxide | 0.35 | 0.5 | 0.4 | 1.4 |
 | copper green | verdigris ground in oil | 0.25 | 0.4 | 1.0 | 1.6 |
+| zinc white | zinc oxide | 0.6 | 0.6 | 1.0 | 0.35 |
+| lead-tin yellow | lead-tin oxide | 0.85 | 0.75 | 0.6 | 2.0 |
+| Naples yellow | lead antimonate | 0.85 | 0.75 | 0.6 | 1.6 |
+| lemon chrome | pale lead chromate with lead sulfate | 0.8 | 0.7 | 0.8 | 1.8 |
+| pale cadmium | cadmium sulfide, a pale grade | 0.85 | 0.7 | 1.1 | 0.6 |
+| deep cadmium | cadmium sulfide, a deep grade | 0.9 | 0.6 | 1.2 | 0.6 |
+| cadmium yellow | cadmium sulfide | 0.85 | 0.7 | 1.1 | 0.6 |
+| Indian yellow | magnesium and calcium euxanthate | 0.15 | 0.4 | 0.8 | 0.8 |
+| Mars yellow | synthetic iron oxide hydroxide | 0.85 | 0.7 | 1.1 | 1.1 |
+| transparent oxide yellow | transparent synthetic iron oxide | 0.2 | 0.5 | 0.9 | 1.0 |
+| brown ochre | iron oxide earth, a darker grade | 0.8 | 0.7 | 0.8 | 0.8 |
+| raw sienna | sienna earth, unroasted | 0.4 | 0.5 | 0.7 | 1.2 |
+| orange chrome | basic lead chromate | 0.88 | 0.75 | 0.9 | 1.8 |
+| Mars orange | synthetic iron oxide, an orange grade | 0.5 | 0.7 | 1.1 | 1.1 |
+| red lead | lead tetroxide | 0.85 | 0.8 | 0.8 | 2.2 |
+| orange vermilion | mercuric sulfide, a yellower grade | 0.9 | 0.75 | 1.0 | 0.4 |
+| Chinese vermilion | mercuric sulfide, a deeper grade | 0.9 | 0.75 | 1.0 | 0.4 |
+| cadmium red | cadmium sulfoselenide | 0.9 | 0.7 | 1.1 | 0.6 |
+| Mars red | synthetic iron oxide | 0.9 | 0.7 | 1.2 | 1.1 |
+| Indian red | nearly pure ferric oxide | 0.92 | 0.7 | 1.2 | 1.0 |
+| rose madder | madder lake on alumina | 0.1 | 0.35 | 0.9 | 0.3 |
+| permanent alizarin | a quinacridone | 0.15 | 0.45 | 1.3 | 0.3 |
+| magenta | fuchsine (aniline) lake on alumina | 0.1 | 0.35 | 1.5 | 0.3 |
+| burnt sienna | roasted sienna earth | 0.45 | 0.55 | 0.9 | 1.2 |
+| Mars brown | synthetic iron oxide, roasted | 0.85 | 0.65 | 1.0 | 1.2 |
+| bone brown | bone roasted until brown | 0.6 | 0.6 | 0.9 | 0.3 |
+| bitumen | asphaltum | 0.12 | 0.3 | 0.7 | 0.15 |
+| cerulean blue | cobalt stannate | 0.8 | 0.7 | 0.6 | 1.4 |
+| ultramarine blue | synthetic ultramarine | 0.3 | 0.5 | 1.1 | 0.8 |
+| ultramarine ash | natural ultramarine, a pale last extraction | 0.15 | 0.5 | 0.3 | 0.8 |
+| Antwerp blue | Prussian blue on an alumina base | 0.4 | 0.45 | 1.6 | 1.6 |
+| viridian | hydrated chromium oxide | 0.3 | 0.5 | 0.9 | 1.0 |
+| emerald green | copper aceto-arsenite | 0.6 | 0.6 | 0.6 | 1.6 |
+| cobalt violet | cobalt phosphate or arsenate | 0.35 | 0.55 | 0.35 | 1.4 |
+| strontium yellow | strontium chromate | 0.55 | 0.65 | 0.8 | 1.0 |
+| barium yellow | barium chromate (lemon yellow) | 0.45 | 0.7 | 0.9 | 1.0 |
+| zinc yellow | potassium zinc chromate | 0.4 | 0.6 | 0.65 | 0.8 |
+| carmine lake | carminic acid (cochineal) on alumina | 0.1 | 0.3 | 1.2 | 0.3 |
+| yellow lake | flavonoid dye (weld, quercitron) on alumina and chalk | 0.08 | 0.35 | 0.5 | 0.3 |
+| vine black | charcoal of vine twigs | 0.75 | 0.45 | 0.6 | 0.35 |
 
 Hiding is how much one coat of the tube paint hides what is under it (0
 transparent, 1 opaque). Stiffness is the paint's body as it comes from the
