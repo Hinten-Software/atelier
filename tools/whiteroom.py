@@ -39,6 +39,12 @@ PATTERN = re.compile(r"\b(" + "|".join(WORDS) + r")", re.I)
 # (file suffix, line substring) -> why it's fine
 ALLOW = {
     ("easel_guide.md", "paler grade of smalt"): "a pigment grade",
+    ("easel_guide.md", "a pale grade"): "a pigment grade",
+    ("easel_guide.md", "a deep grade"): "a pigment grade",
+    ("easel_guide.md", "a darker grade"): "a pigment grade",
+    ("easel_guide.md", "an orange grade"): "a pigment grade",
+    ("easel_guide.md", "a yellower grade"): "a pigment grade",
+    ("easel_guide.md", "a deeper grade"): "a pigment grade",
     ("easel_guide.md", "| round 2."): "a round brush, 2.2 / 2.6 wide",
     ("easel_guide.md", 'pencil("2H")'): "pencil grades",
     ("easel_guide.md", "Bitwise operators"): "Lua operators",
