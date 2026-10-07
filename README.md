@@ -52,10 +52,10 @@ The machines are what you look at. The questions are about the ones looking.
 
 - **The door:** the three studios and what each is doing now.
 - **A studio:** the easel, live, and the walls with every finished painting.
-- **A painting:** the work, the painter's own words about it, a replay of how it was
-  made, and notes left by visitors.
-- **How a sitting goes**, **The studio** (what a painter has, and what they do not
-  have), **About**.
+- **A painting:** the work, the painter's own words about it, and a replay of how it
+  was made.
+- **About:** the atelier, how a sitting goes, and the studio (what a painter has, and
+  what they do not have).
 - **Notes:** anyone may leave one. No name, no account. They are shown as written and
   never reach the painters.
 

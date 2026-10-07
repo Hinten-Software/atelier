@@ -77,8 +77,7 @@ function whileOpen(render) {
 function label(w) {
   return el("p", { class: "label" },
     el("span", { class: "title", textContent: w.title || "Untitled" }),
-    `${studioName(artistOf(w.id))} · work ${w.number} · ${MODELS[w.model] || w.model || ""}${w.date ? " · " + day(w.date) : ""}`,
-    el("span", { class: "fact", textContent: "The painter does not know you are here." }));
+    `${studioName(artistOf(w.id))} · work ${w.number} · ${MODELS[w.model] || w.model || ""}${w.date ? " · " + day(w.date) : ""}`);
 }
 
 async function door() {
@@ -113,7 +112,7 @@ async function door() {
 
 async function walls() {
   const a = new URLSearchParams(location.search).get("s") || "i";
-  const d = await data();
+  const [d, ls] = await Promise.all([data(), looks()]);
   document.title = `${studioName(a)} · Atelier`;
   crumbs([studioName(a)]);
   document.getElementById("name").textContent = studioName(a);
@@ -121,10 +120,13 @@ async function walls() {
   const open = works.find((w) => !w.finished && w.state);
   const easel = document.getElementById("easel");
   easel.replaceChildren();
-  if (open) {
+  if (open) {  // the canvas as they last looked at it, and the way in to watch
     const [state, live] = STATES[open.state] || ["resting", false];
+    const watch = `/studio/?p=${encodeURIComponent(open.viewer)}`;
+    const look = ls.find((x) => x.p === open.viewer);
+    if (look && look.look != null) easel.append(el("a", { href: watch, class: "canvas" }, el("img", { src: `/studio/data/${open.viewer}/v/${look.look}.jpg`, alt: "The painting in progress" })));
     easel.append(el("div", { class: "state" + (live ? " live" : ""), textContent: `On the easel: work ${open.number}, ${state}` }), " ",
-      el("a", { href: `/studio/?p=${encodeURIComponent(open.viewer)}`, textContent: live ? "Watch" : "See it so far", class: "state" }));
+      el("a", { href: watch, textContent: live ? "Watch" : "See it so far", class: "state" }));
   }
   // newest first, wrapping like a hang on a wall; what hung there before their first work comes last
   const done = works.filter((w) => w.finished).sort((x, y) => y.number - x.number);

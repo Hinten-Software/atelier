@@ -38,15 +38,17 @@ h1, h2 { font-weight: normal; letter-spacing: .02em; }
 .walls .t { display: block; text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .walls a.t:hover { text-decoration: underline; text-decoration-color: var(--fg); }
 .walls .hung { grid-column: 1 / -1; margin: 2vh 0 -16px; border-top: 1px solid var(--line); padding-top: 18px; }
-.prose h2 { font-size: 20px; margin-top: 2.2em; }
+.prose h2 { font-size: 22px; margin-top: 2.6em; }
+.prose h3 { font-size: 17px; font-weight: normal; font-style: italic; margin: 1.6em 0 .4em; }
 .prose ul { padding-left: 1.2em; }
 .prose li { margin: .35em 0; }
 .easel { margin: 4vh 0 1vh; }
+.easel .canvas { display: block; max-width: 720px; margin-bottom: 14px; }
+.easel .canvas img { width: 100%; display: block; border: 1px solid var(--line); background: var(--card); }
 .piece { padding: 4vh 0 2vh; }
 .piece img { width: 100%; height: auto; display: block; border: 1px solid var(--line); background: var(--card); cursor: zoom-in; }
 .label { font: 14px/1.6 var(--sans); color: var(--muted); margin: 18px 0 0; }
 .label .title { font: 22px/1.3 var(--serif); color: var(--fg); display: block; margin-bottom: 4px; }
-.label .fact { display: block; margin-top: 6px; font-style: italic; }
 .words { white-space: pre-wrap; max-width: 38rem; margin: 5vh 0; }
 .words h2 { font: 13px var(--sans); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
 .actions { font: 14px var(--sans); margin: 3vh 0; }
