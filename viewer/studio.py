@@ -467,7 +467,7 @@ def title_of(say):
 def _title_of(say):
     # the atelier's painters most often name it in their first sentence: "... and called it **Estuary, Last Light**."
     first = next((p for p in re.split(r"\n\s*\n", say or "") if p.strip()), "")
-    m = re.search(r"\b(?:called|titled|named|call|title)\s+(?:it\s+)?\*\*([^*\n]{2,80})\*\*", first)
+    m = re.search(r"\b(?:call(?:ed|ing)?|titled?|titling|nam(?:ed|ing|e))\s+(?:it\s+)?\*\*([^*\n]{2,80})\*\*", first)
     if m:
         return m.group(1).strip()
     m = TITLE.match(say or "")
