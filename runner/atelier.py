@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import CLAUDE, DATA, TOKEN  # noqa: E402
 from studio import Artist, birth, registry  # noqa: E402
-from works import CURRENT, RUN, TERMINAL, Work, event, log  # noqa: E402
+from works import CURRENT, RUN, STANDING, TERMINAL, Work, event, log  # noqa: E402
 
 
 def alive(pid: int) -> bool:
@@ -175,9 +175,6 @@ def cmd_backup(a):
     print({None: "no NAS configured (DATA/nas.json and the sync password)", True: "backup done", False: "backup failed: see run/nas.log"}[r])
 
 
-STANDING = DATA / "run" / "until"  # the owner's standing go: an ISO time until which the studios paint in turn
-
-
 def cmd_tick(a):
     """The owner's standing go (2026-10-07: all three studios, in turn, at night, within the budget, until the time in
     DATA/run/until). Run every 10 minutes by launchd (deploy/mac/): resumes a work a reboot cut off, else starts the
@@ -198,6 +195,11 @@ def cmd_tick(a):
         return
     if not budget.in_window() or budget.spent_today() >= budget.DAILY_USD:
         return
+    if budget.WINDOW != "always":  # no new work in a night's last 90 minutes: it would straddle into the next night
+        now, end = datetime.now(), int(budget.WINDOW.split("-")[1])
+        left = (now.replace(hour=end, minute=0, second=0, microsecond=0) - now).total_seconds()
+        if 0 < left < 90 * 60:
+            return
     reg = registry()
     n, id = sorted((len(Artist(x).works()), x) for x in reg)[0]
     log(f"tick: starting {Artist(id).name}'s work {n + 1} (the owner's standing go until {STANDING.read_text().strip()})")
