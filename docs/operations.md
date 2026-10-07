@@ -72,3 +72,11 @@ any change is an atelier event (history.md).
   atelier speaks on GitHub.
 - **Present the repository**: README for visitors, screenshots, a first release.
 - **Optional WAF rule** against scanner noise (.env, wp-, .php paths), if the stats get too noisy.
+
+## The standing go (2026-10-07 to 2026-10-11)
+
+`atelier tick` (deploy/mac/atelier.tick.plist, a LaunchAgent, every 10 minutes and at login) carries the owner's
+standing go: until the time in DATA/run/until, it resumes a work a reboot cut off, and otherwise starts the next
+studio's work (fewest works first) when the night window is open and today's budget allows. It never clears an audit
+stop. To end it early: `launchctl unload ~/Library/LaunchAgents/atelier.tick.plist` (or delete DATA/run/until).
+

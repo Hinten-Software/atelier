@@ -8,6 +8,7 @@
     atelier resume [--clear REASON]            continue an interrupted work (a person, after a reboot or a crash);
                                                --clear: continue a work the white-room audit stopped (logged)
     atelier next                               whose turn it is (fewest works)
+    atelier tick                               (launchd, every 10 minutes) the owner's standing go: resume or start
     atelier export                             export the site now (the runner does every 2 minutes during a work)
     atelier serve [--host H] [--port P]        serve the export on the LAN
     atelier run <work>                         (internal) the runner itself
@@ -174,6 +175,35 @@ def cmd_backup(a):
     print({None: "no NAS configured (DATA/nas.json and the sync password)", True: "backup done", False: "backup failed: see run/nas.log"}[r])
 
 
+STANDING = DATA / "run" / "until"  # the owner's standing go: an ISO time until which the studios paint in turn
+
+
+def cmd_tick(a):
+    """The owner's standing go (2026-10-07: all three studios, in turn, at night, within the budget, until the time in
+    DATA/run/until). Run every 10 minutes by launchd (deploy/mac/): resumes a work a reboot cut off, else starts the
+    next studio's work when the window is open and today's budget allows. Never clears an audit stop."""
+    from datetime import datetime
+    import budget
+    if not STANDING.exists() or datetime.now().astimezone() >= datetime.fromisoformat(STANDING.read_text().strip()):
+        return
+    w = open_work()
+    if w:
+        if runner_alive(w) or w.state["state"] in TERMINAL:
+            return
+        if w.state["state"] == "stopped":
+            log(f"tick: {w.id} was stopped by the white-room audit; it waits for a person")
+            return
+        log(f"tick: {w.id} has no runner; resuming it")
+        cmd_resume(argparse.Namespace(clear=None))
+        return
+    if not budget.in_window() or budget.spent_today() >= budget.DAILY_USD:
+        return
+    reg = registry()
+    n, id = sorted((len(Artist(x).works()), x) for x in reg)[0]
+    log(f"tick: starting {Artist(id).name}'s work {n + 1} (the owner's standing go until {STANDING.read_text().strip()})")
+    cmd_paint(argparse.Namespace(artist=id, theme=None, by="owner"))
+
+
 def cmd_next(a):
     reg = registry()
     if not reg:
@@ -201,6 +231,7 @@ def main():
     rs = sub.add_parser("resume")
     rs.add_argument("--clear")
     sub.add_parser("next")
+    sub.add_parser("tick")
     sv = sub.add_parser("serve")
     sv.add_argument("--host", default="0.0.0.0")
     sv.add_argument("--port", type=int, default=8800)
