@@ -114,7 +114,7 @@ async function notes(box, workId, titles) {
   const form = el("form", { class: "note-form" });
   const text = el("textarea", { name: "text", maxLength: 500, rows: 4, required: true, "aria-label": "Your note" });
   const count = el("span", { class: "count", textContent: "500" }), check = el("div", { class: "check" });
-  const send = el("button", { type: "submit", textContent: "Leave it" }), said = el("p", { class: "said", role: "status" });
+  const send = el("button", { type: "submit", textContent: "Leave the note" }), said = el("p", { class: "said", role: "status" });
   form.append(el("p", { class: "invite", textContent: "Leave a note. No name, no account. It will be shown as written." }), text,
     el("div", { class: "row" }, check, count, send), said);
   box.append(form, list, more);
