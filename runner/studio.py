@@ -76,13 +76,13 @@ class Artist:
 
 
 def birth(model: str = MODEL, effort: str = EFFORT, studio: str | None = None, walls: Path | None = None,
-          temperament: str | None = None) -> Artist:
+          temperament: str | None = None, temperament_note: str | None = None) -> Artist:
     """A new artist: a neutral root, an empty studio, its own Claude config, and a public birth record (ART-2).
     studio: which studio ("iii"); default the first one not yet born. walls: a folder of paintings to hang before the
     artist first wakes (named 1, 2, ...: the walls' standard), without cards; the painter is told nothing of them.
     temperament: the owner's text, the notebook's first page at birth, unsigned; the painter is told nothing of it
     and may keep, revise or outgrow it. The text is kept privately (DATA/artists/<id>/temperament-at-birth); the
-    public record says only that it was given."""
+    public record says only that it was given (temperament_note: the owner's text for visitors in its place)."""
     reg = registry()
     id = (studio or next(r.lower() for r in ROMAN if r.lower() not in reg)).lower()
     if id in reg or id.upper() not in ROMAN:
@@ -106,7 +106,7 @@ def birth(model: str = MODEL, effort: str = EFFORT, studio: str | None = None, w
         "claude_code": CLAUDE_VERSION, "founding_statement": None,
         "walls_at_birth": len(wall_files(walls)) if walls else 0,
         "walls_note": WALLS_NOTE if walls else None,
-        "temperament_note": TEMPERAMENT_NOTE if temperament else None,
+        "temperament_note": (temperament_note.strip() if temperament_note else TEMPERAMENT_NOTE) if temperament else None,
     }, indent=1))
     first_page = temperament.strip() + "\n" if temperament else ""
     if temperament:

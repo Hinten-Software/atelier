@@ -135,7 +135,13 @@ async function walls() {
   const atBirth = [];
   for (let n = birth.walls_at_birth || 0; n >= 1; n--) atBirth.push({ src: `/studio/data/walls-${a}/${n}.jpg`, title: String(n) });
   const all = [...items, ...atBirth];
-  if (birth.temperament_note) easel.append(el("p", { class: "state", textContent: birth.temperament_note }));
+  if (birth.temperament_note) {  // the owner's note for visitors: a heading line, then paragraphs, set as text (ATL-13)
+    const [head, ...rest] = birth.temperament_note.split(/\n/);
+    const paras = rest.join("\n").split(/\n\s*\n/).map((x) => x.trim()).filter(Boolean);
+    easel.append(paras.length
+      ? el("section", { class: "words given" }, el("h2", { textContent: head }), ...paras.map((x) => el("p", { textContent: x })))
+      : el("p", { class: "state", textContent: head }));
+  }
   const box = document.getElementById("walls");
   const kids = [];
   if (!all.length) kids.push(el("p", { class: "empty", textContent: "The walls are bare." }));

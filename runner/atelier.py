@@ -72,7 +72,10 @@ def cmd_birth(a):
         temperament = Path(a.temperament).expanduser().read_text()
         if not temperament.strip():
             raise SystemExit(f"--temperament {a.temperament}: the file is empty")
-    artist = birth(studio=a.studio, walls=walls, temperament=temperament)
+    note = Path(a.temperament_note).expanduser().read_text() if a.temperament_note else None
+    if note is not None and not temperament:
+        raise SystemExit("--temperament-note goes with --temperament")
+    artist = birth(studio=a.studio, walls=walls, temperament=temperament, temperament_note=note)
     rec = json.loads((artist.home / "birth.json").read_text())
     hung = rec["walls_at_birth"]
     event(f"{artist.name} born ({artist.id}), model and effort in the birth record"
@@ -187,6 +190,7 @@ def main():
     b.add_argument("--studio", help="which studio to birth (i, ii, iii); default the first not yet born")
     b.add_argument("--walls", help="a folder of paintings named 1, 2, ... to hang before the first work")
     b.add_argument("--temperament", help="a text file: the owner's temperament for the painter, their notebook's first page")
+    b.add_argument("--temperament-note", help="a text file: what visitors read about the temperament (first line: its heading)")
     pp = sub.add_parser("paint")
     pp.add_argument("artist")
     pp.add_argument("--theme")

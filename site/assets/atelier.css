@@ -50,6 +50,8 @@ h1, h2 { font-weight: normal; letter-spacing: .02em; }
 .label { font: 14px/1.6 var(--sans); color: var(--muted); margin: 18px 0 0; }
 .label .title { font: 22px/1.3 var(--serif); color: var(--fg); display: block; margin-bottom: 4px; }
 .words { white-space: pre-wrap; max-width: 38rem; margin: 5vh 0; }
+.words.given { white-space: normal; margin: 3vh 0 5vh; }
+.words.given p { margin: 0 0 .9em; }
 .words h2 { font: 13px var(--sans); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
 .actions { font: 14px var(--sans); margin: 3vh 0; }
 .prose { padding: 6vh 0 10vh; }
