@@ -198,6 +198,12 @@ def main() -> int:
             dst = SITE_ / f.relative_to(PAGES)
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(f, dst)
+            if f.suffix == ".html":  # assets by content version: an update never shows next to a cached old script
+                html = dst.read_text()
+                for asset in ("atelier.js", "atelier.css"):
+                    v = __import__("hashlib").sha256((PAGES / "assets" / asset).read_bytes()).hexdigest()[:10]
+                    html = html.replace(f"/assets/{asset}\"", f"/assets/{asset}?v={v}\"")
+                dst.write_text(html)
             if f.suffix == ".html" and NOTES_SETTINGS.exists():  # the bot check's public key, where a note can be left
                 key = json.loads(NOTES_SETTINGS.read_text()).get("sitekey", "")
                 if re.fullmatch(r"[0-9A-Za-z_-]{10,64}", key):
