@@ -190,9 +190,9 @@
   <section class="pane" id="codepane"><h4>code <span id="file"></span></h4><pre id="code"></pre></section>
   <section class="pane" id="viewpane">
     <div id="view">
-      <figure class="pic" id="whole"><div class="box"><img id="img" alt="the painting"><div id="cropbox" hidden></div><p id="nopic" hidden>No picture yet: the painter hasn't looked at its canvas.<br>Its first look will show here.</p></div><figcaption id="cap"></figcaption></figure>
+      <figure class="pic" id="whole"><div class="box"><img id="img" alt="the painting"><div id="cropbox" hidden></div><p id="nopic" hidden>No picture yet: the painter hasn't looked at their canvas.<br>Their first look will show here.</p></div><figcaption id="cap"></figcaption></figure>
       <figure class="pic" id="other" hidden><figcaption id="cap2"><b></b><span></span></figcaption><div class="box"><img id="img2" alt=""><span id="reftag" hidden>Reference</span></div></figure>
-      <figure class="pic" id="pal" hidden><figcaption id="cap3" title="The paints it has mixed, as it last looked at them: each pile thick, thin and very thin over the ground, and thin over a black and white card"><b>Palette</b><span></span></figcaption><div class="box"><img id="img3" alt="the palette"></div></figure>
+      <figure class="pic" id="pal" hidden><figcaption id="cap3" title="The paints they have mixed, as they last looked at them: each pile thick, thin and very thin over the ground, and thin over a black and white card"><b>Palette</b><span></span></figcaption><div class="box"><img id="img3" alt="the palette"></div></figure>
     </div>
     <a id="finished" hidden>See the finished painting →</a>
   </section>
@@ -219,9 +219,9 @@
 </div>
 <div id="zoom"><img id="zimg" alt=""></div>
 <div id="intro" hidden role="dialog" aria-label="About the studio">
-  <b>You're watching an AI paint.</b> It writes every brushstroke as code, and a simulation of bristles, wet paint and linen carries it out. They do not know you are here.
-  The big picture is the painting as it last saw it whole; when it studies a detail up close, squints or checks the picture in grays, that view shows below it.
-  Its thinking runs beside the picture. <span class="live">LIVE</span> means it's working right now.
+  <b>You're watching an AI paint.</b> They write every brushstroke as code, and a simulation of bristles, wet paint and linen carries it out. They do not know you are here.
+  The big picture is the painting as they last saw it whole; when they study a detail up close, squint or check the picture in grays, that view shows below it.
+  Their thinking runs beside the picture. <span class="live">LIVE</span> means they're working right now.
   Press <b>▶ Replay</b> to watch the painting grow, or tap the painter's name at the top to choose another.
   <div class="row"><a href="/">See the finished paintings</a><button id="introok">Got it</button></div>
 </div>
@@ -394,7 +394,7 @@ async function loadSessions() {
 $('all').onchange = () => { localStorage.setItem('studio.all', $('all').checked ? '1' : '0'); renderPicker(); };
 let gen = 0, busy = false;  // one poll at a time; a reset (new painter, rebuilt stream) makes in-flight polls stale
 function reset() { gen++; busy = false; staticV = null; stop(); events = []; nUpd = 0; epoch = null; cwd = ''; liveText = null; typed = -1; sitStarts = [0]; nSittings = 1; hasLooks = false; $('strip').innerHTML = ''; $('ticks').innerHTML = ''; noPicture(); }
-const NOPIC = "No picture yet: the painter hasn't looked at its canvas.<br>Its first look will show here.";
+const NOPIC = "No picture yet: the painter hasn't looked at their canvas.<br>Their first look will show here.";
 function noPainting() { $('nopic').innerHTML = NOPIC; $('nopic').hidden = !events.length; clearPic($('img')); $('cap').textContent = ''; viewI = -1; }  // the painting's place, empty
 function noPicture() { noPainting(); second(-1); palette(-1); $('zimg').removeAttribute('src'); $('zoom').style.display = 'none'; }
 async function poll() {
@@ -407,7 +407,7 @@ async function poll() {
         if (v && v !== ',' && v === staticV && g === gen && epoch !== null) { lastStatic = Date.now(); return; }
         r = await a.json(); if (g === gen) staticV = v; }
   catch (e) {  // no such painter (yet): a stream opened before its painter begins waits for it
-    if (g === gen && !events.length) { $('nopic').innerHTML = "This painter hasn't started yet.<br>Its canvas will show here when it does."; $('nopic').hidden = false; $('clockbox').hidden = true;
+    if (g === gen && !events.length) { $('nopic').innerHTML = "This painter hasn't started yet.<br>Their canvas will show here when they do."; $('nopic').hidden = false; $('clockbox').hidden = true;
       $('badge').textContent = ''; $('badge').className = ''; for (const x of $('doing').children) x.textContent = ''; }
     return; }
   finally { if (g === gen) busy = false; }
@@ -496,13 +496,13 @@ function kindOf(e) {
   if (e.kind === 'image') return e.ref ? ['ref', '🖼', 'studies a reference picture'] : ['look', '👁', 'looks at ' + (f || 'the canvas')];
   if (e.kind === 'look') return ['look', '👁', lookWords(e.text)[2]];
   if (e.kind === 'paint') { const ok = paintOK(e);
-    return [ok ? 'code' : e.err ? 'fail' : 'code', '🖌', ok ? 'paints' : (e.err ? 'paints, but its code has an error' : 'paints')]; }
+    return [ok ? 'code' : e.err ? 'fail' : 'code', '🖌', ok ? 'paints' : (e.err ? 'paints, but their code has an error' : 'paints')]; }
   if (e.kind === 'jnote') return ['notes', '📝', 'writes in the journal'];
   if (e.kind === 'cmd') {
     const c = (e.text || '').replace(/^\s*((cd\s+\S+|export\s+[^;&\n]*|source\s+\S+|set\s+-\S+)\s*(&&|;|\n)\s*)+/, ''), fail = /error(\[|:)|panicked|FAILED/.test(e.out || '');
     if (/cargo paint/.test(c)) { const w = (c.match(/--crop\s+(\S+)/)||[])[1], r = (c.match(/--resume\s+("[^"]+"|\S+)/)||[])[1];
       return [fail ? 'fail' : 'render', '🎨', (w ? 'renders a close-up' : 'renders the whole painting') + (r ? ' from ' + r.replace(/"/g, '') : '') + (fail ? ' — failed' : '')]; }
-    if (/cargo (build|check|test|clippy)/.test(c)) return [fail ? 'fail' : 'compile', '🔧', 'compiles its program' + (fail ? ' — errors' : '')];
+    if (/cargo (build|check|test|clippy)/.test(c)) return [fail ? 'fail' : 'compile', '🔧', 'compiles their program' + (fail ? ' — errors' : '')];
     const wr = c.match(/(?:cat|tee)\s*>+\s*(\S+)|(?:sed|perl)\s+-[a-z]*i\S*\s.*?(\S+\.(?:rs|lua|md))\s*$|open\(["']([^"']+\.(?:rs|lua|md))["'],\s*["']w/m);
     if (wr || /python3?\s+-\s*<</.test(c) && /\.(rs|lua|md)/.test(c)) { const t = wr ? fname(wr[1] || wr[2] || wr[3]) : fname((c.match(/[\w/.-]+\.(?:rs|lua|md)/)||[''])[0]);
       return [/\.md$/.test(t) ? 'notes' : 'code', '✍️', 'edits ' + (t || 'files') + ' via script']; }
@@ -638,7 +638,7 @@ function journal(i) {
   // the newest blocks at once, the older ones above them a piece at a time, what's in view kept where it is: laying
   // out a long painter's last 250 events at once blocks the page for a moment
   const jb = $('jbody'), g = ++jgen, piece = () => { let n = 0, a = html.length; while (a > 0 && n < 12000) n += html[--a].length; return html.splice(a).join(''); };
-  jb.innerHTML = piece() || '<p class="jempty">The painter has just begun.<br>What it thinks and does will show here.</p>'; jb.scrollTop = 1e9;
+  jb.innerHTML = piece() || '<p class="jempty">The painter has just begun.<br>What they think and do will show here.</p>'; jb.scrollTop = 1e9;
   const older = () => { if (g !== jgen || !html.length) return; const h = jb.scrollHeight; jb.insertAdjacentHTML('afterbegin', piece()); jb.scrollTop += jb.scrollHeight - h; setTimeout(older, 0); };
   if (html.length) setTimeout(older, 0);
   if (lastThink >= 0 && live && lastThink === events.length - 1 && lastThink !== typed) {
@@ -690,8 +690,8 @@ function palette(k) {
 }
 // a look request in words: [title, what it's for, the chip's words]
 function lookWords(req) {
-  if (req == null) return ['A picture it opened', 'an image file it looked at', 'looks at a picture'];
-  if (/palette (?!False)/.test(req)) return ['Palette', 'the paints it has mixed, thick and thin', 'looks at its palette'];
+  if (req == null) return ['A picture they opened', 'an image file they looked at', 'looks at a picture'];
+  if (/palette (?!False)/.test(req)) return ['Palette', 'the paints they have mixed, thick and thin', 'looks at their palette'];
   const mode = (req.match(/mode\s+([a-z,]+)/) || [''])[0], crop = /crop/.test(req), sq = /squint|blur/.test(mode), val = /value|gray/.test(mode), mir = /mirror/.test(mode);
   const why = [crop && 'up close, at full detail', sq && 'blurred on purpose, as through half-closed eyes, to judge the big shapes',
                val && 'in grays, to judge light against dark', mir && 'flipped left to right, to see it with fresh eyes'].filter(Boolean);
