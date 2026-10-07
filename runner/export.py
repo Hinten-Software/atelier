@@ -26,7 +26,7 @@ FARM = DATA / "run" / "farm"
 # what may be published (REC-8): the viewer, its data per work (events, looks and their web copies, the painting's
 # log), the final renders, works.json
 ALLOWED = re.compile(r"^(studio/(index\.html|stream\.css|data/sessions\.json|data/w-[a-z]+-\d{3}/(events\.json|"
-                     r"(img|t|v)/\d+\.(png|jpg|webp)|file/paintings/lua/painting\.lua|final\.png|final(-t)?\.jpg)))$|^data/works\.json$"
+                     r"(img|t|v)/\d+\.(png|jpg|webp)|file/paintings/lua/painting\.lua|final\.png|final(-t)?\.jpg)|viewer-\d+\.js))$|^data/works\.json$"
                      # the atelier's own pages (site/ in the repository)
                      r"|^(index\.html|robots\.txt|(about|walls|work|how|studio-room|notes)/index\.html|assets/atelier\.(css|js))$")
 NOTES_SETTINGS = DATA / "notes.json"  # {"sitekey": "<the Turnstile widget's public site key>"} (deploy/notes)
@@ -83,6 +83,21 @@ def works_json(works):
         out.append(pub)
     births = [json.loads(p.read_text()) for p in sorted((DATA / "artists").glob("*/birth.json"))]
     return {"works": out, "artists": births}
+
+
+def externalize_scripts(page: Path):
+    """The viewer's inline scripts as files beside it: the site's Content-Security-Policy allows no inline
+    script (ATL-13), so a page with one shows nothing. Order and behaviour are kept (classic scripts, in place)."""
+    html = page.read_text()
+    n = 0
+
+    def out(m):
+        nonlocal n
+        n += 1
+        (page.parent / f"viewer-{n}.js").write_text(m.group(1))
+        return f'<script src="viewer-{n}.js"></script>'
+    html = re.sub(r"<script>(.*?)</script>", out, html, flags=re.S)
+    page.write_text(html)
 
 
 def web_finals(png: Path, data: Path):
@@ -152,6 +167,7 @@ def main() -> int:
     if r.returncode:  # the exporter stops on a private word: nothing of this run is published
         return blocked([l for l in (r.stdout + r.stderr).splitlines() if l.strip()][-3:])
     SITE_ = STAGE
+    externalize_scripts(SITE_ / "studio" / "index.html")
     for w in works:
         data = SITE_ / "studio" / "data" / f"w-{w.name}"
         if not data.exists():
