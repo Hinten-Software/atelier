@@ -83,3 +83,8 @@ footer nav a { margin-right: 16px; }
 .lightbox .nav:hover { opacity: 1; }
 .lightbox .prev { left: 4px; } .lightbox .next { right: 4px; }
 @media (max-width: 640px) { .lightbox { padding: 2vh 8px; } .lightbox .nav { font-size: 40px; padding: 8px; top: auto; bottom: 8px; transform: none; } }
+
+/* a text in full: the notebook, the chapter placed in it */
+.written { max-width: 38rem; margin: 3vh 0; border-top: 1px solid var(--line); padding-top: 14px; }
+.written summary { font: 13px var(--sans); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); cursor: pointer; }
+.written pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 15px/1.6 var(--serif); margin: 14px 0 0; }

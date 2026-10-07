@@ -74,6 +74,11 @@ function whileOpen(render) {
   run();
 }
 
+// a text in full, as written (set as text, ATL-13), folded under its heading; open: shown unfolded
+function written(heading, text, open) {
+  return el("details", { class: "written", open: !!open }, el("summary", { textContent: heading }), el("pre", { textContent: text.trim() }));
+}
+
 function label(w) {
   return el("p", { class: "label" },
     el("span", { class: "title", textContent: w.title || "Untitled" }),
@@ -142,6 +147,9 @@ async function walls() {
       ? el("section", { class: "words given" }, el("h2", { textContent: head }), ...paras.map((x) => el("p", { textContent: x })))
       : el("p", { class: "state", textContent: head }));
   }
+  if (birth.temperament_text) easel.append(written("The chapter, as placed", birth.temperament_text, true));
+  const last = works.filter((w) => w.finished).sort((x, y) => y.number - x.number)[0];
+  if (last && last.notebook) easel.append(written(`Their notebook, as they left it after work ${last.number}`, last.notebook));
   const box = document.getElementById("walls");
   const kids = [];
   if (!all.length) kids.push(el("p", { class: "empty", textContent: "The walls are bare." }));
@@ -173,6 +181,7 @@ async function work() {
   box.append(el("p", { class: "actions" }, el("a", { href: `/studio/?p=${encodeURIComponent(w.viewer)}`, textContent: "Watch it being painted" })));
   if (w.theme) box.append(el("div", { class: "words" }, el("h2", { textContent: "They were given" }), el("p", { textContent: w.theme })));
   if (w.reply) box.append(el("div", { class: "words" }, el("h2", { textContent: "The painter's words" }), el("p", { textContent: plain(w.reply) })));
+  if (w.notebook) box.append(written("Their notebook after this painting", w.notebook));
 }
 
 // ---- notes: one guestbook for the whole atelier (/notes/). Plain text in, plain text out (ATL-13).

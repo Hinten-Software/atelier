@@ -81,8 +81,8 @@ def birth(model: str = MODEL, effort: str = EFFORT, studio: str | None = None, w
     studio: which studio ("iii"); default the first one not yet born. walls: a folder of paintings to hang before the
     artist first wakes (named 1, 2, ...: the walls' standard), without cards; the painter is told nothing of them.
     temperament: the owner's text, the notebook's first page at birth, unsigned; the painter is told nothing of it
-    and may keep, revise or outgrow it. The text is kept privately (DATA/artists/<id>/temperament-at-birth); the
-    public record says only that it was given (temperament_note: the owner's text for visitors in its place)."""
+    and may keep, revise or outgrow it. The public record holds it (temperament_text) and the owner's note for
+    visitors (temperament_note); a copy is kept as DATA/artists/<id>/temperament-at-birth."""
     reg = registry()
     id = (studio or next(r.lower() for r in ROMAN if r.lower() not in reg)).lower()
     if id in reg or id.upper() not in ROMAN:
@@ -107,6 +107,7 @@ def birth(model: str = MODEL, effort: str = EFFORT, studio: str | None = None, w
         "walls_at_birth": len(wall_files(walls)) if walls else 0,
         "walls_note": WALLS_NOTE if walls else None,
         "temperament_note": (temperament_note.strip() if temperament_note else TEMPERAMENT_NOTE) if temperament else None,
+        "temperament_text": temperament.strip() if temperament else None,
     }, indent=1))
     first_page = temperament.strip() + "\n" if temperament else ""
     if temperament:

@@ -70,6 +70,8 @@ def works_json(works):
             man = json.loads(m.read_text())
             pub = {k: man.get(k) for k in PUBLIC_MANIFEST}
             pub["reply"] = (w / "reply.md").read_text() if (w / "reply.md").exists() else ""
+            # their notebook as they left it after this work (shown in full: "their notebook ... their own")
+            pub["notebook"] = (w / "notebook.after.md").read_text() if (w / "notebook.after.md").exists() else ""
             # the date of the painting as the atelier's calendar has it (the last sitting's day), not a visitor's
             pub["date"] = (man.get("sittings") or [{}])[-1].get("date_shown")
         elif state.exists():  # the open work
