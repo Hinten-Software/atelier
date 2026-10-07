@@ -67,10 +67,17 @@ def cmd_birth(a):
     walls = Path(a.walls).expanduser() if a.walls else None
     if walls and not (walls.is_dir() and any(walls.iterdir())):
         raise SystemExit(f"--walls {walls}: no paintings there")
-    artist = birth(studio=a.studio, walls=walls)
-    hung = json.loads((artist.home / "birth.json").read_text())["walls_at_birth"]
+    temperament = None
+    if a.temperament:
+        temperament = Path(a.temperament).expanduser().read_text()
+        if not temperament.strip():
+            raise SystemExit(f"--temperament {a.temperament}: the file is empty")
+    artist = birth(studio=a.studio, walls=walls, temperament=temperament)
+    rec = json.loads((artist.home / "birth.json").read_text())
+    hung = rec["walls_at_birth"]
     event(f"{artist.name} born ({artist.id}), model and effort in the birth record"
-          + (f"; {hung} paintings hung before their first work (the owner's, recreated from recollection)" if hung else ""))
+          + (f"; {hung} paintings hung before their first work (the owner's, recreated from recollection)" if hung else "")
+          + ("; given a temperament by the owner, the first page of their notebook" if rec.get("temperament_note") else ""))
     print(f"{artist.name} ({artist.id}) is born")
 
 
@@ -179,6 +186,7 @@ def main():
     b.add_argument("--without-probes", action="store_true", help=argparse.SUPPRESS)
     b.add_argument("--studio", help="which studio to birth (i, ii, iii); default the first not yet born")
     b.add_argument("--walls", help="a folder of paintings named 1, 2, ... to hang before the first work")
+    b.add_argument("--temperament", help="a text file: the owner's temperament for the painter, their notebook's first page")
     pp = sub.add_parser("paint")
     pp.add_argument("artist")
     pp.add_argument("--theme")

@@ -75,10 +75,14 @@ class Artist:
                 if (w / "manifest.json").exists() and json.loads((w / "manifest.json").read_text()).get("finished")]
 
 
-def birth(model: str = MODEL, effort: str = EFFORT, studio: str | None = None, walls: Path | None = None) -> Artist:
+def birth(model: str = MODEL, effort: str = EFFORT, studio: str | None = None, walls: Path | None = None,
+          temperament: str | None = None) -> Artist:
     """A new artist: a neutral root, an empty studio, its own Claude config, and a public birth record (ART-2).
     studio: which studio ("iii"); default the first one not yet born. walls: a folder of paintings to hang before the
-    artist first wakes (named 1, 2, ...: the walls' standard), without cards; the painter is told nothing of them."""
+    artist first wakes (named 1, 2, ...: the walls' standard), without cards; the painter is told nothing of them.
+    temperament: the owner's text, the notebook's first page at birth, unsigned; the painter is told nothing of it
+    and may keep, revise or outgrow it. The text is kept privately (DATA/artists/<id>/temperament-at-birth); the
+    public record says only that it was given."""
     reg = registry()
     id = (studio or next(r.lower() for r in ROMAN if r.lower() not in reg)).lower()
     if id in reg or id.upper() not in ROMAN:
@@ -102,8 +106,12 @@ def birth(model: str = MODEL, effort: str = EFFORT, studio: str | None = None, w
         "claude_code": CLAUDE_VERSION, "founding_statement": None,
         "walls_at_birth": len(wall_files(walls)) if walls else 0,
         "walls_note": WALLS_NOTE if walls else None,
+        "temperament_note": TEMPERAMENT_NOTE if temperament else None,
     }, indent=1))
-    (a.studio / NOTEBOOK).write_text("")
+    first_page = temperament.strip() + "\n" if temperament else ""
+    if temperament:
+        (a.home / "temperament-at-birth").write_text(first_page)
+    (a.studio / NOTEBOOK).write_text(first_page)
     (a.studio / TOOLKIT).write_text("")
     if walls:
         hang_at_birth(a, walls)
@@ -112,6 +120,8 @@ def birth(model: str = MODEL, effort: str = EFFORT, studio: str | None = None, w
 
 # what visitors read beside paintings hung before a studio's first work (the owner, 2026-10-06); the painter never
 WALLS_NOTE = "The owner of the atelier pre-hung art recreated from their recollection in this studio."
+# and beside a studio whose painter was given a temperament at birth, as the first page of their notebook (2026-10-07)
+TEMPERAMENT_NOTE = "The owner of the atelier gave this painter a temperament at birth: the first page of their notebook."
 
 
 def wall_files(folder: Path) -> list[Path]:
