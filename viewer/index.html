@@ -27,6 +27,8 @@
   /* the public copy (static): a way back to the gallery, and a word for someone who has never seen this */
   #home { display:none; flex:none; color:var(--fg); text-decoration:none; font:19px/1 "Iowan Old Style", Palatino, Georgia, serif; letter-spacing:.02em; padding-right:4px }
   #home:hover { color:var(--acc) } body.static #home { display:block }
+  #studio { display:none; flex:none; color:var(--dim); text-decoration:none; font:15px/1 "Iowan Old Style", Palatino, Georgia, serif; letter-spacing:.02em }
+  #studio::before { content:"/"; margin-right:10px; opacity:.6 } #studio:hover { color:var(--acc) } body.static #studio:not([hidden]) { display:block }
   #intro { position:fixed; z-index:8; top:58px; left:50%; transform:translateX(-50%); width:min(600px, calc(100vw - 24px)); background:#1d1d24; border:1px solid #33333d;
            border-radius:10px; padding:14px 16px; box-shadow:0 16px 48px rgba(0,0,0,.6); font-size:14.5px; line-height:1.55; color:var(--soft) }
   #intro b { color:var(--fg); font-weight:600 } #intro .live { color:var(--live); font-weight:700 }
@@ -181,6 +183,7 @@
 <body class="nocode">
 <header>
   <a id="home" href="/" title="the atelier">atelier</a>
+  <a id="studio" hidden></a>
   <button id="who" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="picker" title="choose another painter"><span class="t">Choose a painter</span><span class="m"></span><span class="caret">▼</span></button>
   <div id="doing"><span class="what"></span><span class="detail"></span></div>
   <span id="badge"></span>
@@ -293,6 +296,8 @@ function oneSitting() {
 }
 function renderHeader() {
   const cur = allSessions.find(s => qOf(s) === Q), w = $('who');
+  const st = /^w-([a-z]+)-\d+$/.exec(P()), sl = $('studio');  // the studio this work belongs to: a way back to its walls
+  sl.hidden = !st; if (st) { sl.href = `/walls/?s=${st[1]}`; sl.textContent = `Studio ${st[1].toUpperCase()}`; }
   if (cur && cur.painter) { const a = about(cur); w.querySelector('.t').textContent = a.title; w.querySelector('.m').textContent = a.model;
     w.title = `${a.title} · ${a.model}${subj(cur) ? ' · ' + subj(cur) : ''}: choose another painter`;
     $('finished').hidden = !a.url; if (a.url) $('finished').href = a.url;
