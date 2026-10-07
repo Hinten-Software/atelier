@@ -16,7 +16,7 @@
   <key>RunAtLoad</key><true/>
   <key>WorkingDirectory</key><string>HOME_DIR/atelier-data</string>
   <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin</string></dict>
+  <dict><key>PATH</key><string>/opt/homebrew/opt/python@3.13/libexec/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
   <key>StandardOutPath</key><string>HOME_DIR/atelier-data/run/tick.log</string>
   <key>StandardErrorPath</key><string>HOME_DIR/atelier-data/run/tick.log</string>
 </dict>

@@ -11,6 +11,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -410,7 +411,8 @@ EXPORT_EVERY = 120  # seconds (OPS-4, REC-3)
 
 def export_now():
     """The public export (runner/export.py), with Pillow for the web copies of looks; then the NAS's copy."""
-    r = subprocess.run(["/opt/homebrew/bin/uv", "run", "-q", "--with", "pillow", "python3", str(REPO / "runner" / "export.py")],
+    # the runner's own Python (Homebrew's, with Pillow): a bare "python3" on a LaunchAgent's PATH is macOS's 3.9
+    r = subprocess.run([sys.executable, str(REPO / "runner" / "export.py")],
                        capture_output=True, text=True, env=os.environ | {"ATELIER_DATA": str(DATA)})
     if r.returncode:
         log(f"export failed ({r.returncode}): {(r.stderr or r.stdout).strip()[:500]}")
