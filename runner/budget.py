@@ -14,7 +14,7 @@ from pathlib import Path
 
 from config import DATA
 
-DAILY_USD = float(os.environ.get("ATELIER_DAILY_USD", "40"))
+DAILY_USD = float(os.environ.get("ATELIER_DAILY_USD", "20"))  # $40 until 2026-10-07; $20 since (the owner)
 WORK_USD = float(os.environ.get("ATELIER_WORK_USD", "60"))
 # "23-7": from 23:00 to 07:00; "always": no window. Daytime painting 2026-10-06 to 2026-10-07; nights again since
 # (the owner, 2026-10-07: "at the prior timeslots (night time)"); the daily and per-work ceilings stay
