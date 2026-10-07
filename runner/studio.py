@@ -75,10 +75,14 @@ class Artist:
                 if (w / "manifest.json").exists() and json.loads((w / "manifest.json").read_text()).get("finished")]
 
 
-def birth(model: str = MODEL, effort: str = EFFORT) -> Artist:
-    """A new artist: a neutral root, an empty studio, its own Claude config, and a public birth record (ART-2)."""
+def birth(model: str = MODEL, effort: str = EFFORT, studio: str | None = None, walls: Path | None = None) -> Artist:
+    """A new artist: a neutral root, an empty studio, its own Claude config, and a public birth record (ART-2).
+    studio: which studio ("iii"); default the first one not yet born. walls: a folder of paintings to hang before the
+    artist first wakes (named 1, 2, ...: the walls' standard), without cards; the painter is told nothing of them."""
     reg = registry()
-    id = ROMAN[len(reg)].lower()
+    id = (studio or next(r.lower() for r in ROMAN if r.lower() not in reg)).lower()
+    if id in reg or id.upper() not in ROMAN:
+        raise SystemExit(f"studio {id!r} can't be born (born already: {', '.join(reg) or 'none'})")
     used = {Path(r["root"]).name for r in reg.values()}
     while True:
         r = "".join(random.choice(string.ascii_lowercase) for _ in range(2))
@@ -88,7 +92,7 @@ def birth(model: str = MODEL, effort: str = EFFORT) -> Artist:
     (root / "studio").mkdir(parents=True)
     (root / ".config").mkdir()
     root.chmod(0o700)
-    reg[id] = {"root": str(root), "studio_name": f"Studio {ROMAN[len(reg)]}", "created": now()}
+    reg[id] = {"root": str(root), "studio_name": f"Studio {id.upper()}", "created": now()}
     save_registry(reg)
     a = Artist(id)
     a.home.mkdir(parents=True, exist_ok=True)
@@ -96,16 +100,54 @@ def birth(model: str = MODEL, effort: str = EFFORT) -> Artist:
     (a.home / "birth.json").write_text(json.dumps({
         "id": id, "studio": a.name, "created": reg[id]["created"], "model": model, "effort": effort,
         "claude_code": CLAUDE_VERSION, "founding_statement": None,
+        "walls_at_birth": len(wall_files(walls)) if walls else 0,
+        "walls_note": WALLS_NOTE if walls else None,
     }, indent=1))
     (a.studio / NOTEBOOK).write_text("")
     (a.studio / TOOLKIT).write_text("")
+    if walls:
+        hang_at_birth(a, walls)
     return a
+
+
+# what visitors read beside paintings hung before a studio's first work (the owner, 2026-10-06); the painter never
+WALLS_NOTE = "The owner of the atelier pre-hung art recreated from their recollection in this studio."
+
+
+def wall_files(folder: Path) -> list[Path]:
+    """The paintings to hang, in the order of their names (1, 2, ...)."""
+    files = [f for f in folder.iterdir() if f.is_file() and re.fullmatch(r"\d+", f.name)]
+    return sorted(files, key=lambda f: int(f.name))
+
+
+def hang_at_birth(artist: Artist, folder: Path):
+    """Paintings on the walls before the painter first wakes: as their own would hang (1000 px, by number), with an
+    empty card. Kept also in the private store (DATA/artists/<id>/walls-at-birth/) for the site and backups."""
+    walls = artist.studio / "walls"
+    walls.mkdir(parents=True, exist_ok=True)
+    keep = artist.home / "walls-at-birth"
+    keep.mkdir(parents=True, exist_ok=True)
+    cards = artist.home / "walls"
+    cards.mkdir(parents=True, exist_ok=True)
+    for n, f in enumerate(wall_files(folder), 1):
+        data = f.read_bytes()
+        (walls / str(n)).write_bytes(data)  # bytes only: no file attributes travel with them
+        (keep / f"{n}.png").write_bytes(data)
+        (cards / f"{n:03d}.json").write_text(json.dumps({"number": n, "title": None, "name": str(n), "words": "",
+                                                         "at_birth": True}, indent=1))
+    write_walls_list(artist)
+
+
+def next_wall_number(artist: Artist) -> int:
+    """The number the next finished painting hangs under: after everything on the walls, hung at birth or since."""
+    return len(list((artist.home / "walls").glob("*.json"))) + 1
 
 
 def brief_text(artist: Artist, theme: str | None) -> str:
     msgs = json.loads((TEXTS / "messages.json").read_text())
     direction = msgs["direction_themed"].replace("{THEME}", theme.strip().rstrip(".")) if theme else msgs["direction_free"]
-    notebook = msgs["notebook_later"] if artist.finished() else msgs["notebook_first"]
+    # the walls are mentioned once anything hangs there, painted here or hung at birth, in words that claim neither
+    notebook = msgs["notebook_later"] if any((artist.home / "walls").glob("*.json")) else msgs["notebook_first"]
     return (TEXTS / "brief.md").read_text().replace("{DIRECTION}", direction).replace("{NOTEBOOK}", notebook)
 
 

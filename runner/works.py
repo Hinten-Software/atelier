@@ -22,7 +22,7 @@ import budget
 import nas
 from config import (CHECK_PAINTING, CLAUDE, CLAUDE_VERSION, CONTEXT_LIMIT, CRASH_WAITS, DATA, EASEL_MCP, LIMIT_GIVE_UP_S,
                     LIMIT_RETRY_S, MAX_INVOLUNTARY, NODE, PAINTER_EASEL, REPLAY_EASEL, REPO, TEXTS, TOOLS, artist_env)
-from studio import BRIEF, JOURNAL, NOTEBOOK, NOTES, PACKAGE_NAMES, TOOLKIT, Artist, hang, now, prepare, sha256
+from studio import BRIEF, JOURNAL, NOTEBOOK, NOTES, PACKAGE_NAMES, TOOLKIT, Artist, hang, next_wall_number, now, prepare, sha256
 
 # claude-paint's viewer (its transcript parser and title rule), loaded by path: it is also called studio.py
 _spec = importlib.util.spec_from_file_location("viewer_studio", REPO / "viewer" / "studio.py")
@@ -342,7 +342,7 @@ class Work:
         voluntary = any(r["how"] == "voluntary" for r in self.state["sittings"])
         finished = self.state.get("verified", False) and voluntary and not self.state.get("contaminated")
         if finished and "hung" not in done:
-            hang(a, len(a.finished()) + 1, pkg / "final.png", title, reply)
+            hang(a, next_wall_number(a), pkg / "final.png", title, reply)
             done.append("hung")
             self.save()
         manifest = {

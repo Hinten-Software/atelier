@@ -47,8 +47,10 @@ async function door() {
     if (born.has(a)) {
       [state, live] = open ? STATES[open.state] || ["resting", false] : ["idle", false];
       const look = open && ls.find((s) => s.p === open.viewer);
+      const atBirth = d.artists.find((x) => x.id === a)?.walls_at_birth || 0;
       if (open && look && look.look != null) img = `/studio/data/${open.viewer}/v/${look.look}.jpg`;
       else if (done[0]) img = finalImg(done[0], true);
+      else if (atBirth) img = `/studio/data/walls-${a}/${atBirth}.jpg`;
     }
     const frame = el("div", { class: "frame" }, img ? el("img", { src: img, alt: "", loading: "lazy" }) : el("span", { textContent: born.has(a) ? "" : "empty" }));
     const card = el(born.has(a) ? "a" : "div", { class: "studio" }, frame, el("h2", { textContent: studioName(a) }),
@@ -73,7 +75,14 @@ async function walls() {
   }
   const box = document.getElementById("walls");
   const done = works.filter((w) => w.finished).sort((x, y) => x.number - y.number);  // a timeline: oldest left
-  if (!done.length) box.append(el("p", { class: "empty", textContent: "The walls are bare." }));
+  const birth = d.artists.find((x) => x.id === a) || {};
+  if (birth.walls_at_birth) {  // hung before their first work: no title, no link, the owner's one sentence
+    document.getElementById("easel").append(el("p", { class: "state", textContent: birth.walls_note }));
+    for (let n = 1; n <= birth.walls_at_birth; n++)
+      box.append(el("a", { href: `/studio/data/walls-${a}/${n}.jpg` }, el("img", { src: `/studio/data/walls-${a}/${n}.jpg`, alt: "", loading: "lazy" }),
+        el("div", { class: "t", textContent: String(n) })));
+  }
+  if (!done.length && !birth.walls_at_birth) box.append(el("p", { class: "empty", textContent: "The walls are bare." }));
   for (const w of done)
     box.append(el("a", { href: `/work/?w=${encodeURIComponent(w.id)}` }, el("img", { src: finalImg(w, true), alt: w.title || "Untitled", loading: "lazy" }),
       el("div", { class: "t", textContent: w.title || "Untitled" }), el("div", { class: "state", textContent: `work ${w.number}${w.date ? " · " + day(w.date) : ""}` })));

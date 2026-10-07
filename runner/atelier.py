@@ -64,8 +64,13 @@ def cmd_birth(a):
     ok = (DATA / "run" / f"probe-ok-{harness_fingerprint()}.json").exists()
     if not ok and not a.without_probes:
         raise SystemExit("the probe suite hasn't passed for this harness yet (RUN-16): run runner/probes.py first")
-    artist = birth()
-    event(f"{artist.name} born ({artist.id}), model and effort in its birth record")
+    walls = Path(a.walls).expanduser() if a.walls else None
+    if walls and not (walls.is_dir() and any(walls.iterdir())):
+        raise SystemExit(f"--walls {walls}: no paintings there")
+    artist = birth(studio=a.studio, walls=walls)
+    hung = json.loads((artist.home / "birth.json").read_text())["walls_at_birth"]
+    event(f"{artist.name} born ({artist.id}), model and effort in the birth record"
+          + (f"; {hung} paintings hung before their first work (the owner's, recreated from recollection)" if hung else ""))
     print(f"{artist.name} ({artist.id}) is born")
 
 
@@ -172,6 +177,8 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
     b = sub.add_parser("birth")
     b.add_argument("--without-probes", action="store_true", help=argparse.SUPPRESS)
+    b.add_argument("--studio", help="which studio to birth (i, ii, iii); default the first not yet born")
+    b.add_argument("--walls", help="a folder of paintings named 1, 2, ... to hang before the first work")
     pp = sub.add_parser("paint")
     pp.add_argument("artist")
     pp.add_argument("--theme")

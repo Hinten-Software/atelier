@@ -26,7 +26,7 @@ FARM = DATA / "run" / "farm"
 # what may be published (REC-8): the viewer, its data per work (events, looks and their web copies, the painting's
 # log), the final renders, works.json
 ALLOWED = re.compile(r"^(studio/(index\.html|stream\.css|data/sessions\.json|data/w-[a-z]+-\d{3}/(events\.json|"
-                     r"(img|t|v)/\d+\.(png|jpg|webp)|file/paintings/lua/painting\.lua|final\.png|final(-t)?\.jpg)|viewer-\d+\.js))$|^data/works\.json$"
+                     r"(img|t|v)/\d+\.(png|jpg|webp)|file/paintings/lua/painting\.lua|final\.png|final(-t)?\.jpg)|viewer-\d+\.js|data/walls-[a-z]+/\d+\.jpg))$|^data/works\.json$"
                      # the atelier's own pages (site/ in the repository)
                      r"|^(index\.html|robots\.txt|(about|walls|work|how|studio-room|notes)/index\.html|assets/atelier\.(css|js))$")
 NOTES_SETTINGS = DATA / "notes.json"  # {"sitekey": "<the Turnstile widget's public site key>"} (deploy/notes)
@@ -185,6 +185,14 @@ def main() -> int:
     for stale in (SITE_ / "studio" / "data").glob("w-*"):
         if stale.name not in keep:
             shutil.rmtree(stale)
+    for born in sorted((DATA / "artists").glob("*/walls-at-birth")):  # paintings hung before a studio's first work
+        dst = SITE_ / "studio" / "data" / f"walls-{born.parent.name}"
+        dst.mkdir(parents=True, exist_ok=True)
+        for png in born.glob("*.png"):
+            out = dst / f"{png.stem}.jpg"
+            if not out.exists() or out.stat().st_mtime < png.stat().st_mtime:
+                from PIL import Image
+                Image.open(png).convert("RGB").save(out, "JPEG", quality=88, optimize=True, progressive=True)
     for f in PAGES.rglob("*"):  # the atelier's own pages, scanned and allowlisted like everything else
         if f.is_file() and not f.name.startswith("."):
             dst = SITE_ / f.relative_to(PAGES)
