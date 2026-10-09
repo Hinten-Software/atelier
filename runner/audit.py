@@ -109,6 +109,13 @@ class Replies:
         return False
 
 
+# the easel's own answer to a call with a missing or mistyped argument: its MCP server checks the arguments against
+# the tool's schema before the tool runs, so the reply never reaches the replies log (ii-002, 2026-10-07: an `edit`
+# without `text`). The easel's eight tools only; anything else in that form is still a hit.
+OWN_ARGUMENT_ERROR = re.compile(r"MCP error -32602: Input validation error: Invalid arguments for tool "
+                                r"(paint|look|note|status|log|read|write|edit): [^\n]{0,600}", re.S)
+
+
 def _tool_result(x: dict, config_dir: Path, replies: Replies | None) -> list[str]:
     parts = x.get("content")
     if isinstance(parts, str):
@@ -126,7 +133,7 @@ def _tool_result(x: dict, config_dir: Path, replies: Replies | None) -> list[str
             elif p.get("type") != "image":
                 return [f"a {p.get('type')!r} part in a tool result"]
     hits = [h for t in texts for h in private_hits(t)]
-    if replies is not None and not replies.take(texts):
+    if replies is not None and not (OWN_ARGUMENT_ERROR.fullmatch(" ".join(texts)) or replies.take(texts)):
         hits.append(f"a tool result the easel didn't send: {' | '.join(texts)[:300]!r}")
     return hits
 
