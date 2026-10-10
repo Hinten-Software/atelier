@@ -136,7 +136,7 @@ as it dries. A pile takes medium or blot, not both.
   new heap, as they are now.
 - `palette{set_out={"<tube>", ...}}` sets out only those tubes, a limited
   palette: a pile of any other is an error.
-- `palette{dirty=<0..1>}` keeps the board as dirty as painters do. A brush
+- `palette{dirty=<0..1>}` keeps the board as dirty as a working palette gets. A brush
   that comes to a heap carrying paint leaves a little of it there, more the
   fuller it is (a `b:reload` wipes it first), and the smears of the mixing
   area seep into each new heap, so the heaps drift toward each other through
@@ -167,9 +167,9 @@ The tube box:
 | lead-tin yellow | lead-tin oxide | 0.85 | 0.75 | 0.6 | 2.0 |
 | Naples yellow | lead antimonate | 0.85 | 0.75 | 0.6 | 1.6 |
 | lemon chrome | pale lead chromate with lead sulfate | 0.8 | 0.7 | 0.8 | 1.8 |
-| pale cadmium | cadmium sulfide, a pale grade | 0.85 | 0.7 | 1.1 | 0.6 |
-| deep cadmium | cadmium sulfide, a deep grade | 0.9 | 0.6 | 1.2 | 0.6 |
-| cadmium yellow | cadmium sulfide | 0.85 | 0.7 | 1.1 | 0.6 |
+| pale cadmium | cadmium sulfide, a pale grade | 0.85 | 0.7 | 1.1 | 0.9 |
+| deep cadmium | cadmium sulfide, a deep grade | 0.9 | 0.6 | 1.2 | 0.9 |
+| cadmium yellow | cadmium sulfide | 0.85 | 0.7 | 1.1 | 0.9 |
 | Indian yellow | magnesium and calcium euxanthate | 0.15 | 0.4 | 0.8 | 0.8 |
 | Mars yellow | synthetic iron oxide hydroxide | 0.85 | 0.7 | 1.1 | 1.1 |
 | transparent oxide yellow | transparent synthetic iron oxide | 0.2 | 0.5 | 0.9 | 1.0 |
@@ -180,19 +180,19 @@ The tube box:
 | red lead | lead tetroxide | 0.85 | 0.8 | 0.8 | 2.2 |
 | orange vermilion | mercuric sulfide, a yellower grade | 0.9 | 0.75 | 1.0 | 0.4 |
 | Chinese vermilion | mercuric sulfide, a deeper grade | 0.9 | 0.75 | 1.0 | 0.4 |
-| cadmium red | cadmium sulfoselenide | 0.9 | 0.7 | 1.1 | 0.6 |
+| cadmium red | cadmium sulfoselenide | 0.9 | 0.7 | 1.1 | 0.9 |
 | Mars red | synthetic iron oxide | 0.9 | 0.7 | 1.2 | 1.1 |
 | Indian red | nearly pure ferric oxide | 0.92 | 0.7 | 1.2 | 1.0 |
-| rose madder | madder lake on alumina | 0.1 | 0.35 | 0.9 | 0.3 |
-| permanent alizarin | a quinacridone | 0.15 | 0.45 | 1.3 | 0.3 |
+| rose madder | madder lake on alumina | 0.1 | 0.35 | 0.9 | 0.4 |
+| permanent alizarin | a quinacridone | 0.15 | 0.45 | 1.3 | 0.4 |
 | magenta | fuchsine (aniline) lake on alumina | 0.1 | 0.35 | 1.5 | 0.3 |
-| burnt sienna | roasted sienna earth | 0.45 | 0.55 | 0.9 | 1.2 |
+| burnt sienna | roasted sienna earth | 0.45 | 0.55 | 0.9 | 2.3 |
 | Mars brown | synthetic iron oxide, roasted | 0.85 | 0.65 | 1.0 | 1.2 |
 | bone brown | bone roasted until brown | 0.6 | 0.6 | 0.9 | 0.3 |
 | bitumen | asphaltum | 0.12 | 0.3 | 0.7 | 0.15 |
 | cerulean blue | cobalt stannate | 0.8 | 0.7 | 0.6 | 1.4 |
-| ultramarine blue | synthetic ultramarine | 0.3 | 0.5 | 1.1 | 0.8 |
-| ultramarine ash | natural ultramarine, a pale last extraction | 0.15 | 0.5 | 0.3 | 0.8 |
+| ultramarine blue | synthetic ultramarine | 0.3 | 0.5 | 1.1 | 0.95 |
+| ultramarine ash | natural ultramarine, a pale last extraction | 0.15 | 0.5 | 0.3 | 0.95 |
 | Antwerp blue | Prussian blue on an alumina base | 0.4 | 0.45 | 1.6 | 1.6 |
 | viridian | hydrated chromium oxide | 0.3 | 0.5 | 0.9 | 1.0 |
 | emerald green | copper aceto-arsenite | 0.6 | 0.6 | 0.6 | 1.6 |
@@ -200,9 +200,9 @@ The tube box:
 | strontium yellow | strontium chromate | 0.55 | 0.65 | 0.8 | 1.0 |
 | barium yellow | barium chromate (lemon yellow) | 0.45 | 0.7 | 0.9 | 1.0 |
 | zinc yellow | potassium zinc chromate | 0.4 | 0.6 | 0.65 | 0.8 |
-| carmine lake | carminic acid (cochineal) on alumina | 0.1 | 0.3 | 1.2 | 0.3 |
-| yellow lake | flavonoid dye (weld, quercitron) on alumina and chalk | 0.08 | 0.35 | 0.5 | 0.3 |
-| vine black | charcoal of vine twigs | 0.75 | 0.45 | 0.6 | 0.35 |
+| carmine lake | carminic acid (cochineal) on alumina | 0.1 | 0.3 | 1.2 | 0.4 |
+| yellow lake | flavonoid dye (weld, quercitron) on alumina and chalk | 0.08 | 0.35 | 0.5 | 0.4 |
+| vine black | charcoal of vine twigs | 0.75 | 0.45 | 0.6 | 0.9 |
 
 Hiding is how much one coat of the tube paint hides what is under it (0
 transparent, 1 opaque). Stiffness is the paint's body as it comes from the
@@ -697,7 +697,7 @@ other option, and nothing on the canvas or the clock changes.
 | `compare: "<an earlier look's path>"` | that earlier image on the left and the current view on the right, at the same height. The right is the view the other options ask for (`size: 800` without `crop` or `size`); the earlier picture is only resized to its height, so repeat the earlier look's crop, modes, light and grid options to compare the same view |
 | `hold: "<a knife's or a pile's name>"`, `at: "x,y"` | (speculative) the loaded knife held up to the canvas: the passage around the point (240 units square, clipped at the canvas's edges, or your `crop`) with the blade's end at it, the paint thick on the steel, seen in the same light and mode as the passage (`mode` value, squint, relief or gallery, and `light`; not mirror, `grid`, `size`, `palette`, `survey` or `compare`). A knife shows what is on it, as full as it is up to a full load; a pile, a fresh full load. It shows the paint on the knife, not how it would look laid |
 
-A survey can arrive in a partial batch to fit the painter's image budget.
+A survey can arrive in parts, as many tiles as one reply holds.
 The reply lists the remaining tile paths; read them one at a time to inspect
 the rest of the canvas.
 

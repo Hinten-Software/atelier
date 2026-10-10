@@ -21,7 +21,7 @@ from pathlib import Path
 import audit
 import budget
 from config import (CHECK_PAINTING, CLAUDE, CLAUDE_VERSION, CONTEXT_LIMIT, CRASH_WAITS, DATA, EASEL_MCP, LIMIT_GIVE_UP_S,
-                    LIMIT_RETRY_S, MAX_INVOLUNTARY, NODE, PAINTER_EASEL, REPLAY_EASEL, REPO, TEXTS, TOOLS, artist_env)
+                    LIMIT_RETRY_S, MAX_INVOLUNTARY, NODE, DEFAULT_BOX, REPLAY_EASEL, REPO, TEXTS, TOOLS, artist_env, painter_easel)
 from studio import BRIEF, JOURNAL, NOTEBOOK, NOTES, PACKAGE_NAMES, TOOLKIT, Artist, hang, next_wall_number, now, prepare, sha256
 
 # claude-paint's viewer (its transcript parser and title rule), loaded by path: it is also called studio.py
@@ -82,10 +82,16 @@ def repo_commit() -> str:
     return r.stdout.strip() + ("+uncommitted" if dirty else "")
 
 
-def archive_engines() -> dict:
+def engine_upstream() -> str:
+    """The claude-paint commit the engine was last merged from (tools/upstream/import.sh records it)."""
+    f = REPO / "tools" / "upstream" / "commit"
+    return f"claude-paint {f.read_text().strip()}" if f.exists() else "claude-paint a198dd055964b77882b42925ff949043d5e334e5"
+
+
+def archive_engines(box: str = DEFAULT_BOX) -> dict:
     """Both easels, kept by hash, so any work replays with the binaries that painted it (ENG-3)."""
     out = {}
-    for name, path in (("painter", PAINTER_EASEL), ("replay", REPLAY_EASEL)):
+    for name, path in (("painter", painter_easel(box)), ("replay", REPLAY_EASEL)):
         h = sha256(path)
         dest = DATA / "archive" / "engines" / h / name
         if not dest.exists():
@@ -104,7 +110,7 @@ class Work:
         self.artist = Artist(self.state["artist"])
 
     @classmethod
-    def create(cls, artist: Artist, theme: str | None, started_by: str) -> "Work":
+    def create(cls, artist: Artist, theme: str | None, started_by: str, box: str = DEFAULT_BOX) -> "Work":
         if CURRENT.exists():
             raise SystemExit(f"a work is open: {CURRENT.read_text().strip()} (atelier status)")
         number = len(artist.works()) + 1
@@ -116,14 +122,16 @@ class Work:
         for f in (NOTEBOOK, TOOLKIT):  # as they were before this work (ART-7)
             src = artist.studio / f
             befores[f] = src.read_bytes() if src.exists() else b""
-        hashes = prepare(artist, theme)
+        if not painter_easel(box).exists():
+            raise SystemExit(f"no painter's easel for the box {box!r} (tools/build-engine.sh builds one per box)")
+        hashes = prepare(artist, theme, box)
         mcp = {"mcpServers": {"easel": {"command": str(NODE), "args": [str(EASEL_MCP), "<studio>", "<reply log>"]}}}
         hashes |= {"system_prompt": sha256(TEXTS / "system_prompt.md"), "settings": sha256(TEXTS / "settings.json"),
                    "messages": sha256(TEXTS / "messages.json"), "brief_template": sha256(TEXTS / "brief.md"),
                    "easel_mcp": sha256(EASEL_MCP), "easel_client": sha256(REPO / "easel-mcp/src/upstream/easel-client.ts"),
                    "mcp_config": __import__("hashlib").sha256(json.dumps(mcp, sort_keys=True).encode()).hexdigest(),
-                   "repo_commit": repo_commit(), "engine_upstream": "claude-paint a198dd055964b77882b42925ff949043d5e334e5"}
-        hashes |= archive_engines()
+                   "repo_commit": repo_commit(), "engine_upstream": engine_upstream()}
+        hashes |= archive_engines(box)
         # NFR-9 before anything is recorded as a work: a failed scan leaves nothing behind but the reason (QA Q5)
         hits = whiteroom(artist)
         if hits:
@@ -135,13 +143,14 @@ class Work:
             name = PACKAGE_NAMES[f]
             (pkg / f"{Path(name).stem}.before{Path(name).suffix}").write_bytes(data)
         shutil.copy2(artist.studio / BRIEF, pkg / "brief.md")
-        state = {"id": id, "artist": artist.id, "number": number, "theme": theme, "mode": "themed" if theme else "free",
+        state = {"id": id, "artist": artist.id, "number": number, "theme": theme, "box": box, "mode": "themed" if theme else "free",
                  "started_by": started_by, "created": now(), "state": "prepared", "sittings": [], "crashes": 0,
                  "involuntary": 0, "limit_since": None, "pauses": [], "hashes": hashes, "hits": []}
         (run / "state.json").write_text(json.dumps(state, indent=1))
         CURRENT.write_text(id)
         log(f"{id}: prepared for {artist.name} ({state['mode']}), started by {started_by}")
-        event(f"work {id} started for {artist.name} ({state['mode']}{': ' + theme if theme else ''}), by {started_by}")
+        event(f"work {id} started for {artist.name} ({state['mode']}{': ' + theme if theme else ''}"
+              f"{'' if box == DEFAULT_BOX else ', the box ' + box}), by {started_by}")
         return cls(id)
 
     # -- state ------------------------------------------------------------------------------------------------
@@ -365,7 +374,8 @@ class Work:
             self.save()
         manifest = {
             "id": self.id, "artist": a.id, "studio": a.name, "number": self.state["number"], "title": title,
-            "mode": self.state["mode"], "theme": self.state["theme"], "started_by": self.state["started_by"],
+            "mode": self.state["mode"], "theme": self.state["theme"], "box": self.state.get("box", DEFAULT_BOX),
+            "started_by": self.state["started_by"],
             "start": self.state["created"], "end": now(), "pauses": self.state.get("pauses", []),
             "sittings": [{k: r.get(k) for k in ("n", "start", "end", "how", "date_shown", "message")} for r in self.state["sittings"]],
             "model": a_model(a), "model_seen": model_seen(self.state["sittings"]), "effort": a_effort(a),

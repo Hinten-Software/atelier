@@ -88,7 +88,11 @@ def cmd_birth(a):
 def cmd_paint(a):
     if not CLAUDE.exists():
         raise SystemExit(f"no pinned Claude Code at {CLAUDE} (RUN-15)")
-    w = Work.create(Artist(a.artist), a.theme, a.by)
+    from config import DEFAULT_BOX, boxes
+    box = a.box or DEFAULT_BOX
+    if box not in boxes():
+        raise SystemExit(f"no box {box!r}; the boxes: {', '.join(boxes())} (tools/build-engine.sh builds them)")
+    w = Work.create(Artist(a.artist), a.theme, a.by, box)
     detach(w)
 
 
@@ -215,6 +219,13 @@ def cmd_tick(a):
     cmd_paint(argparse.Namespace(artist=id, theme=None, by="owner"))
 
 
+def cmd_boxes(a):
+    from config import DEFAULT_BOX, PAINTER_BOXES, boxes
+    for b in boxes():
+        n = sum(1 for l in (PAINTER_BOXES / b / "tubes.md").read_text().splitlines()[2:] if l.startswith("|"))
+        print(f"{b}: {n} tubes{' (default)' if b == DEFAULT_BOX else ''}")
+
+
 def cmd_next(a):
     reg = registry()
     if not reg:
@@ -235,6 +246,7 @@ def main():
     pp = sub.add_parser("paint")
     pp.add_argument("artist")
     pp.add_argument("--theme")
+    pp.add_argument("--box", help="the tube box this work is painted from (default: every; `atelier boxes` lists them)")
     pp.add_argument("--by", required=True, choices=["owner", "operator"])
     r = sub.add_parser("run")
     r.add_argument("work")
@@ -247,6 +259,7 @@ def main():
     sv.add_argument("--host", default="0.0.0.0")
     sv.add_argument("--port", type=int, default=8800)
     sub.add_parser("export")
+    sub.add_parser("boxes")
     sub.add_parser("sync")
     sub.add_parser("backup")
     a = p.parse_args()

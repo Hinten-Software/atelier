@@ -53,9 +53,12 @@ use std::time::{Duration, Instant};
 /// The width a painting was painted at before the atelier's 4800 px (and a sketch's base: SKETCH_WIDTH is a
 /// quarter of it). A log that names no width (`session::WIDTH_MARK`) replays at it.
 const LIVE_WIDTH: usize = 2400;
-/// The width a new painting is painted at (atelier change, 2026-10-06: paintings of a fidelity that holds up close
-/// and in print). It names its width in its log's head, so it goes on and replays at it.
-const NEW_WIDTH: usize = 4800;
+/// Built by the atelier (tools/build-engine.sh sets ATELIER_BUILD): the atelier's changes below are on. Without it
+/// the easel is claude-paint's, and her tests hold unchanged.
+const ATELIER: bool = option_env!("ATELIER_BUILD").is_some();
+/// The width a new painting is painted at: the atelier's 4800 px (2026-10-06: paintings of a fidelity that holds up
+/// close and in print), named in its log's head so it goes on and replays at it; claude-paint's own 2400 otherwise.
+const NEW_WIDTH: usize = if ATELIER { 4800 } else { LIVE_WIDTH };
 
 /// The width a painting paints at: an existing one its log's (a sketch if
 /// its head says so, `session::SKETCH_MARK`), a new one a sketch's if the
@@ -241,7 +244,8 @@ fn log_path(name: &str) -> PathBuf {
     root().join("paintings/lua").join(format!("{name}.lua"))
 }
 fn journal_path() -> PathBuf {
-    root().join("journal") // atelier: the studio names things without file paths (2026-10-06)
+    // the atelier's studio names things without file paths (2026-10-06)
+    root().join(if ATELIER { "journal" } else { "notes/journal.md" })
 }
 
 #[cfg(feature = "replay")]

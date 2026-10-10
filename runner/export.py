@@ -33,7 +33,7 @@ ALLOWED = re.compile(r"^(studio/(index\.html|stream\.css|data/sessions\.json|dat
 NOTES_SETTINGS = DATA / "notes.json"  # {"sitekey": "<the Turnstile widget's public site key>"} (deploy/notes)
 PAGES = REPO / "site"
 FINAL_WEB = {"final.jpg": 1600, "final-t.jpg": 640}  # the walls' and the door's copies of a finished painting
-PUBLIC_MANIFEST = ("id", "studio", "number", "title", "mode", "theme", "start", "end", "model", "effort", "claude_code",
+PUBLIC_MANIFEST = ("id", "studio", "number", "title", "mode", "theme", "box", "start", "end", "model", "effort", "claude_code",
                    "replay_verified", "finished", "contaminated")
 CANARY = "35396958-eb10-44fe-8f7d-0720fe551f10"  # public on purpose (README, every page: REC-9)
 # a NAS's own folders beside files written to it (DSM: metadata, recycle bin, snapshots): never read, never published

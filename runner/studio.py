@@ -15,7 +15,7 @@ import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
-from config import CLAUDE_VERSION, DATA, EFFORT, MATERIALS, MODEL, NOTES, PAINTER_EASEL, ROOTS, TEXTS
+from config import CLAUDE_VERSION, DATA, DEFAULT_BOX, EFFORT, MATERIALS, MODEL, NOTES, PAINTER_BOXES, ROOTS, TEXTS, painter_easel
 
 ROMAN = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"]
 NOTEBOOK, TOOLKIT, JOURNAL, BRIEF = "notebook", "toolkit", "journal", "brief"
@@ -162,7 +162,18 @@ def brief_text(artist: Artist, theme: str | None) -> str:
     return (TEXTS / "brief.md").read_text().replace("{DIRECTION}", direction).replace("{NOTEBOOK}", notebook)
 
 
-def prepare(artist: Artist, theme: str | None) -> dict:
+def guide_for(box: str) -> str:
+    """The easel guide with its tube table for the box a work is painted from (the guide's own table is the every
+    box's; tools/build-engine.sh writes each box's, from its easel: `easel tubes --markdown`)."""
+    guide = strip_comments((MATERIALS / "easel_guide.md").read_text())
+    table = (PAINTER_BOXES / box / "tubes.md").read_text()
+    lines = guide.splitlines(keepends=True)
+    start = next(i for i, l in enumerate(lines) if l.startswith("| tube | pigment |"))
+    end = next(i for i in range(start, len(lines)) if not lines[i].startswith("|"))
+    return "".join(lines[:start]) + table + "".join(lines[end:])
+
+
+def prepare(artist: Artist, theme: str | None, box: str = DEFAULT_BOX) -> dict:
     """Set the studio up for a new work (RUN-4): the easel, the two texts, this work's brief, an empty journal and
     easel. The notebook, toolkit and walls stay as the artist left them. Returns hashes for the manifest.
     The studio names things as a painter would: brief, notebook, toolkit, journal, easel guide, notes on oil paint,
@@ -171,9 +182,9 @@ def prepare(artist: Artist, theme: str | None) -> dict:
     s = artist.studio
     for d in ("bin", "paintings/lua", "walls"):
         (s / d).mkdir(parents=True, exist_ok=True)
-    shutil.copy2(PAINTER_EASEL, s / "bin" / "easel")
+    shutil.copy2(painter_easel(box), s / "bin" / "easel")
     for src, dst in NOTES.items():
-        (s / dst).write_text(strip_comments((MATERIALS / src).read_text()))
+        (s / dst).write_text(guide_for(box) if src == "easel_guide.md" else strip_comments((MATERIALS / src).read_text()))
     (s / JOURNAL).write_text("")
     for leftover in (s / "paintings" / "lua").glob("*"):
         leftover.unlink()

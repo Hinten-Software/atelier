@@ -13,6 +13,10 @@
  * and anything that isn't text or an image; `write` and `edit` change only the notebook and the toolkit,
  * keeping every change; `paint` can run the toolkit as its chunk; `log` pages through the painting's log.
  * Nothing here counts the artist's work or times the machine (see upstream/easel-client.ts).
+ *
+ * Kept in step with upstream/easel-tools.ts (her current version, for reference): when it changes (tools/upstream),
+ * the same change is made here, in MCP's terms. Last ported: claude-paint 78c86ce (scratch canvas; look's light,
+ * relief and gallery modes, survey, compare, hold, palette; the painting's clock in paint's reply).
  */
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
@@ -21,7 +25,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { reviseJournal } from "./upstream/journal.ts";
 import {
-	atEasel, hideCounters, logReply, lookArgs, paintReply, renameLook, statusReply, studioPath, tail, toolWords,
+	atEasel, hideCounters, logReply, lookArgs, paintReply, renameLooks, statusReply, studioPath, tail, toolWords,
 } from "./upstream/easel-client.ts";
 
 const studio = resolve(process.argv[2] ?? process.cwd());
@@ -60,16 +64,47 @@ const capped = (t: string) => (t.length <= PRINT_MAX ? t : "(the beginning of wh
 
 const server = new McpServer({ name: "easel", version: "0.1.0" });
 
+// the scratch canvas beside the painting (upstream's `scratch` option on paint, look, status and log)
+const scratch = z.boolean().optional().describe(
+	"true: the scratch canvas beside the painting instead of the painting. It is set up as the painting's canvas was, with its own palette, brushes and variables, and its own log; nothing done there reaches the painting. It keeps its own clock: time spent or waited there doesn't pass for the painting.",
+);
+const on = (p: { scratch?: boolean }) => (p.scratch ? ["--scratch"] : []);
+// (the easel says where the last scratch canvas's log went: a path in paintings/, which the studio doesn't name)
+const tag = (p: { scratch?: boolean }, t: string) =>
+	p.scratch ? `[scratch canvas]\n${t.replace(/ \(the last one's log is paintings\/lua\/scratch-\d+\.lua\)/, " (the last one is put aside)")}` : t;
+// a survey's tiles in one reply, as many as a Claude Code tool result carries (upstream's surveyReply sizes this for
+// pi's context, and its words speak of a budget: this one says only what is shown and what is left to read)
+const SURVEY_TILES = 4;
+const SURVEY_CHARS = 6_000_000; // of base64
+function surveyed(said: string, paths: string[], images: Content[]) {
+	let n = 0, chars = 0;
+	for (const im of images as { data: string }[]) {
+		if (n === SURVEY_TILES || (n > 0 && chars + im.data.length > SURVEY_CHARS)) break;
+		chars += im.data.length;
+		n++;
+	}
+	const rest = n < images.length ? `\nThis shows tiles 1–${n} of ${images.length}. Read the others, each on its own, to see the whole:\n${paths.slice(n).join("\n")}\n` : "";
+	return { content: [{ type: "text", text: said + rest }, ...images.slice(0, n)] as Content[] };
+}
+// the painting's box is the atelier's to know: a box's name may be a painter's (seurat, hopper), and nothing in the
+// studio names another painter (requirements NFR-9); the log's head line naming it is left out of what is shown
+const unboxed = (log: string) => log.replace(/^--@ box .*\n/m, "");
+
 server.registerTool("paint", {
 	description:
-		"Run a chunk of Lua at the easel (the easel guide). The reply is what the chunk printed, then `ok`. " +
+		"Run a chunk of Lua at the easel (the easel guide). The reply is what the chunk printed, the painting's current clock, then `ok`. " +
 		"A chunk that stops with an error changes nothing.",
 	inputSchema: {
 		lua: z.string().optional().describe("the chunk"),
 		file: z.string().optional().describe("\"toolkit\": run your toolkit as the chunk"),
+		scratch,
+		new_scratch: z.boolean().optional().describe("with scratch: put the scratch canvas aside and start a fresh one before this chunk"),
 	},
-}, serial(async ({ lua, file }: { lua?: string; file?: string }) => {
+}, serial(async (p: { lua?: string; file?: string; scratch?: boolean; new_scratch?: boolean }) => {
+	let { lua } = p;
+	const { file } = p;
 	if ((lua === undefined) === (file === undefined)) return fail("paint: give either `lua` or `file`");
+	if (p.new_scratch && !p.scratch) return fail("paint: new_scratch goes with scratch: true");
 	if (file !== undefined) {
 		if (file !== TOOLKIT) return fail(`paint: \`file\` can only be ${TOOLKIT}`);
 		const path = resolve(studio, TOOLKIT);
@@ -77,7 +112,7 @@ server.registerTool("paint", {
 		lua = readFileSync(path, "utf8"); // it runs, and is logged, as an ordinary chunk
 	}
 	try {
-		return say(capped(paintReply(await atEasel(studio, ["do", "-"], lua!))));
+		return say(tag(p, capped(paintReply(await atEasel(studio, ["do", "-", ...on(p), ...(p.new_scratch ? ["--new"] : [])], lua!)))));
 	} catch (e) {
 		return fail(hideCounters((e as Error).message));
 	}
@@ -86,26 +121,54 @@ server.registerTool("paint", {
 server.registerTool("look", {
 	description:
 		"Look at the canvas as it is now. Without options: the whole canvas, scaled down. " +
-		"crop: \"x0,y0,x1,y1\" in canvas units (two opposite corners), shown at 1:1 pixels. " +
-		"mode: \"value\", \"squint\", \"mirror\" or several, comma-separated. size: the long side in pixels. " +
-		"grid: true, or a spacing in canvas units.",
+		"crop: \"x0,y0,x1,y1\" in canvas units (two opposite corners), shown close up. " +
+		"mode: \"value\", \"squint\", \"mirror\", \"relief\" (a raking light on the paint's ridges and furrows), \"gallery\" (the light the picture hangs in) or several, comma-separated. " +
+		"light: \"azimuth,elevation\" in degrees for the relief light (default \"135,25\", from the upper left). size: the long side in pixels. " +
+		"grid: true, or a spacing in canvas units. " +
+		"survey: true surveys the whole canvas at full detail, as several tiles (with mode, not crop or size); a partial reply lists remaining tiles to read in separate turns. " +
+		"compare: the path of an earlier look, shown left of the current view; supply matching crop, mode and light options explicitly. " +
+		"hold: the name of a knife (what is on it) or a pile (a fresh load), with at: \"x,y\" (canvas units): the loaded knife held up to the canvas there, its paint thick on the blade (crop sets the passage). Supports mode value, squint, relief or gallery and light; size, grid and mirror are unavailable with hold. It shows the paint on the knife, not how it would look laid. " +
+		"palette: true shows the palette board instead: each pile knifed out thick and smeared thin across a black stripe.",
 	inputSchema: {
+		scratch,
 		crop: z.string().optional(),
 		mode: z.string().optional(),
+		light: z.string().optional(),
+		survey: z.boolean().optional(),
+		compare: z.string().optional(),
+		hold: z.string().optional(),
+		at: z.string().optional(),
+		palette: z.boolean().optional(),
 		size: z.number().optional(),
 		grid: z.union([z.boolean(), z.number()]).optional(),
 	},
-}, serial(async (p: { crop?: string; mode?: string; size?: number; grid?: boolean | number }) => {
+}, serial(async (p: {
+	scratch?: boolean; crop?: string; mode?: string; light?: string; survey?: boolean; compare?: string; hold?: string; at?: string;
+	palette?: boolean; size?: number; grid?: boolean | number;
+}) => {
+	const { scratch: onScratch, ...view } = p;
 	let said: string;
 	try {
-		said = await atEasel(studio, ["look", ...lookArgs(p)], undefined);
+		lookArgs(view); // its combinations, before compare's path is resolved
+		if (p.survey && p.compare) return fail("look: survey and compare are two looks; ask for one");
+		// compare: an earlier look of this studio, nothing outside it (as `read`)
+		let compare = p.compare || undefined;
+		if (compare !== undefined) {
+			compare = studioPath(studio, compare);
+			if (compare === undefined) return fail("look: compare is the path of an earlier look in this studio");
+		}
+		said = await atEasel(studio, ["look", ...on(p), ...lookArgs({ ...view, compare })], undefined);
 	} catch (e) {
 		return fail(toolWords((e as Error).message)); // the easel's messages name its command-line flags
 	}
-	let path: string;
-	({ said, path } = renameLook(studio, said));
-	const data = readFileSync(resolve(studio, path)).toString("base64");
-	return sent({ content: [{ type: "text", text: said }, { type: "image", data, mimeType: "image/png" }] as Content[] });
+	let paths: string[];
+	({ said, paths } = renameLooks(studio, said));
+	if (onScratch) said = `[scratch canvas]\n${said}`;
+	if (paths.length === 0) return fail(said);
+	// (a survey names several looks: each is shown, in order, within what one reply carries)
+	const images = paths.map((path) => ({ type: "image" as const, data: readFileSync(resolve(studio, path)).toString("base64"), mimeType: "image/png" }));
+	if (p.survey) return sent(surveyed(said, paths, images));
+	return sent({ content: [{ type: "text", text: said }, ...images] as Content[] });
 }));
 
 server.registerTool("note", {
@@ -123,10 +186,10 @@ server.registerTool("note", {
 
 server.registerTool("status", {
 	description: "The canvas's setup.",
-	inputSchema: {},
-}, serial(async () => {
+	inputSchema: { scratch },
+}, serial(async (p: { scratch?: boolean }) => {
 	try {
-		return say(statusReply(await atEasel(studio, ["status"], undefined)));
+		return say(tag(p, statusReply(await atEasel(studio, ["status", ...on(p)], undefined))));
 	} catch (e) {
 		return fail((e as Error).message);
 	}
@@ -135,12 +198,12 @@ server.registerTool("status", {
 server.registerTool("log", {
 	description: "The painting so far: every chunk that ran, in order. With offset (the first line, from 1) and limit " +
 		"(how many lines), that part of it, with line numbers.",
-	inputSchema: { offset: z.number().int().optional(), limit: z.number().int().optional() },
-}, serial(async (p: { offset?: number; limit?: number }) => {
+	inputSchema: { scratch, offset: z.number().int().optional(), limit: z.number().int().optional() },
+}, serial(async (p: { scratch?: boolean; offset?: number; limit?: number }) => {
 	try {
-		const log = logReply(await atEasel(studio, ["log"], undefined));
-		if (p.offset === undefined && p.limit === undefined) return say(tail(log, 50_000, "`log` with an offset shows them"));
-		return say(numbered(log, "the log", p.offset, p.limit));
+		const log = unboxed(logReply(await atEasel(studio, ["log", ...on(p)], undefined)));
+		if (p.offset === undefined && p.limit === undefined) return say(tag(p, tail(log, 50_000, "`log` with an offset shows them")));
+		return say(tag(p, numbered(log, "the log", p.offset, p.limit)));
 	} catch (e) {
 		return fail((e as Error).message);
 	}

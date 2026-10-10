@@ -20,7 +20,21 @@ SECRETS = Path(os.environ.get("ATELIER_SECRETS", Path.home() / ".atelier" / "sec
 TOKEN = SECRETS / "claude-oauth-token"  # `claude setup-token`, written by the owner (RUN-13)
 NODE = Path(os.environ.get("ATELIER_NODE", "/opt/homebrew/bin/node"))
 EASEL_MCP = REPO / "easel-mcp" / "src" / "server.ts"
-PAINTER_EASEL = REPO / "engine" / "target" / "painter" / "release" / "easel"
+# a painter's easel per box (tools/build-engine.sh): a studio gets its work's box's, nothing that names another box
+PAINTER_BOXES = REPO / "engine" / "target" / "painter" / "boxes"
+DEFAULT_BOX = "every"  # every tube (the owner, 2026-10-07); a work may be given another box (atelier paint --box)
+
+
+def painter_easel(box: str = DEFAULT_BOX) -> Path:
+    return PAINTER_BOXES / box / "easel"
+
+
+def boxes() -> list[str]:
+    """The boxes a work can be given: those built (tools/build-engine.sh), every box the easel has."""
+    return sorted(d.name for d in PAINTER_BOXES.glob("*") if (d / "easel").exists())
+
+
+PAINTER_EASEL = painter_easel()  # the default box's (the probes' fingerprint)
 REPLAY_EASEL = REPO / "engine" / "target" / "release" / "easel"
 CHECK_PAINTING = REPO / "engine" / "scripts" / "check_painting"
 MATERIALS = REPO / "materials"
