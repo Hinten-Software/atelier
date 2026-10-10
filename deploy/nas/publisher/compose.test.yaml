@@ -7,6 +7,7 @@ services:
     build:
       context: ./repo                                # a checkout of main from Gitea, next to this file
       dockerfile: deploy/nas/publisher/Dockerfile
+    pull_policy: build                               # rebuild from repo/ on every start: never yesterday's code
     restart: "no"
     read_only: true
     tmpfs: [/tmp]
