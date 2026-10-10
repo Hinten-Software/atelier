@@ -17,9 +17,12 @@ and backs the store and the roots up. It needs no network: it only reads and wri
 
 ```
 ATELIER_SCRUB_HOME=/Users/<the Mac's account>
+TZ=<the Mac's time zone, e.g. Europe/Berlin>
 ```
 
 The export scrubs and scans for that home path and account name; on the Mac it took them from the machine itself.
+`TZ` puts the nightly backup (ATELIER_BACKUP_AT, 07:15) and the status's times on the painter's clock; without it
+the container runs on UTC.
 
 ## Step 1: a test against a copy (the owner, once)
 
