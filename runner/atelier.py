@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import CLAUDE, DATA, REPO, TOKEN  # noqa: E402
 from studio import Artist, birth, registry  # noqa: E402
-from works import CURRENT, RUN, STANDING, TERMINAL, Work, event, log  # noqa: E402
+from works import CURRENT, RUN, STANDING, STARTS_LEFT, TERMINAL, Work, event, log  # noqa: E402
 
 
 def alive(pid: int) -> bool:
@@ -195,6 +195,9 @@ def cmd_tick(a):
         return
     if not budget.in_window() or budget.spent_today() >= budget.DAILY_USD:
         return
+    starts = int(STARTS_LEFT.read_text().strip()) if STARTS_LEFT.exists() else None
+    if starts is not None and starts <= 0:  # the open work, if any, goes on; nothing new starts
+        return
     if budget.WINDOW != "always":  # no new work in a night's last 90 minutes: it would straddle into the next night
         now, end = datetime.now(), int(budget.WINDOW.split("-")[1])
         left = (now.replace(hour=end, minute=0, second=0, microsecond=0) - now).total_seconds()
@@ -202,7 +205,10 @@ def cmd_tick(a):
             return
     reg = registry()
     n, id = sorted((len(Artist(x).works()), x) for x in reg)[0]
-    log(f"tick: starting {Artist(id).name}'s work {n + 1} (the owner's standing go until {STANDING.read_text().strip()})")
+    log(f"tick: starting {Artist(id).name}'s work {n + 1} (the owner's standing go until {STANDING.read_text().strip()}"
+        + (f", {starts - 1} more after this)" if starts is not None else ")"))
+    if starts is not None:
+        STARTS_LEFT.write_text(f"{starts - 1}\n")  # used up before the start: a start that fails is not retried forever
     cmd_paint(argparse.Namespace(artist=id, theme=None, by="owner"))
 
 

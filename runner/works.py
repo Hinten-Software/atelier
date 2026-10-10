@@ -37,6 +37,8 @@ KILL_GRACE = 30        # seconds between SIGTERM and SIGKILL (QA Q21)
 
 
 STANDING = DATA / "run" / "until"  # the owner's standing go: an ISO time until which the studios paint in turn
+# ... and, if this file is there, how many new works it may still start (the owner, 2026-10-10: "iii-003 plus one")
+STARTS_LEFT = DATA / "run" / "starts-left"
 
 
 def standing_until() -> datetime | None:
