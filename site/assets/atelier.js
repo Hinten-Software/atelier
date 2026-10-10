@@ -182,6 +182,9 @@ async function work() {
   box.append(el("div", { class: "piece" }, img, label(w)));
   box.append(el("p", { class: "actions" }, el("a", { href: `/studio/?p=${encodeURIComponent(w.viewer)}`, textContent: "Watch it being painted" })));
   if (w.theme) box.append(el("div", { class: "words" }, el("h2", { textContent: "They were given" }), el("p", { textContent: w.theme })));
+  // a work painted from a box of fewer tubes than all of them (atelier paint --box): said as a theme is
+  if (w.box && w.box !== "every") box.append(el("div", { class: "words" }, el("h2", { textContent: "Their tubes" }),
+    el("p", { textContent: `The ${w.box} box, not all fifty-four. The painter wasn't told its name.` })));
   if (w.reply) box.append(el("div", { class: "words" }, el("h2", { textContent: "The painter's words" }), el("p", { textContent: plain(w.reply) })));
   if (w.notebook) box.append(written("Their notebook after this painting", w.notebook));
 }
