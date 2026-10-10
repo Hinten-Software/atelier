@@ -9,7 +9,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 DATA = Path(f"/Users/Shared/atelier/x{os.getpid() % 10000}")
-ENV = os.environ | {"ATELIER_DATA": str(DATA)}
+ENV = os.environ | {"ATELIER_DATA": str(DATA), "ATELIER_SECRETS": str(DATA / "secrets")}
 failed = 0
 PNG = base64.b64encode(bytes.fromhex("89504e470d0a1a0a0000000d4948445200000001000000010806000000"
                                      "1f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082")).decode()

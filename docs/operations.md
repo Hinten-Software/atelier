@@ -30,7 +30,7 @@ Everything below runs on the painter host (the Mac). `atelier` is `python3 runne
    (requirements RUN-15); the runner never uses the auto-updating install.
 3. The login: `claude setup-token` by the owner in Terminal, then `bash tools/save-token.sh`, which
    waits, takes the token from the clipboard (copied only then: copying the command would replace
-   it), joins wrapped lines and saves it to `~/atelier-data/secrets/claude-oauth-token`, mode 600.
+   it), joins wrapped lines and saves it to `~/.atelier/secrets/claude-oauth-token`, mode 600.
    Nobody else reads or prints it. The same for a renewal (the token lasts a year).
 4. `python3 runner/probes.py`: context, tools and long-chunk probes on the production setup. All
    must pass; the pass is recorded and `atelier birth` requires it.

@@ -5,7 +5,7 @@
 
 Both go through DSM's rsync service as a user that can write those two folders and nothing else
 (deploy/nas/README.md). The NAS's address and that user live in DATA/nas.json, its password in
-DATA/secrets/nas-sync-password (tools/save-token.sh nas): nothing of either is in the repository.
+~/.atelier/secrets/nas-sync-password (tools/save-token.sh nas): nothing of either is in the repository.
 Without them both are quietly skipped, so the atelier runs the same with or without a NAS.
 
 The NAS keeps daily snapshots of both folders: the Mac can overwrite them, only the NAS can delete history.
@@ -15,11 +15,11 @@ import subprocess
 import time
 from pathlib import Path
 
-from config import DATA
+from config import DATA, SECRETS
 
 RSYNC = "/opt/homebrew/bin/rsync"  # openrsync (macOS) has no daemon password file
 SETTINGS = DATA / "nas.json"        # {"host": "...", "user": "atelier-sync", "site": "atelier-site", "backup": "atelier-backup"}
-PASSWORD = DATA / "secrets" / "nas-sync-password"
+PASSWORD = SECRETS / "nas-sync-password"
 LOG = DATA / "run" / "nas.log"
 
 # never leaves the Mac: secrets, the pinned harness (re-downloadable), build scratch, the served copy (synced separately)

@@ -17,7 +17,7 @@ HERE = Path(__file__).resolve().parent
 RUNNER = HERE.parent / "atelier.py"
 DATA = Path(f"/Users/Shared/atelier/t{os.getpid() % 10000}")  # one folder per run: runs can't break each other (QA Q25)
 ENV = os.environ | {"ATELIER_DATA": str(DATA), "ATELIER_CLAUDE": str(HERE / "fake_claude.py"), "ATELIER_WAIT_SCALE": "0.005",
-                    "ATELIER_WINDOW": "always"}
+                    "ATELIER_WINDOW": "always", "ATELIER_SECRETS": str(DATA / "secrets")}  # never the owner's token
 failed = 0
 
 
@@ -207,6 +207,7 @@ def main():
         # 8. limit reset times (QA Q10)
         sys.path.insert(0, str(HERE.parent))
         os.environ["ATELIER_DATA"] = str(DATA)
+        os.environ["ATELIER_SECRETS"] = str(DATA / "secrets")
         from datetime import datetime
         import works
         ref = datetime(2026, 10, 3, 13, 55)  # a Saturday

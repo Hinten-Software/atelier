@@ -6,28 +6,30 @@
 #   3. when it asks: copy the token, from sk-ant- to its end, then press Enter
 #
 #   bash tools/save-token.sh tunnel             the Cloudflare Tunnel token instead (starts eyJ), saved as
-#                                               ~/atelier-data/secrets/tunnel.env for the NAS (deploy/nas)
+#                                               ~/.atelier/secrets/tunnel.env for the NAS (deploy/nas)
 #   bash tools/save-token.sh tunnel FILE        read the token from FILE instead of the clipboard (for a
 #                                               token typed or pasted there); FILE is deleted after saving
 #   bash tools/save-token.sh turnstile [FILE]   the Turnstile widget's secret key (deploy/notes), starts 0x
 #   bash tools/save-token.sh cloudflare [FILE]  the Cloudflare API token that deploys the notes service
 #   bash tools/save-token.sh nas [FILE]         the NAS sync user's password (deploy/nas), saved as
-#                                               ~/atelier-data/secrets/nas-sync-password
+#                                               ~/.atelier/secrets/nas-sync-password
 #
 # Copying the token only after this script waits matters: copying this command would otherwise
 # replace the token on the clipboard. Lines the terminal wrapped are joined; the clipboard is cleared.
 set -euo pipefail
 if [ "${1:-}" = tunnel ]; then
-  f="${ATELIER_TOKEN_FILE:-$HOME/atelier-data/secrets/tunnel.env}"; start=eyJ; re='eyJ[A-Za-z0-9_=+/-]{100,}'; pre=TUNNEL_TOKEN=
+  f="${ATELIER_TOKEN_FILE:-$HOME/.atelier/secrets/tunnel.env}"; start=eyJ; re='eyJ[A-Za-z0-9_=+/-]{100,}'; pre=TUNNEL_TOKEN=
 elif [ "${1:-}" = turnstile ]; then
-  f="${ATELIER_TOKEN_FILE:-$HOME/atelier-data/secrets/turnstile-secret}"; start="0x"; re='0x[A-Za-z0-9_-]{20,}'; pre=
+  f="${ATELIER_TOKEN_FILE:-$HOME/.atelier/secrets/turnstile-secret}"; start="0x"; re='0x[A-Za-z0-9_-]{20,}'; pre=
 elif [ "${1:-}" = cloudflare ]; then
-  f="${ATELIER_TOKEN_FILE:-$HOME/atelier-data/secrets/cloudflare-api-token}"; start="its first character"; re='[A-Za-z0-9_-]{30,}'; pre=
+  f="${ATELIER_TOKEN_FILE:-$HOME/.atelier/secrets/cloudflare-api-token}"; start="its first character"; re='[A-Za-z0-9_-]{30,}'; pre=
 elif [ "${1:-}" = nas ]; then
-  f="${ATELIER_TOKEN_FILE:-$HOME/atelier-data/secrets/nas-sync-password}"; start="its first character"; re='[^[:space:]]{8,}'; pre=
+  f="${ATELIER_TOKEN_FILE:-$HOME/.atelier/secrets/nas-sync-password}"; start="its first character"; re='[^[:space:]]{8,}'; pre=
 else
-  f="${ATELIER_TOKEN_FILE:-$HOME/atelier-data/secrets/claude-oauth-token}"; start=sk-ant-; re='sk-ant-[A-Za-z0-9_-]{40,}'; pre=
+  f="${ATELIER_TOKEN_FILE:-$HOME/.atelier/secrets/claude-oauth-token}"; start=sk-ant-; re='sk-ant-[A-Za-z0-9_-]{40,}'; pre=
 fi
+
+mkdir -p "$(dirname "$f")" && chmod 700 "$(dirname "$f")"  # the secrets folder: the owner alone
 
 src="${2:-}"
 if [ -z "$src" ]; then

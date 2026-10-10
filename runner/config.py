@@ -16,7 +16,10 @@ ROOTS = Path(os.environ.get("ATELIER_ROOTS", "/Users/Shared"))
 CLAUDE_VERSION = os.environ.get("ATELIER_CLAUDE_VERSION", "2.1.288")
 # pinned copy, never the auto-updating install (RUN-15); ATELIER_CLAUDE: tests only (tests/fake_claude.py)
 CLAUDE = Path(os.environ.get("ATELIER_CLAUDE", DATA / "bin" / f"claude-{CLAUDE_VERSION}"))
-TOKEN = DATA / "secrets" / "claude-oauth-token"  # `claude setup-token`, written by the owner (RUN-13)
+# secrets live outside the store: the store is shared read-only with the NAS, a secret never is
+# (docs/design-nas-publisher.md)
+SECRETS = Path(os.environ.get("ATELIER_SECRETS", Path.home() / ".atelier" / "secrets"))
+TOKEN = SECRETS / "claude-oauth-token"  # `claude setup-token`, written by the owner (RUN-13)
 NODE = Path(os.environ.get("ATELIER_NODE", "/opt/homebrew/bin/node"))
 EASEL_MCP = REPO / "easel-mcp" / "src" / "server.ts"
 PAINTER_EASEL = REPO / "engine" / "target" / "painter" / "release" / "easel"

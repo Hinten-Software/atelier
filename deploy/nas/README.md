@@ -12,14 +12,14 @@ https://notart.fyi. The NAS publishes no ports and the router stays closed. ngin
    `bash ~/dev/atelier/tools/save-token.sh tunnel` (it waits; copy the command when it asks, press Enter).
    No clipboard on the Mac (e.g. a remote session): paste or type the token into a plain-text file and run
    `bash ~/dev/atelier/tools/save-token.sh tunnel FILE`; the token is checked and FILE deleted.
-   This writes `~/atelier-data/secrets/tunnel.env`. Click **Next**.
+   This writes `~/.atelier/secrets/tunnel.env`. Click **Next**.
 3. **Public hostname**: subdomain empty, domain `notart.fyi`, path empty; service **HTTP**, URL `web:80`.
    Save. (Optional, same tunnel: a second hostname `www` -> `web:80`.)
 
 ## Once: the NAS (DSM, the owner)
 
 1. File Station: create `docker/atelier`, upload into it `compose.yaml`, `nginx.conf`, the `site`
-   folder, and `~/atelier-data/secrets/tunnel.env` (in Finder: Cmd-Shift-G, `~/atelier-data/secrets`).
+   folder, and `~/.atelier/secrets/tunnel.env` (in Finder: Cmd-Shift-G, `~/.atelier/secrets`).
 2. Container Manager -> **Project -> Create**: name `atelier`, path `/docker/atelier`, source
    "Use existing docker-compose.yml". Next, skip Web Station, Done. Both containers should run.
 3. The tunnel shows **Healthy** in the dashboard, and https://notart.fyi shows the page.
