@@ -19,25 +19,5 @@ services:
     env_file: tunnel.env
     depends_on: [web]
     networks: [atelier]
-  # The Mac paints; the publisher does the rest (docs/design-nas-publisher.md): it reads the Mac's store and the
-  # artists' roots from read-only CIFS mounts (DSM: File Station -> Mount Remote Folder, under the shared folder
-  # "mac"), exports the site into atelier-site and backs up into atelier-backup. No network: only folders.
-  publisher:
-    build:
-      context: ./repo                                # a checkout of main from Gitea, next to this file
-      dockerfile: deploy/nas/publisher/Dockerfile
-    pull_policy: build                               # rebuild from repo/ on every start: never yesterday's code
-    restart: unless-stopped
-    read_only: true
-    tmpfs: [/tmp]
-    env_file: publisher.env                          # ATELIER_SCRUB_HOME, TZ (never in the repository)
-    volumes:
-      - /volume1/mac/atelier-data:/data:ro           # the Mac's ~/atelier-data
-      - /volume1/mac/roots:/Users/Shared:ro          # the artists' roots, each mounted at its name: their Mac paths
-      - ./work:/work                                 # the publisher's own: farm, stage, last clean export
-      - /volume1/atelier-site:/site                  # what nginx serves
-      - /volume1/atelier-backup:/backup              # the archive; status/status.json
-      - ./private-words.txt:/config/private-words.txt:ro
-    network_mode: none
 networks:
   atelier: {}

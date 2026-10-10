@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import CLAUDE, DATA, TOKEN  # noqa: E402
+from config import CLAUDE, DATA, REPO, TOKEN  # noqa: E402
 from studio import Artist, birth, registry  # noqa: E402
 from works import CURRENT, RUN, STANDING, TERMINAL, Work, event, log  # noqa: E402
 
@@ -164,15 +164,15 @@ def cmd_export(a):
 
 
 def cmd_sync(a):
-    import nas
-    r = nas.sync_site()
-    print({None: "no NAS configured (DATA/nas.json and the sync password)", True: "site synced", False: "sync failed: see run/nas.log"}[r])
+    """The site to the NAS now (tools/push.sh does it every 2 minutes); from a terminal, which may reach the NAS."""
+    subprocess.run(["/bin/bash", str(REPO / "tools" / "push.sh")])
+    print(subprocess.run(["tail", "-1", str(DATA / "run" / "nas.log")], capture_output=True, text=True).stdout.strip())
 
 
 def cmd_backup(a):
-    import nas
-    r = nas.backup()
-    print({None: "no NAS configured (DATA/nas.json and the sync password)", True: "backup done", False: "backup failed: see run/nas.log"}[r])
+    """The site and the backup to the NAS now."""
+    subprocess.run(["/bin/bash", str(REPO / "tools" / "push.sh"), "backup"])
+    print(subprocess.run(["tail", "-4", str(DATA / "run" / "nas.log")], capture_output=True, text=True).stdout.strip())
 
 
 def cmd_tick(a):

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The copy to the NAS (tools/push.sh): the site every 2 minutes, the backup every 30 minutes.
+     Install: sed "s#HOME_DIR#$HOME#g" deploy/mac/atelier.push.plist > ~/Library/LaunchAgents/atelier.push.plist
+              launchctl load ~/Library/LaunchAgents/atelier.push.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>atelier.push</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>HOME_DIR/dev/atelier/tools/push.sh</string>
+  </array>
+  <key>StartInterval</key><integer>120</integer>
+  <key>RunAtLoad</key><true/>
+  <key>StandardOutPath</key><string>HOME_DIR/atelier-data/run/push.log</string>
+  <key>StandardErrorPath</key><string>HOME_DIR/atelier-data/run/push.log</string>
+</dict>
+</plist>

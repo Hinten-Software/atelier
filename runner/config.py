@@ -7,8 +7,7 @@ TEXTS = REPO / "runner" / "texts"
 
 # the private store (mode 700): artists' records, works, run state, the pinned harness; synced to the NAS
 DATA = Path(os.environ.get("ATELIER_DATA", Path.home() / "atelier-data"))
-# where the export builds and keeps the site: the store itself on the Mac; on the NAS the store is a read-only
-# share of the Mac's, so the publisher works in a folder of its own (docs/design-nas-publisher.md)
+# where the export builds and keeps the site: the store itself, unless ATELIER_WORK names another folder
 WORK = Path(os.environ.get("ATELIER_WORK", DATA))
 # artists' roots live here, outside every home folder, so no account name is in any path an artist sees (ENG-7)
 ROOTS = Path(os.environ.get("ATELIER_ROOTS", "/Users/Shared"))
@@ -16,8 +15,7 @@ ROOTS = Path(os.environ.get("ATELIER_ROOTS", "/Users/Shared"))
 CLAUDE_VERSION = os.environ.get("ATELIER_CLAUDE_VERSION", "2.1.288")
 # pinned copy, never the auto-updating install (RUN-15); ATELIER_CLAUDE: tests only (tests/fake_claude.py)
 CLAUDE = Path(os.environ.get("ATELIER_CLAUDE", DATA / "bin" / f"claude-{CLAUDE_VERSION}"))
-# secrets live outside the store: the store is shared read-only with the NAS, a secret never is
-# (docs/design-nas-publisher.md)
+# secrets live outside the store: the store is backed up to the NAS, a secret never is
 SECRETS = Path(os.environ.get("ATELIER_SECRETS", Path.home() / ".atelier" / "secrets"))
 TOKEN = SECRETS / "claude-oauth-token"  # `claude setup-token`, written by the owner (RUN-13)
 NODE = Path(os.environ.get("ATELIER_NODE", "/opt/homebrew/bin/node"))

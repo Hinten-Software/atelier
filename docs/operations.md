@@ -43,6 +43,11 @@ Everything below runs on the painter host (the Mac). `atelier` is `python3 runne
 - `atelier status`: the open work, its state, how its sittings ended, any audit hits.
 - The runner exports the site every 2 minutes; `atelier serve` shows it on the LAN at
   `http://<mac>:8800/studio/`.
+- `tools/push.sh` (LaunchAgent `atelier.push`, deploy/mac, every 2 minutes) copies the site to the NAS, and the
+  store and the roots to the backup every 30 minutes; `run/nas.log` says how each went. `atelier sync` and
+  `atelier backup` run it at once. It is a shell script with Apple's `/usr/bin/rsync` on purpose (tested 2026-10-10):
+  under launchd, macOS lets Apple's own programs reach the home network, but not Homebrew's python or rsync, and a
+  connection counts as the program's that started it. So nothing in python may connect to the NAS.
 
 **Guardrails (requirements RUN-17):** USD 20 a day for all artists together (40 until 2026-10-07), USD 60 per work,
 painting only 23:00-07:00. A work started in the day waits for the window; a sitting that reaches the
