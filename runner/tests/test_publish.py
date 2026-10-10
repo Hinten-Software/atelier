@@ -46,11 +46,15 @@ def main():
         (DATA / "artists.json").write_text(json.dumps({"i": {"root": str(ROOT), "studio_name": "Studio I"}}))
         readonly(True)
         before = tree(DATA)
+        eadir = WORK / "run/stage/@eaDir/index.html@SynoEAStream"  # DSM's metadata beside files written to the NAS
+        eadir.parent.mkdir(parents=True)
+        eadir.write_text("xattrs")
 
         r, st = publish()
         T.check("a round exports, copies and backs up", r.returncode == 0 and st["export"]["ok"] and st["backup"]["ok"],
                 r.stdout[-400:] + r.stderr[-400:])
         T.check("the served folder has the work", (SITE / "studio/data/w-i-001/events.json").exists())
+        T.check("a NAS's own folders neither block nor publish", not any("@eaDir" in str(p) for p in SITE.rglob("*")))
         T.check("the export was built outside the store", (WORK / "site/data/works.json").exists())
         T.check("nothing written into the store", tree(DATA) == before)
         ev = (SITE / "studio/data/w-i-001/events.json").read_text()

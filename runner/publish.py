@@ -21,6 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import DATA, REPO, WORK  # noqa: E402
+from export import hidden  # noqa: E402
 
 SITE_OUT = Path(os.environ.get("ATELIER_SITE_OUT", "/site"))      # the shared folder nginx serves (atelier-site)
 BACKUP_OUT = Path(os.environ.get("ATELIER_BACKUP_OUT", "/backup"))  # the archive (atelier-backup)
@@ -68,7 +69,7 @@ def export_inputs() -> tuple:
             files += [Path(r["transcript"]) for r in json.loads(sf.read_text()).get("sittings", [])]
         except (OSError, ValueError, KeyError):
             pass  # a state being written: its new stamp brings the next round
-    files += sorted(f for f in (REPO / "site").rglob("*") if f.is_file())
+    files += sorted(f for f in (REPO / "site").rglob("*") if f.is_file() and not hidden(f.relative_to(REPO / "site")))
     return tuple(stamp(f) for f in files)
 
 

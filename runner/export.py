@@ -36,8 +36,15 @@ FINAL_WEB = {"final.jpg": 1600, "final-t.jpg": 640}  # the walls' and the door's
 PUBLIC_MANIFEST = ("id", "studio", "number", "title", "mode", "theme", "start", "end", "model", "effort", "claude_code",
                    "replay_verified", "finished", "contaminated")
 CANARY = "35396958-eb10-44fe-8f7d-0720fe551f10"  # public on purpose (README, every page: REC-9)
+# a NAS's own folders beside files written to it (DSM: metadata, recycle bin, snapshots): never read, never published
+NAS_OWN = ("@eaDir", "#recycle", "#snapshot")
 UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
 IP_RE = re.compile(r"\b(?:10|192\.168|172\.(?:1[6-9]|2\d|3[01]))(?:\.\d{1,3}){2,3}\b")  # 127.x (loopback) names no machine
+
+
+def hidden(rel: Path) -> bool:
+    """A dot-file or a NAS's own folder, anywhere in the path: not ours, never published."""
+    return any(part.startswith(".") or part in NAS_OWN for part in rel.parts)
 
 
 def farm():
@@ -121,7 +128,7 @@ def web_finals(png: Path, data: Path):
 def scan(site: Path) -> list[str]:
     hits = []
     for f in site.rglob("*"):
-        if any(part.startswith(".") for part in f.relative_to(site).parts):
+        if hidden(f.relative_to(site)):
             continue
         if f.is_file() and f.suffix in (".json", ".html", ".css", ".js", ".md", ".txt", ".lua"):
             text = f.read_text(errors="replace")
@@ -154,7 +161,7 @@ def publish():
     """Swap the scanned stage in as the site, without its dot-files (the exporter's file list)."""
     new = WORK / "site.new"
     shutil.rmtree(new, ignore_errors=True)
-    shutil.copytree(STAGE, new, ignore=shutil.ignore_patterns(".*"))
+    shutil.copytree(STAGE, new, ignore=shutil.ignore_patterns(".*", *NAS_OWN))
     old = WORK / "site.old"
     shutil.rmtree(old, ignore_errors=True)
     if SITE.exists():
@@ -198,7 +205,7 @@ def main() -> int:
                 from PIL import Image
                 Image.open(png).convert("RGB").save(out, "JPEG", quality=88, optimize=True, progressive=True)
     for f in PAGES.rglob("*"):  # the atelier's own pages, scanned and allowlisted like everything else
-        if f.is_file() and not f.name.startswith("."):
+        if f.is_file() and not hidden(f.relative_to(PAGES)):
             dst = SITE_ / f.relative_to(PAGES)
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(f, dst)
@@ -217,7 +224,7 @@ def main() -> int:
     hits = scan(SITE_)
     for f in SITE_.rglob("*"):  # REC-8: nothing outside the allowlist (the exporter's own list file stays behind)
         rel = str(f.relative_to(SITE_))
-        if f.is_file() and not ALLOWED.match(rel) and not any(part.startswith(".") for part in f.relative_to(SITE_).parts):
+        if f.is_file() and not ALLOWED.match(rel) and not hidden(f.relative_to(SITE_)):
             hits.append(f"{rel}: not on the export allowlist")
     if hits:
         return blocked(hits)
