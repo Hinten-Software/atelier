@@ -83,5 +83,6 @@ any change is an atelier event (history.md).
 `atelier tick` (deploy/mac/atelier.tick.plist, a LaunchAgent, every 10 minutes and at login) carries the owner's
 standing go: until the time in DATA/run/until, it resumes a work a reboot cut off, and otherwise starts the next
 studio's work (fewest works first) when the night window is open and today's budget allows. It never clears an audit
-stop. To end it early: `launchctl unload ~/Library/LaunchAgents/atelier.tick.plist` (or delete DATA/run/until).
+stop. If DATA/run/starts-left holds a number, the tick starts only that many new works and counts down (the
+open work goes on regardless). To end it early: `launchctl unload ~/Library/LaunchAgents/atelier.tick.plist` (or delete DATA/run/until).
 
