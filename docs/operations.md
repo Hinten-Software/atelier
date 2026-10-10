@@ -65,6 +65,13 @@ any change is an atelier event (history.md).
   `atelier resume --clear "what was found and fixed"` (the work stays contaminated: not hung, not
   exported) or leave it. The artist's notebook edits from that sitting are already rolled back.
 
+## Taking a newer claude-paint
+
+Alice develops claude-paint actively; syncing is routine: UPSTREAM.md "Taking a newer claude-paint" (import onto the
+branch `upstream`, merge, build, tests, the white room, the live check, probes, then `main` between works).
+`atelier boxes` lists the tube boxes a work can be given (`atelier paint <studio> --by owner --box <box>`; default
+every); the painter is never told a box's name.
+
 ## Later (noted 2026-10-06)
 
 - **Cache Rule for pages and data** (Cloudflare): HTML and JSON are "dynamic" by default, so every page view

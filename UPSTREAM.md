@@ -3,28 +3,67 @@
 Source: https://github.com/aliceisjustplaying/claude-paint (Alice; code MIT,
 texts and paintings CC BY 4.0). Gallery: https://stillwet.art.
 
-Pinned commit: `a198dd055964b77882b42925ff949043d5e334e5` (2026-10-03, after tag
-`round-22.1`). Taken with `git archive` of that commit, unmodified unless listed
-under "Changes" below.
+Merged: `78c86cec692824bf581c84ba0be25c7e4c5e9b06` (2026-10-10), on branch `upstream` (her files, unmodified,
+at our paths) and merged into `main`. The exact commit is in `tools/upstream/commit`; every work records it
+(`engine_upstream` in its manifest). First taken: `a198dd0` (2026-10-03, after tag `round-22.1`).
 
-| here | upstream | notes |
-|---|---|---|
-| `engine/Cargo.toml`, `Cargo.lock`, `.cargo/`, `crates/`, `scripts/` | same paths | the engine, the easel, its build and check scripts |
-| `LICENSE-claude-paint` | `LICENSE` | |
-| `THIRD_PARTY_NOTICES.md` | `THIRD_PARTY_NOTICES.md` | spectral.js (MIT), Mixbox (CC BY-NC 4.0) |
-| `materials/easel_guide.md` | `notes/easel_guide.md` | |
-| `materials/research/oil_paint_physics.md` | `notes/research/oil_paint_physics.md` | |
-| `viewer/upstream/studio/` | `studio/` | kept verbatim for reference; our viewer is adapted from it |
-| `easel-mcp/src/upstream/easel-client.ts`, `journal.ts` | `harness/painter/` | used unchanged by our MCP server |
-| `easel-mcp/src/server.ts` | `harness/painter/easel-tools.ts` | same tools and descriptions, served over MCP instead of pi |
+What we take, and where it lives here: `tools/upstream/map.txt`. Not taken: the research notes on individual
+painters and motifs (they steer a painter's subject), the pi harness's runner (painter.ts, its prompt and
+compaction), her rounds, records, archive and paintings.
 
-Not taken: the research notes on individual painters and motifs (Friedrich,
-trees, ...), which steer a painter's subject; the pi harness, which our artists
-don't use; her runners, records and paintings.
+## Taking a newer claude-paint
+
+She develops actively; this is routine. In a worktree of its own (the runner paints from `main`'s files):
+
+1. `bash tools/upstream/import.sh` - her latest onto the branch `upstream` (one commit, her files only).
+2. `git merge upstream` - git keeps our changes (below) and brings hers; resolve only real overlaps, keeping
+   each change listed under "The atelier's changes" (and taking hers everywhere else).
+3. `bash tools/build-engine.sh` - the replay easel and a painter's easel per box (new boxes come by themselves).
+4. Tests: `cd engine && cargo test --release --no-fail-fast -p paint -p easel` (her tests run on her behaviour:
+   our changes are on only in our build); `python3 runner/tests/test_*.py`; in a test studio,
+   `node easel-mcp/test/tools.ts <studio>` and `node easel-mcp/test/upstream.ts <studio>`.
+5. Her painter tools: compare `easel-mcp/src/upstream/easel-tools.ts` (her current version) with what
+   `easel-mcp/src/server.ts` serves, and port what is new (its header says what was last ported).
+6. `uv run tools/whiteroom.py` - every new text a painter reads, clean or allowed with a reason.
+7. `bash tools/upstream/live-check.sh` - a painting made with the newest tools replays byte for byte: the gate.
+   `bash tools/upstream/verify.sh` reports whether the finished paintings still replay (a report: their PNGs hang
+   either way, the owner 2026-10-10).
+8. `python3 runner/probes.py` - the production setup with the new tools, audited.
+9. Merge into `main` between works (a work in progress keeps its own easel, but each sitting loads the painter
+   tools from `main`), then the About page if the painters' tools changed, and an atelier event in history.md.
+
+## The atelier's changes (kept on every merge)
+
+- `engine/crates/easel/src/main.rs`: `ATELIER` (on when `tools/build-engine.sh` builds: `ATELIER_BUILD`): a new
+  painting at `NEW_WIDTH` 4800 px, the journal named `journal`. Off in a plain `cargo test`, so her tests hold.
+- `engine/crates/easel/src/session.rs`: `WIDTH_MARK` (`--@ width 4800` in a log's head), `logged_width`,
+  `chunk_limit_for` (the chunk limit scaled with the pixel count); her `width_for` (main.rs) reads it. Test
+  `the_log_names_its_width`; `the_guide_shows_the_painters_box` (the guide's table is the every box's).
+- `engine/crates/easel/src/look.rs`: a crop is shown at 2.4 px a unit (`LOOK_SCALE`) whatever the canvas's width.
+- `engine/scripts/check_painting`: `EASEL_NO_BUILD=1` uses the replay easel already built.
+- `tools/build-engine.sh`: no local paths in the binaries (ENG-7); byte-identical builds (her release profile is
+  incremental since 2026-10-05 and accepts drift between builds: ours is not); a painter's easel per box.
+- `materials/easel_guide.md`: the tube table is the every box's (`easel tubes --markdown`; each studio's copy has its
+  own box's, runner/studio.py); "close up" for crops; the journal and the log without file paths; two lines
+  reworded for the white room ("as dirty as a working palette gets", "as many tiles as one reply holds").
+- `easel-mcp/src/server.ts`: her painter tools over MCP, with the atelier's read/write/edit; the log without its
+  box line (a box may be named after a painter); its own survey reply (hers speaks of a budget).
+- `easel-mcp/src/upstream/easel-client.ts`: `WAIT_MS` raised for 4800 px (see below).
+
+Known, hers: `rag::tests::a_dry_rag_leaves_a_pale_tint_and_spirits_lift_nearly_to_the_ground` fails here at 78c86ce
+(0.8993 against its 0.9); the paint crate is hers unchanged.
 
 ## Changes
 
 Engine changes are atelier events (requirements ENG-5), listed here with their date and reason.
+
+- 2026-10-10 claude-paint 78c86ce merged (the owner: "the new tools and verbs, and the new tube boxes"): engines 3-5
+  (slower drying with each tube's own rate, the rag, thinner and turpentine, raw linen, impasto that holds its
+  relief and clumping hairs, knife tears, the palette board), brushwork (part loads, streaks, gestures, sized
+  marks), looks (raking light, gallery light, survey, compare, hold), the scratch canvas, the boxes friedrich,
+  giverny, impressionist and seurat. New paintings are engine 5. A work may be given a box (`atelier paint --box`);
+  every is the default. Our hand port of the every box (2026-10-07) gave way to hers. The vendor branch and
+  tools/upstream were set up for the syncs to come.
 
 - 2026-10-03 `engine/scripts/check_painting`: with `EASEL_NO_BUILD=1` it uses the replay easel
   already built (by `tools/build-engine.sh`, with no local paths inside) instead of rebuilding it
