@@ -29,7 +29,9 @@ from datetime import datetime
 SESSIONS = os.path.expanduser("~/.pi/agent/sessions")
 # --public: painters only, nothing that names this machine's owner (for a link shown to others)
 PUBLIC = False
-HOME = os.path.expanduser("~")
+# the home folder whose path and account name are scrubbed: this machine's, or the painter's when the export runs
+# elsewhere (the NAS's publisher: ATELIER_SCRUB_HOME=/Users/<account>)
+HOME = os.environ.get("ATELIER_SCRUB_HOME") or os.path.expanduser("~")
 USER = os.path.basename(HOME)
 
 

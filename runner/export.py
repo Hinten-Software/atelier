@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""The public export (requirements REC-3, REC-7, REC-8): DATA/site/, served on the LAN now and by the NAS later.
+"""The public export (requirements REC-3, REC-7, REC-8): WORK/site/ (WORK is the store, DATA, unless ATELIER_WORK
+names another folder: the NAS's publisher reads the store read-only and builds in a folder of its own).
 
     python3 runner/export.py
 
-Builds a session farm (DATA/run/farm/w-<work>/, links to each sitting's transcript: finished works' copies in their
+Builds a session farm (WORK/run/farm/w-<work>/, links to each sitting's transcript: finished works' copies in their
 packages, the open work's live transcripts), runs claude-paint's static exporter over it, adds data/works.json
 (the public fields of each work and the birth records), then scans everything it wrote for private strings. A hit
 removes nothing and publishes nothing: the export stops with the reason.
@@ -17,12 +18,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from audit import private_hits  # noqa: E402
-from config import DATA, PRIVATE_WORDS, REPO  # noqa: E402
+from config import DATA, PRIVATE_WORDS, REPO, WORK  # noqa: E402
 
-SITE = DATA / "site"            # what is served and pushed: only ever a clean export (QA Q13)
-STAGE = DATA / "run" / "stage"  # where the export is built and scanned
-BLOCKED = DATA / "run" / "export-blocked.txt"
-FARM = DATA / "run" / "farm"
+SITE = WORK / "site"            # what is served and pushed: only ever a clean export (QA Q13)
+STAGE = WORK / "run" / "stage"  # where the export is built and scanned
+BLOCKED = WORK / "run" / "export-blocked.txt"
+FARM = WORK / "run" / "farm"
 # what may be published (REC-8): the viewer, its data per work (events, looks and their web copies, the painting's
 # log), the final renders, works.json
 ALLOWED = re.compile(r"^(studio/(index\.html|stream\.css|data/sessions\.json|data/w-[a-z]+-\d{3}/(events\.json|"
@@ -142,6 +143,7 @@ def redact(hit: str) -> str:
 
 
 def blocked(hits: list[str]) -> int:
+    BLOCKED.parent.mkdir(parents=True, exist_ok=True)
     BLOCKED.write_text("\n".join(redact(h) for h in hits) + "\n")
     print("export: private strings in the export (REC-7); the site is left as it was:", *[redact(h) for h in hits[:20]],
           sep="\n  ", file=sys.stderr)
@@ -150,10 +152,10 @@ def blocked(hits: list[str]) -> int:
 
 def publish():
     """Swap the scanned stage in as the site, without its dot-files (the exporter's file list)."""
-    new = DATA / "site.new"
+    new = WORK / "site.new"
     shutil.rmtree(new, ignore_errors=True)
     shutil.copytree(STAGE, new, ignore=shutil.ignore_patterns(".*"))
-    old = DATA / "site.old"
+    old = WORK / "site.old"
     shutil.rmtree(old, ignore_errors=True)
     if SITE.exists():
         SITE.rename(old)

@@ -7,6 +7,9 @@ TEXTS = REPO / "runner" / "texts"
 
 # the private store (mode 700): artists' records, works, run state, the pinned harness; synced to the NAS
 DATA = Path(os.environ.get("ATELIER_DATA", Path.home() / "atelier-data"))
+# where the export builds and keeps the site: the store itself on the Mac; on the NAS the store is a read-only
+# share of the Mac's, so the publisher works in a folder of its own (docs/design-nas-publisher.md)
+WORK = Path(os.environ.get("ATELIER_WORK", DATA))
 # artists' roots live here, outside every home folder, so no account name is in any path an artist sees (ENG-7)
 ROOTS = Path(os.environ.get("ATELIER_ROOTS", "/Users/Shared"))
 
