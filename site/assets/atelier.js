@@ -8,6 +8,7 @@ const STATES = {  // the open work's runner state, as a visitor sees it
   "crash-wait": ["resting", false], interrupted: ["resting", false], finishing: ["finishing", false],
 };
 const REFRESH_MS = 60_000;  // while a studio has a work open; the export runs every 2 minutes
+const IDLE_MS = 300_000;    // while none has: often enough that a page left open sees the next work begin
 
 const el = (tag, props = {}, ...kids) => {
   const e = document.createElement(tag);
@@ -66,10 +67,11 @@ function lightbox(items, start) {  // items: [{src, title, href}]
   document.body.append(box); box.focus(); show();
 }
 
-// re-render while any studio has a work open, so a visitor who waits sees the painting change
+// re-render every minute while any studio has a work open, so a visitor who waits sees the painting change, and
+// every five minutes while none has, so they see the next work begin
 function whileOpen(render) {
   let timer = null;
-  const run = async () => { const open = await render(); clearTimeout(timer); if (open) timer = setTimeout(run, REFRESH_MS); };
+  const run = async () => { const open = await render(); clearTimeout(timer); timer = setTimeout(run, open ? REFRESH_MS : IDLE_MS); };
   document.addEventListener("visibilitychange", () => { if (!document.hidden) run(); else clearTimeout(timer); });
   run();
 }
