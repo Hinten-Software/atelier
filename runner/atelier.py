@@ -103,7 +103,7 @@ def cmd_status(a):
         art = Artist(id)
         print(f"{art.name} ({id}): {len(art.finished())} finished, {len(art.works())} works")
     import budget
-    print(f"today: ${budget.spent_today():.2f} of ${budget.DAILY_USD:.0f}; painting window {budget.WINDOW} "
+    print(f"today: ${budget.spent_today():.2f} of ${budget.daily_cap():.0f}; painting window {budget.window()} "
           f"({'open' if budget.in_window() else 'closed'})")
     w = open_work()
     if not w:
@@ -193,13 +193,16 @@ def cmd_tick(a):
         log(f"tick: {w.id} has no runner; resuming it")
         cmd_resume(argparse.Namespace(clear=None))
         return
-    if not budget.in_window() or budget.spent_today() >= budget.DAILY_USD:
-        return
     starts = int(STARTS_LEFT.read_text().strip()) if STARTS_LEFT.exists() else None
     if starts is not None and starts <= 0:  # the open work, if any, goes on; nothing new starts
+        if budget.OPEN.exists():  # the run the studios were opened for is done: the night window and the cap again
+            budget.OPEN.unlink()
+            event(f"the owner's run is done: painting window {budget.WINDOW} and ${budget.DAILY_USD:.0f} a day again")
         return
-    if budget.WINDOW != "always":  # no new work in a night's last 90 minutes: it would straddle into the next night
-        now, end = datetime.now(), int(budget.WINDOW.split("-")[1])
+    if not budget.in_window() or budget.spent_today() >= budget.daily_cap():
+        return
+    if budget.window() != "always":  # no new work in a night's last 90 minutes: it would straddle into the next night
+        now, end = datetime.now(), int(budget.window().split("-")[1])
         left = (now.replace(hour=end, minute=0, second=0, microsecond=0) - now).total_seconds()
         if 0 < left < 90 * 60:
             return

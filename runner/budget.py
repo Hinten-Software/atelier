@@ -19,6 +19,18 @@ WORK_USD = float(os.environ.get("ATELIER_WORK_USD", "60"))
 # "23-7": from 23:00 to 07:00; "always": no window. Daytime painting 2026-10-06 to 2026-10-07; nights again since
 # (the owner, 2026-10-07: "at the prior timeslots (night time)"); the daily and per-work ceilings stay
 WINDOW = os.environ.get("ATELIER_WINDOW", "23-7")
+# while this file is there, the studios paint at any hour and without the daily cap, until Claude's usage limit
+# (the owner, 2026-10-10: "iii-003 plus one, now, until the session limit"); the work's cap stays. The tick removes
+# it once the standing go's count of new works is used up and nothing is open (atelier.py cmd_tick)
+OPEN = DATA / "run" / "open"
+
+
+def window() -> str:
+    return "always" if OPEN.exists() else WINDOW
+
+
+def daily_cap() -> float:
+    return float("inf") if OPEN.exists() else DAILY_USD
 LEDGER = DATA / "run" / "ledger.json"
 
 # $ per million tokens: input, output, cache read, cache write (5 min), cache write (1 h)
@@ -88,9 +100,9 @@ def spent_on(work: str) -> float:
 
 
 def in_window(t: datetime | None = None) -> bool:
-    if WINDOW == "always":
+    if window() == "always":
         return True
-    start, end = (int(x) for x in WINDOW.split("-"))
+    start, end = (int(x) for x in window().split("-"))
     h = (t or datetime.now()).hour
     return (start <= h or h < end) if start > end else (start <= h < end)
 
@@ -98,17 +110,17 @@ def in_window(t: datetime | None = None) -> bool:
 def next_open(t: datetime | None = None) -> datetime:
     """When painting may next start: the window's next opening, and a new day's budget if today's is spent."""
     t = t or datetime.now()
-    if WINDOW == "always":
-        nxt = t if spent_today() < DAILY_USD else (t - timedelta(hours=12)).replace(hour=12, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    if window() == "always":
+        nxt = t if spent_today() < daily_cap() else (t - timedelta(hours=12)).replace(hour=12, minute=0, second=0, microsecond=0) + timedelta(days=1)
         return nxt
-    start = int(WINDOW.split("-")[0])
+    start = int(window().split("-")[0])
     opening = t.replace(hour=start, minute=0, second=0, microsecond=0)
-    if in_window(t) and spent_today() < DAILY_USD:
+    if in_window(t) and spent_today() < daily_cap():
         return t
     if opening <= t:
         opening += timedelta(days=1)
     # an opening whose day's budget is already spent (the same night): the next night
-    while ledger().get("days", {}).get(day(opening), 0.0) >= DAILY_USD:
+    while ledger().get("days", {}).get(day(opening), 0.0) >= daily_cap():
         opening += timedelta(days=1)
     return opening
 
@@ -117,7 +129,7 @@ def may_paint(work: str, sitting_usd: float = 0.0) -> str | None:
     """None if painting may go on; else why not: "window", "daily" or "work"."""
     if spent_on(work) + sitting_usd >= WORK_USD:
         return "work"
-    if spent_today() + sitting_usd >= DAILY_USD:
+    if spent_today() + sitting_usd >= daily_cap():
         return "daily"
     if not in_window():
         return "window"

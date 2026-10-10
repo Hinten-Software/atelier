@@ -55,6 +55,16 @@ def main():
         check("none left: nothing starts", tick() == [] and left.read_text().strip() == "0")
         left.unlink()
         check("no count: starts as before", tick() == ["i"] and not left.exists())
+        # the studios opened for the run: any hour, no daily cap; once the count is used up and nothing is open,
+        # the night window and the cap again
+        budget.WINDOW = "23-7"
+        opened = DATA / "run" / "open"
+        opened.touch()
+        check("open: any hour, no daily cap", budget.window() == "always" and budget.daily_cap() == float("inf"))
+        left.write_text("0\n")
+        check("run done: nothing starts, the night window and the cap again", tick() == [] and not opened.exists()
+              and budget.window() == "23-7" and budget.daily_cap() == budget.DAILY_USD, budget.window())
+        budget.WINDOW = "always"
         (DATA / "run" / "until").write_text("2000-01-01T00:00:00+00:00\n")
         left.write_text("1\n")
         check("after the standing go: nothing starts, the count is kept", tick() == [] and left.read_text().strip() == "1")
