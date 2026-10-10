@@ -1,6 +1,7 @@
 # What we take from claude-paint, and where it lives here: <upstream path> <our path>. One line each.
 # tools/upstream/import.sh copies exactly these, unmodified, onto the branch `upstream`; main merges that branch,
 # so our own changes (UPSTREAM.md, "Changes") are kept by git and only real overlaps need a hand.
+# The engine's tests read some of her notes (engine/notes/...: CARGO_MANIFEST_DIR/../../notes): those are mapped too.
 # Not taken (on purpose): the research notes on painters and motifs (they steer a subject), the pi harness's
 # runner (painter.ts, its prompt, compaction), her rounds, records, archive and paintings.
 crates                              engine/crates
@@ -15,5 +16,6 @@ harness/painter/easel-client.ts     easel-mcp/src/upstream/easel-client.ts
 harness/painter/journal.ts          easel-mcp/src/upstream/journal.ts
 harness/painter/context-images.ts   easel-mcp/src/upstream/context-images.ts
 harness/painter/easel-tools.ts      easel-mcp/src/upstream/easel-tools.ts
+notes/thinner/baseline/old_files    engine/notes/thinner/baseline/old_files
 LICENSE                             LICENSE-claude-paint
 THIRD_PARTY_NOTICES.md              THIRD_PARTY_NOTICES.md

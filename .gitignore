@@ -6,4 +6,4 @@ node_modules/
 *.local.*
 
 # the easel tests include the guide at upstream's path: a symlink to materials/, made locally for tests only
-engine/notes/
+engine/notes/easel_guide.md

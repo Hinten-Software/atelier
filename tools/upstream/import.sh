@@ -17,8 +17,10 @@ ref=${1:-main}
 git -C "$cache" fetch -q --prune --tags origin '+refs/heads/*:refs/heads/*'
 sha=$(git -C "$cache" rev-parse --verify "$ref^{commit}")
 when=$(git -C "$cache" log -1 --format=%cs "$sha")
+map=$(grep -v '^#' "$repo/tools/upstream/map.txt" | shasum | cut -c1-12)
 last=$(git -C "$repo" log -1 --format=%B upstream | sed -n 's/^Upstream-Commit: //p')
-[ "$last" = "$sha" ] && { echo "upstream is at $sha already"; exit 0; }
+lastmap=$(git -C "$repo" log -1 --format=%B upstream | sed -n 's/^Map: //p')
+[ "$last" = "$sha" ] && [ "$lastmap" = "$map" ] && { echo "upstream is at $sha already, with this map"; exit 0; }
 
 wt=$(mktemp -d "${TMPDIR:-/tmp}/atelier-upstream.XXXXXX")
 trap 'git -C "$repo" worktree remove --force "$wt" >/dev/null 2>&1 || true' EXIT
@@ -35,8 +37,10 @@ grep -v '^#' "$repo/tools/upstream/map.txt" | while read -r src dst; do
     echo "note: $src is gone upstream at $sha; removed here too" >&2
   fi
 done
+mkdir -p "$wt/tools/upstream" && echo "$sha" > "$wt/tools/upstream/commit"  # what main merged from (each work records it)
 git -C "$wt" add -A
-git -C "$wt" commit -q -m "upstream: claude-paint ${sha:0:7} ($when)" -m "Upstream-Commit: $sha" || { echo "nothing changed"; exit 0; }
+git -C "$wt" commit -q -m "upstream: claude-paint ${sha:0:7} ($when)" -m "Upstream-Commit: $sha
+Map: $map" || { echo "nothing changed"; exit 0; }
 echo "upstream: claude-paint ${sha:0:7} ($when) is on branch upstream. Next:"
 echo "  git merge upstream    (in a worktree of your own while a work paints: the runner uses main's files)"
 echo "  bash tools/build-engine.sh && bash tools/upstream/verify.sh"
