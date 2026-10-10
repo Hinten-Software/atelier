@@ -49,3 +49,42 @@ Nothing here touches `atelier-site` or `atelier-backup`; the Mac's own push goes
    - `atelier-test/site/` is the same as the Mac's `~/atelier-data/site/`, file by file
      (`diff -r ~/atelier-data/site /Volumes/atelier-test/site` from the Mac terminal, after a fresh `atelier export`).
 6. Stop the project. Step 2 (the Mac's shares instead of a copy) follows the design.
+
+## Going live (the owner, with Claude for the checks)
+
+**On the Mac**
+
+1. System Settings -> Users & Groups -> Add User: **Sharing Only**, name `atelier-nas`, a long password of your
+   own (it goes into DSM in step 6, nowhere else).
+2. The old secrets folder goes: `rm -r ~/atelier-data/secrets` (the secrets are in `~/.atelier/secrets` since
+   2026-10-10). Only once no runner from before that day is alive: a runner reads the token at every sitting.
+3. `bash tools/share-setup.sh`, then `bash tools/share-setup.sh --check`: the store and the three roots readable.
+4. System Settings -> General -> Sharing -> **File Sharing** on. (i):
+   - Shared Folders: add `~/atelier-data` and each artist's root (`/Users/Shared/<root>`, from
+     `~/atelier-data/artists.json`). For each: `atelier-nas` **Read Only**, Everyone **No Access**.
+   - Options: **Share files and folders using SMB** on; under Windows File Sharing, tick `atelier-nas` and enter its
+     password.
+
+**On the NAS**
+
+5. Control Panel -> Shared Folder -> Create `mac` (no recycle bin). In it, empty folders `atelier-data` and
+   `roots/<root>` for each root.
+6. File Station -> Tools -> **Mount Remote Folder** -> CIFS Shared Folder, once per share:
+   `\\<the Mac's address>\atelier-data` -> `mac/atelier-data`, and each root -> `mac/roots/<root>`; account
+   `atelier-nas`; **Mount automatically on startup** on.
+7. Claude points the test project at those mounts and compares its export with the Mac's (as in step 1).
+8. `docker/atelier`: put a checkout of `main` as `repo/`, `publisher.env` and `private-words.txt` (as in the test
+   project), and the new `compose.yaml` from `deploy/nas/`.
+
+**The switch** (in the day, outside the painting window)
+
+9. Claude merges `publisher-live` (the runner stops exporting and pushing). Container Manager -> Project -> `atelier`
+   -> Action -> **Build**: nginx, the tunnel and now the publisher. Within 2 minutes: `status.json` in
+   `atelier-backup/status/` says `"ok": true`, and https://notart.fyi shows every work.
+10. Stop and delete `atelier-publisher-test`; delete the `atelier-test` shared folder.
+
+**Afterwards**
+
+11. DSM: delete the user `atelier-sync`; Control Panel -> File Services -> rsync: off.
+12. The Mac: delete `~/.atelier/secrets/nas-sync-password`, `~/atelier-data/nas.json`, `~/atelier-data/site`,
+    `~/atelier-data/run/nas.log`. Log the change in `~/atelier-data/history.md`.
