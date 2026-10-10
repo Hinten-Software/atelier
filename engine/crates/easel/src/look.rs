@@ -21,9 +21,17 @@ pub struct View {
     pub size: Option<usize>,
     /// Coordinate grid: Some(0) picks the step from the zoom.
     pub grid: Option<f32>,
+    /// Raking light on the paint's relief (wet and dry): (azimuth, elevation)
+    /// in degrees, see `Canvas::seen_lit`.
+    pub light: Option<(f32, f32)>,
+    /// The palette instead of the canvas (`palette`).
+    pub palette: bool,
 }
 
-const LOOK_ARGS: &str = "--crop x0,y0,x1,y1 --mode value,squint,mirror --grid [step] --size N";
+const LOOK_ARGS: &str = "--crop x0,y0,x1,y1 --mode value,squint,mirror,relief,gallery --light azimuth,elevation --grid [step] --size N | --palette";
+
+/// The relief look's default light: from the upper left, raking at 25°.
+const RAKING: (f32, f32) = (135.0, 25.0);
 
 fn is_num(s: Option<&String>) -> bool {
     s.is_some_and(|s| s.parse::<f32>().is_ok())
@@ -47,9 +55,9 @@ impl View {
                         .split(',')
                         .map(|t| t.trim().parse::<f32>())
                         .collect::<std::result::Result<_, _>>()
-                        .map_err(|_| format!("--crop {s}: want x0,y0,x1,y1 in units"))?;
-                    if p.len() != 4 {
-                        return Err(format!("--crop {s}: want x0,y0,x1,y1 in units"));
+                        .map_err(|_| format!("--crop {s}: want four numeric canvas-unit coordinates x0,y0,x1,y1 (opposite corners, not width/height or pixels); example: --crop 100,100,200,200"))?;
+                    if p.len() != 4 || p.iter().any(|n| !n.is_finite()) {
+                        return Err(format!("--crop {s}: want four numeric canvas-unit coordinates x0,y0,x1,y1 (opposite corners, not width/height or pixels); example: --crop 100,100,200,200"));
                     }
                     v.crop = Some([p[0].min(p[2]), p[1].min(p[3]), p[0].max(p[2]), p[1].max(p[3])]);
                 }
@@ -60,13 +68,16 @@ impl View {
                             "value" | "gray" => v.value = true,
                             "squint" | "blur" => v.squint = true,
                             "mirror" => v.mirror = true,
-                            o => return Err(format!("--mode {o}: normal, value, squint, mirror (comma-separated)")),
+                            "relief" | "raking" => v.light = Some(v.light.unwrap_or(RAKING)),
+                            "gallery" => v.light = Some(v.light.unwrap_or(crate::GALLERY_LIGHT)),
+                            o => return Err(format!("--mode {o}: normal, value, squint, mirror, relief, gallery (comma-separated)")),
                         }
                     }
                 }
                 "--value" => v.value = true,
                 "--squint" => v.squint = true,
                 "--mirror" => v.mirror = true,
+                "--light" => v.light = Some(crate::light_of(&next()?).map_err(|e| format!("--{e}"))?),
                 "--size" => v.size = Some(next()?.parse().map_err(|_| "--size N (px)".to_string())?),
                 "--grid" => {
                     v.grid = Some(0.0);
@@ -79,9 +90,13 @@ impl View {
                         v.grid = Some(s);
                     }
                 }
+                "--palette" => v.palette = true,
                 o => return Err(format!("look: unknown argument {o:?} ({LOOK_ARGS})")),
             }
             i += 1;
+        }
+        if v.palette && (v.crop.is_some() || v.value || v.squint || v.mirror || v.light.is_some() || v.size.is_some() || v.grid.is_some()) {
+            return Err("look: --palette takes no other option".into());
         }
         Ok(v)
     }
@@ -177,6 +192,8 @@ fn glyph(c: char) -> [u8; 5] {
         '.' => [0, 0, 0, 0, 2],
         ',' => [0, 0, 0, 2, 4],
         ':' => [0, 2, 0, 2, 0],
+        ';' => [0, 2, 0, 2, 4],
+        '\'' => [2, 2, 0, 0, 0],
         '=' => [0, 7, 0, 7, 0],
         '/' => [1, 1, 2, 4, 4],
         '(' => [1, 2, 2, 2, 1],
@@ -335,7 +352,30 @@ pub fn look(c: &Canvas, v: &View, out: &Path) -> std::result::Result<(usize, usi
 }
 
 /// `look`'s PNG bytes and size, written nowhere.
+/// Labels written on a rendered look: (x, y as fractions of the image, text),
+/// light text on a dark plate.
+pub(crate) fn label(png: &[u8], labels: &[(f32, f32, String)]) -> std::result::Result<Vec<u8>, String> {
+    let im = image::load_from_memory(png).map_err(|e| e.to_string())?.to_rgb8();
+    let (w, h) = (im.width() as usize, im.height() as usize);
+    let mut img = Img { w, h, px: im.pixels().map(|p| [p[0] as f32 / 255.0, p[1] as f32 / 255.0, p[2] as f32 / 255.0]).collect() };
+    let fs = ((w / 520) as i64).max(1);
+    for (fx, fy, s) in labels {
+        img.text((fx * w as f32) as i64 + 2, (fy * h as f32) as i64, s, fs, [0.96, 0.95, 0.9]);
+    }
+    let buf: Vec<u8> = img.px.iter().flat_map(|c| c.iter().map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)).collect();
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut out).write_image(&buf, w as u32, h as u32, image::ExtendedColorType::Rgb8).map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
 pub fn render(c: &Canvas, v: &View) -> std::result::Result<(usize, usize, Vec<u8>), String> {
+    render_seen(c, v, None)
+}
+
+/// `render`, from the canvas as already seen in the view's light (`seen`:
+/// `Canvas::seen` or `seen_lit`), so several views of one canvas (a survey's
+/// tiles) light it once.
+pub fn render_seen(c: &Canvas, v: &View, seen: Option<&[Rgb]>) -> std::result::Result<(usize, usize, Vec<u8>), String> {
     let f = c.window();
     // crop: units -> whole-canvas pixels -> pixels of the held window
     let (wx0, wy0, wx1, wy1) = (f.x0, f.y0, f.x0 + f.w, f.y0 + f.h);
@@ -354,13 +394,31 @@ pub fn render(c: &Canvas, v: &View) -> std::result::Result<(usize, usize, Vec<u8
     let (cw, ch) = (x1 - x0, y1 - y0);
     let long = cw.max(ch);
     if v.crop.is_some() && (cw > 1200 || ch > 1200) {
-        return Err("--crop exceeds 1200 pixels per side; choose a smaller crop (crops stay 1:1)".into());
+        let units = 1200.0 / f.scale;
+        let side = (units / 2.0).floor().max(1.0);
+        let a = wx0 as f32 / f.scale;
+        let b = wy0 as f32 / f.scale;
+        return Err(format!(
+            "--crop exceeds 1200 pixels per side (crops stay 1:1); coordinates are canvas units, x0,y0,x1,y1 (opposite corners). At this canvas resolution each side may span at most {units:.2} units; example: --crop {a:.2},{b:.2},{:.2},{:.2}",
+            a + side,
+            b + side
+        ));
     }
     if long == 0 || cw == 0 || ch == 0 {
         return Err("look: canvas is empty".into());
     }
     let mut size = if v.crop.is_some() { long } else { v.size.unwrap_or(1000).clamp(1, 1600) };
-    let px = c.seen();
+    let own;
+    let px: &[Rgb] = match seen {
+        Some(px) => px,
+        None => {
+            own = match v.light {
+                Some((az, el)) => c.seen_lit(az, el, 1.0),
+                None => c.seen(),
+            };
+            &own
+        }
+    };
     loop {
         // Average down from the original canvas on each attempt; never enlarge.
         let (ow, oh, img): (usize, usize, Vec<Rgb>) = if long > size {
@@ -433,6 +491,100 @@ pub fn render(c: &Canvas, v: &View) -> std::result::Result<(usize, usize, Vec<u8
         }
         return Ok((ow, oh, png));
     }
+}
+
+// ---------------------------------------------------------------- the palette
+
+/// The palette look's thicknesses, in coats (`paint::COAT_UM`, 25 µm, is one): a pile laid
+/// thick, one thin coat and a very thin one.
+pub const THICK: f32 = 8.0;
+pub const THIN: f32 = 0.48;
+pub const VERY_THIN: f32 = 0.16;
+/// The drawdown card under the last swatch: white, with a black stripe across it.
+const CARD_WHITE: Rgb = [0.85, 0.85, 0.85];
+const CARD_BLACK: Rgb = [0.01, 0.01, 0.01];
+
+const SW: usize = 136;
+const SH: usize = 48;
+const LABEL_W: usize = 540;
+const GAP: usize = 8;
+
+/// One row's swatches, left to right: the pile laid thick over the ground, a thin and a
+/// very thin coat over the ground, and the thin coat over the black-and-white card. Each is
+/// the pile's own paint and `Paint::over`: nothing on the canvas is read or changed. A
+/// thinned pile (`paint::thinner`) is shown as it dries: each coat (wet, as laid) leaves the
+/// share `1 - thinner` of it once the solvent has gone, so its swatches are thinner.
+pub fn swatches(p: &paint::Paint, ground: Rgb) -> [Rgb; 5] {
+    let k = 1.0 - p.thinner();
+    let (thick, thin, very) = if k < 1.0 { (THICK * k, THIN * k, VERY_THIN * k) } else { (THICK, THIN, VERY_THIN) };
+    [p.over(ground, thick), p.over(ground, thin), p.over(ground, very), p.over(CARD_WHITE, thin), p.over(CARD_BLACK, thin)]
+}
+
+/// Up to `n` characters a line, broken at spaces where it can.
+fn wrap(s: &str, n: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for w in s.split(' ') {
+        if !cur.is_empty() && cur.chars().count() + 1 + w.chars().count() > n {
+            out.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(w);
+        while cur.chars().count() > n {
+            let rest: String = cur.chars().skip(n).collect();
+            out.push(cur.chars().take(n).collect());
+            cur = rest;
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// The palette look: a row for every pile in `rows` (the global's name, the recipe, the
+/// pile's paint), its swatches (`swatches`) over this canvas's `ground`. A PNG, as `render`.
+pub fn palette(rows: &[(String, String, paint::Paint)], ground: Rgb) -> std::result::Result<(usize, usize, Vec<u8>), String> {
+    if rows.is_empty() {
+        return Err("look: no pile on the palette: no global holds a pile (p = pile{...})".into());
+    }
+    let fs = 2i64;
+    let line = (7 * fs + 2) as usize;
+    let chars = (LABEL_W - 2 * fs as usize) / (4 * fs as usize) - 1;
+    let labels: Vec<Vec<String>> = rows.iter().map(|(n, r, _)| [vec![n.clone()], wrap(r, chars)].concat()).collect();
+    let heights: Vec<usize> = labels.iter().map(|l| (l.len() * line + 6).max(SH + 2 * GAP)).collect();
+    let head = line + 2 * GAP;
+    let w = LABEL_W + 4 * (SW + GAP) + GAP;
+    let h = head + heights.iter().sum::<usize>();
+    let mut im = Img { w, h, px: vec![[0.18, 0.18, 0.18]; w * h] };
+    let x0 = LABEL_W as i64;
+    let col = |k: usize| x0 + (k * (SW + GAP)) as i64;
+    let titles = ["THICK", "12 UM ON GROUND", "4 UM ON GROUND", "12 UM ON CARD"];
+    for (k, t) in titles.iter().enumerate() {
+        im.text(col(k), GAP as i64, t, fs, [0.9; 3]);
+    }
+    let mut y = head as i64;
+    for ((label, rh), (_, _, paint)) in labels.iter().zip(&heights).zip(rows) {
+        for (j, l) in label.iter().enumerate() {
+            im.text(GAP as i64, y + 3 + (j * line) as i64, l, fs, if j == 0 { [1.0; 3] } else { [0.75; 3] });
+        }
+        let sw = swatches(paint, ground);
+        let sy = y + ((*rh - SH) / 2) as i64;
+        for k in 0..3 {
+            im.rect(col(k), sy, col(k) + SW as i64, sy + SH as i64, sw[k], 1.0);
+        }
+        // the card: white, a black stripe across its middle third
+        let (cy0, cy1) = (sy + SH as i64 / 3, sy + 2 * SH as i64 / 3);
+        im.rect(col(3), sy, col(3) + SW as i64, sy + SH as i64, sw[3], 1.0);
+        im.rect(col(3), cy0, col(3) + SW as i64, cy1, sw[4], 1.0);
+        y += *rh as i64;
+    }
+    let buf: Vec<u8> = im.px.iter().flat_map(|p| p.map(|c| (linear_to_srgb(c) * 255.0).round().clamp(0.0, 255.0) as u8)).collect();
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png).write_image(&buf, w as u32, h as u32, image::ExtendedColorType::Rgb8).map_err(|e| e.to_string())?;
+    Ok((w, h, png))
 }
 
 /// Three box blurs ≈ a Gaussian of sd `r`.
@@ -546,7 +698,14 @@ mod tests {
 
     #[test]
     fn crops_keep_native_pixels_and_reject_either_oversize_axis() {
-        let mut c = Canvas::new_window(1300, 1.0, [0.0; 3], None);
+        for bad in ["100,100,wide,200", "100,100,200", "NaN,100,200,200"] {
+            let err = View::parse(&["--crop".into(), bad.into()]).err().expect("invalid coordinates refused");
+            let example = err.split("example: ").nth(1).expect("error provides valid coordinates");
+            let args = example.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+            assert_eq!(View::parse(&args).unwrap().crop, Some([100.0, 100.0, 200.0, 200.0]));
+            println!("{err}");
+        }
+        let mut c = Canvas::new_window(1300, 1.0, [0.0; 3], None).with_engine(2); // (pure colors: no engine-4 matte veil)
         c.apply(|x, y, _| if x < 500.0 && y < 500.0 { [1.0, 0.0, 0.0] } else { [0.0, 0.0, 1.0] });
         let out = out_dir().join("native-crop.png");
         for size in [None, Some(40), Some(9999)] {
@@ -568,6 +727,11 @@ mod tests {
             };
             let err = look(&c, &v, &out).expect_err("oversize crop must not silently scale");
             assert!(err.contains("1200"), "{err}");
+            let example = err.split("example: ").nth(1).expect("error provides a recovery crop");
+            let args = example.split_whitespace().map(str::to_owned).collect::<Vec<_>>();
+            let recovery = View::parse(&args).unwrap();
+            assert!(look(&c, &recovery, &out).is_ok(), "{err}");
+            println!("{err}");
         }
     }
 
@@ -607,5 +771,37 @@ mod tests {
         assert!(w < 1600 && h == w, "must reduce dimensions, got {w}x{h}");
         let decoded = image::load_from_memory(&bytes).unwrap();
         assert_eq!((decoded.width() as usize, decoded.height() as usize), (w, h));
+    }
+
+    #[test]
+    fn the_relief_and_gallery_looks_take_a_light() {
+        let parse = |a: &[&str]| View::parse(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(parse(&[]).unwrap().light, None);
+        assert_eq!(parse(&["--mode", "relief"]).unwrap().light, Some(RAKING));
+        assert_eq!(parse(&["--mode", "gallery"]).unwrap().light, Some(crate::GALLERY_LIGHT));
+        assert_eq!(parse(&["--mode", "relief", "--light", "45,15"]).unwrap().light, Some((45.0, 15.0)));
+        assert_eq!(parse(&["--light", "45,15", "--mode", "relief,mirror"]).unwrap().light, Some((45.0, 15.0)));
+        for bad in [&["--light", "45"][..], &["--light", "45,0"], &["--light", "a,b"], &["--light"]] {
+            assert!(parse(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    /// The lit look shows the same picture under a light: it differs from
+    /// the plain look where paint stands in relief and changes nothing.
+    #[test]
+    #[cfg(tube_box)]
+    fn the_relief_look_lights_the_paint_and_changes_nothing() {
+        let mut s = Session::new(W).unwrap();
+        s.run(r#"canvas{size=300, aspect=1.5, linen=15, seed=2, ground={{pile={{"lead white", 5}, {"yellow ochre", 1}}, um=60, apply="brush"}}}
+                 b = brush("flat", 20); b:load(pile{{"lead white", 1}}, 1); b:stroke({{200, 300}, {800, 300}})"#)
+            .unwrap();
+        let c = s.canvas().unwrap().clone();
+        let before = bits(&c);
+        let dir = out_dir();
+        let lit = View { light: Some(RAKING), ..View::parse(&[]).unwrap() };
+        look(&c, &View::parse(&[]).unwrap(), &dir.join("flat.png")).unwrap();
+        look(&c, &lit, &dir.join("relief.png")).unwrap();
+        assert_ne!(std::fs::read(dir.join("flat.png")).unwrap(), std::fs::read(dir.join("relief.png")).unwrap());
+        assert_eq!(before, bits(&c));
     }
 }

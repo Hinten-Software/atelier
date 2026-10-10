@@ -102,9 +102,9 @@ fn friedrich_early(palette: Palette) -> Style {
         width_mm: 1714.0,
         linen: Linen { warp_per_cm: 12.0, weft_per_cm: 11.0, ..Linen::fine(1) },
         ground: vec![
-            Ground { color: hex("#b0583a"), hiding: 0.85, um: 110.0, stiff: 0.25, apply: Apply::Knife { texture: 0.35 } },
-            Ground { color: hex("#c9ad8a"), hiding: 0.8, um: 70.0, stiff: 0.3, apply: Apply::Knife { texture: 0.3 } },
-            Ground { color: hex("#d8c7ab"), hiding: 0.8, um: 30.0, stiff: 0.5, apply: Apply::Roller },
+            Ground { color: hex("#b0583a"), hiding: 0.85, um: 110.0, stiff: 0.25, apply: Apply::Knife { texture: 0.35 }, absorbent: 0.0 },
+            Ground { color: hex("#c9ad8a"), hiding: 0.8, um: 70.0, stiff: 0.3, apply: Apply::Knife { texture: 0.3 }, absorbent: 0.0 },
+            Ground { color: hex("#d8c7ab"), hiding: 0.8, um: 30.0, stiff: 0.5, apply: Apply::Roller, absorbent: 0.0 },
         ],
         ..friedrich(palette)
     }
@@ -1040,6 +1040,9 @@ mod tests {
     use crate::session::{Session, box_for, parse_program};
 
     /// Replay an old log to its end at a small width; the chunk that fails, if one does.
+    /// The six tests below replay whole paintings (20 to 38 chunks): no test command runs
+    /// them (the overnight plan of 2026-10-04 forbids painting replays in tests; see
+    /// notes/speed/SKIPPED.md for the coverage this leaves out).
     fn replays(log: &str) {
         let path = format!("{}/../../notes/{log}", env!("CARGO_MANIFEST_DIR"));
         let text = std::fs::read_to_string(&path).unwrap();
@@ -1053,26 +1056,32 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "replays whole paintings: never run"]
     fn easel3_free_replays() {
         replays("amnesia3/easel3_free.lua");
     }
     #[test]
+    #[ignore = "replays whole paintings: never run"]
     fn easel3_green_replays() {
         replays("amnesia3/easel3_green.lua");
     }
     #[test]
+    #[ignore = "replays whole paintings: never run"]
     fn easel3_near_replays() {
         replays("amnesia3/easel3_near.lua");
     }
     #[test]
+    #[ignore = "replays whole paintings: never run"]
     fn easel4_free_replays() {
         replays("amnesia4/easel4_free.lua");
     }
     #[test]
+    #[ignore = "replays whole paintings: never run"]
     fn easel4_green_replays() {
         replays("amnesia4/easel4_green.lua");
     }
     #[test]
+    #[ignore = "replays whole paintings: never run"]
     fn easel4_near_replays() {
         replays("amnesia4/easel4_near.lua");
     }

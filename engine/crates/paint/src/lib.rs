@@ -21,33 +21,38 @@ pub mod edge;
 pub mod fence;
 pub mod form;
 pub mod graphite;
+pub mod rag;
 pub mod scene;
 pub mod palette;
 pub mod pigment;
 pub mod rng;
 mod sched;
 pub mod shape;
+pub mod soak;
 pub mod spectral;
 pub mod wet;
 pub mod bristle;
 pub mod handling;
 pub mod stipple;
+pub mod state_dump;
 pub mod tally;
 pub mod style;
 pub mod hand;
 pub mod outline;
 pub mod surface;
+pub mod thinner;
 
 pub use canvas::{Canvas, Crop, Frame, set_crop};
 pub use crack::Cracks;
 pub use color::{Mix, Rgb, gradient, hex, shift};
-pub use bristle::{Gesture, Held, Kind, Orient, Tool, Touch};
+pub use bristle::{Gesture, Held, Kind, Knife, Orient, Part, Spatter, Tool, Touch};
 pub use wet::Paint;
 pub use drying::Stage;
 pub use palette::{Mixture, Palette, Tube};
 pub use handling::{Handling, Order};
 pub use stipple::Stipple;
 pub use tally::Tally;
+pub use soak::Fabric;
 pub use style::{Apply, Ground, Style};
 pub use hand::{Hand, Mark};
 pub use outline::{Bone, Character, Outline};
@@ -64,13 +69,30 @@ pub use shape::Shape;
 /// The engine version new paintings are painted with. A painting replays
 /// with the version it was painted with (its log's `--@ engine` line; a log
 /// without one is version 1), so a fix that changes what paint does never
-/// changes a past painting:
+/// changes a past painting. Exception: engine-5 solvent waits were
+/// accelerated in October 2026, accepting replay drift for existing logs
+/// (notes/thinner/ACCEPTANCE.md, check 17):
 /// - 1: every painting before the version was recorded.
 /// - 2: fresh paint over drying paint mixes into its cure as it is laid (a
 ///   stroke right after it feels the film as it would after `wait(0)`); a
 ///   world's thin far bodies keep their depth (`World::add_body`), and rays
 ///   from far off (reflections) don't step over them (`World::trace`).
-pub const ENGINE: u32 = 2;
+/// - 3: oil paint dries 2.5 times slower and stays open for 60% of its
+///   time to touch-dry, not 15% (`drying::Pace`): a brushstroke of lead
+///   white is open for 13 h and gels after 27 h (engine 2: 1.4 h and 2.7 h),
+///   touch-dry after 45 h (18 h); bone black, cobalt blue, Prussian blue,
+///   raw sienna, the cadmiums, the ultramarines, rose madder and permanent
+///   alizarin dry at new rates (`Tube::drying_3`, `drying::drier::engine3`), and a box keeps
+///   its engine when tubes are added (`Palette::with`);
+///   and the easel's `pairs` and `next` walk every table in a fixed order, so
+///   a failed chunk is put back without a rebuild from the log (easel
+///   session.rs `canonical_tables`);
+///   and the easel has a rag (`rag`, crates/easel/src/draw_rag.rs); an older
+///   log replays with exactly the globals it had.
+/// - 4: stiff paint holds its relief, hairs clump in it, films bridge the
+///   weave; solvent, oil, absorbent grounds and gloss (notes/engine-4.md).
+/// - 5: knife-laid paint tears where it parts from the blade (`Canvas::knife`).
+pub const ENGINE: u32 = 5;
 
 /// Hermite smoothstep.
 #[inline]

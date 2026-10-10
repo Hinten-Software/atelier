@@ -9,8 +9,9 @@
 #
 #   scripts/tests/box_notes.sh [<studio>...]
 #
-# With no studios, exports sargent, inness, alma-tadema, tonn and hopper from
-# R16_BRANCH (scripts/export_r16_studio) and checks those. The catalog's
+# With no studios, exports friedrich, sargent, inness, alma-tadema, tonn, hopper, giverny and impressionist from
+# R16_BRANCH (scripts/export_r16_studio) and checks those; giverny and impressionist only if that
+# branch has their materials notes (an older branch lacks them). The catalog's
 # tube names come from R16_BRANCH's palette.rs (HEAD if unset).
 #
 # Requires a caller-provided persistent scratch directory (TMPDIR).
@@ -21,10 +22,15 @@ unset EASEL_BOX
 work=$(mktemp -d "$TMPDIR/box-notes.XXXXXX")
 if [ $# -eq 0 ]; then
   : "${R16_BRANCH:?set R16_BRANCH to the branch to export, or name exported studios}"
-  for profile in sargent inness alma-tadema tonn hopper; do
+  for profile in friedrich sargent inness alma-tadema tonn hopper giverny impressionist seurat; do
+    # (only the two newest boxes may be missing, from an older branch; a missing note of the others fails the export)
+    case $profile in
+      giverny|impressionist|seurat) git -C "$repo" cat-file -e "$R16_BRANCH:notes/research/${profile}_materials.md" 2>/dev/null || continue ;;
+    esac
     "$repo/scripts/export_r16_studio" "$profile" "$work/$profile" >"$work/$profile.log" 2>&1 || { cat "$work/$profile.log" >&2; echo "$profile: the export failed" >&2; exit 1; }
     set -- "$@" "$work/$profile"
   done
+  [ $# -gt 0 ] || { echo "box_notes: no studio exported from $R16_BRANCH" >&2; exit 1; }
 fi
 git -C "$repo" show "${R16_BRANCH:-HEAD}:crates/paint/src/palette.rs" | sed -n 's/^ *tube("\([^"]*\)".*/\1/p' >"$work/catalog"
 [ "$(wc -l <"$work/catalog")" -ge 14 ] || { echo "box_notes: can't read the tube catalog from palette.rs" >&2; exit 1; }
@@ -45,7 +51,7 @@ for dest; do
     sub lines { grep { length } split /\n/, slurp($_[0]) }
     sub section { my ($text, $n) = @_; $text =~ /^## \Q$n\E\.[^\n]*\n(.*?)(?=^## |\z)/ms or die "$box: no section $n in the note\n"; $1 }
     my $text = slurp($note);
-    my $table = join "\n", grep { /^\|/ } split /\n/, section($text, 4);
+    my $table = join "\n", grep { /^\|/ } split /\n/, section($text, $box eq "seurat" ? 2 : 4);
     (my $s9 = section($text, 9)) =~ s/\s+/ /g;
     my @box = lines($tubes);
     my %in = map { lc($_) => 1 } @box;

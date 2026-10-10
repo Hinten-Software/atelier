@@ -5,24 +5,33 @@
 #   the catalog holds that box's tubes and no other;
 # - two box-* features without all-boxes: no build (a compile error);
 # - the replay build (easel's default, paint's all-boxes): the default box
-#   and all five named boxes.
+#   and all eight named boxes.
 # paint's catalog tests (palette::tests) run in each, and the easel's
 # painter test the_build_holds_only_its_box_s_tubes in each painter build.
 #
 #   scripts/tests/box_features.sh
 #
 # Builds paint and the easel once per configuration (several minutes); uses
-# CARGO_TARGET_DIR if set.
+# CARGO_TARGET_DIR if set. BOX_FEATURES_PROFILE=test or dev builds with that
+# profile instead of release (which tubes a build holds depends on the
+# features, not the profile; dev, unoptimized, builds fastest and the tests
+# it runs are table checks): scripts/test --all runs it with dev.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$repo"
 unset EASEL_BOX
+case ${BOX_FEATURES_PROFILE:-release} in
+  release) profile=--release ;;
+  test) profile= ;;
+  dev) profile="--profile dev" ;;
+  *) echo "box_features: BOX_FEATURES_PROFILE is release, test or dev" >&2; exit 2 ;;
+esac
 
 # passes <n> <what> <cargo test args...>: the tests run and at least n pass
 passes() {
   local n=$1 what=$2 out
   shift 2
-  out=$(cargo test --release "$@" 2>&1) || { echo "box_features: $what failed:" >&2; echo "$out" >&2; exit 1; }
+  out=$(cargo test $profile "$@" 2>&1) || { echo "box_features: $what failed:" >&2; echo "$out" >&2; exit 1; }
   local ran
   ran=$(sed -n 's/^test result: ok\. \([0-9]*\) passed.*/\1/p' <<<"$out" | awk '{s += $1} END {print s + 0}')
   [ "$ran" -ge "$n" ] || { echo "box_features: $what ran $ran tests, not $n or more:" >&2; echo "$out" >&2; exit 1; }
@@ -41,7 +50,7 @@ refused() {
 }
 
 painter_test=(--test painter the_build_holds_only_its_box_s_tubes -- --exact)
-for f in "" box-sargent box-inness box-alma-tadema box-tonn box-hopper; do
+for f in "" box-friedrich box-sargent box-inness box-alma-tadema box-tonn box-hopper box-giverny box-impressionist box-seurat; do
   features=(--no-default-features)
   [ -z "$f" ] || features+=(--features "$f")
   passes 3 "paint ${f:-no box}" -p paint "${features[@]}" --lib -- palette::tests::the_catalog palette::tests::every_box

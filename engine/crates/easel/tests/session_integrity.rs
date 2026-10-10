@@ -74,6 +74,34 @@ fn a_failed_look_after_a_chunk_still_reports_the_chunk() {
 }
 
 #[test]
+fn an_implicit_scratch_reset_survives_a_failed_chunk() {
+    struct Closing;
+    impl Drop for Closing {
+        fn drop(&mut self) {
+            let _ = cmd(&["-s", "scratch-notice", "close"]);
+        }
+    }
+    let _closing = Closing;
+    ok(&["open", "scratch-notice"]);
+    ok(&["-s", "scratch-notice", "do", "canvas{size=300, aspect=4, seed=5, linen=15, ground={{pile={{\"lead white\",5},{\"yellow ochre\",1}}, um=80, apply=\"knife\"}}}"]);
+    ok(&["-s", "scratch-notice", "do", "local old_swatch=1", "--scratch"]);
+    ok(&["-s", "scratch-notice", "close"]);
+    let log = root().join("paintings/lua/scratch-notice-scratch.lua");
+    let mut old = std::fs::read_to_string(&log).unwrap();
+    old.push_str("\nbad(\n");
+    std::fs::write(&log, old).unwrap();
+    ok(&["open", "scratch-notice"]);
+    let o = cmd(&["-s", "scratch-notice", "do", "error('new scratch chunk fails')", "--scratch"]);
+    assert!(!o.status.success());
+    let error = String::from_utf8(o.stderr).unwrap();
+    assert!(error.contains("a scratch canvas beside the painting"), "{error}");
+    assert!(error.contains("new scratch chunk fails"), "{error}");
+    assert!(error.contains("the chunk failed and changed nothing"), "{error}");
+    assert!(!std::fs::read_to_string(log).unwrap().contains("old_swatch"));
+    assert!(root().join("paintings/lua/scratch-notice-scratch-1.lua").exists());
+}
+
+#[test]
 fn journal_uses_the_selected_painting_clock() {
     ok(&["open", "journal"]);
     let result = cmd(&["-s", "journal", "note", "painting clock"]);
@@ -132,14 +160,18 @@ fn rebuilding_serves_progress_and_refuses_nonstatus_requests() {
     let name = "rebuild-boundary";
     let dir = root().join("out/easel").join(name);
     std::fs::create_dir_all(&dir).unwrap();
-    let socket = dir.join("sock");
+    let socket = sock_of(&dir);
+    let _ = std::fs::remove_file(&socket); // a previous run's, if the socket lives in the temp dir
     let mut server = Server(Command::new(env!("CARGO_BIN_EXE_easel"))
         .args(["serve", name])
         .env("EASEL_ROOT", root())
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
         .spawn().unwrap());
     let start = Instant::now();
-    while !socket.exists() {
+    // ready when it accepts a connection, not when the socket file appears: the
+    // file exists from bind(), and a connect before listen() is refused (under
+    // load the gap is long enough: the full parallel suite hit it)
+    while UnixStream::connect(&socket).is_err() {
         assert!(server.0.try_wait().unwrap().is_none(), "server exited at startup");
         assert!(start.elapsed() < Duration::from_secs(10), "server did not bind");
         std::thread::sleep(Duration::from_millis(10));
@@ -156,7 +188,9 @@ fn rebuilding_serves_progress_and_refuses_nonstatus_requests() {
     };
     let normal = Duration::from_secs(60);
     let prompt = Duration::from_secs(1);
-    assert!(request("do", "t = {}; for i = 1, 30 do t['k' .. i] = i end", normal).starts_with("ok\n"));
+    // t has a hole before its last integer key: a failed chunk that changes it leaves `#t`
+    // to its layout, which forces a rebuild under every engine (heap.lua `holey`)
+    assert!(request("do", "t = {}; for i = 1, 30 do t['k' .. i] = i end; t[2] = 2", normal).starts_with("ok\n"));
     // CPU only, fixed bounds and constant memory. Three slow committed chunks
     // leave time to observe both zero and intermediate replay progress.
     for _ in 0..3 {
@@ -198,7 +232,7 @@ fn rebuilding_serves_progress_and_refuses_nonstatus_requests() {
     assert_eq!(std::fs::read(&log).unwrap(), original, "refused requests or failed chunk changed the log");
     assert_eq!(std::fs::read(dir.join("committed.lua")).unwrap(), original);
     assert!(!root().join("notes/journal.md").exists() || !std::fs::read_to_string(root().join("notes/journal.md")).unwrap().contains("must not be journaled"));
-    assert!(request("do", "assert(t.unexpected == nil); local n = 0; for _ in pairs(t) do n = n + 1 end; assert(n == 30)", normal).starts_with("ok\n"));
+    assert!(request("do", "assert(t.unexpected == nil); local n = 0; for _ in pairs(t) do n = n + 1 end; assert(n == 31)", normal).starts_with("ok\n"));
     assert!(request("close", "", normal).starts_with("ok\n"));
 }
 
@@ -292,7 +326,7 @@ fn a_second_server_is_refused_and_a_dead_ones_socket_is_recovered() {
     let _reaper = Reaper(name);
     ok(&["open", name]);
     ok(&["-s", name, "do", "x = 1"]);
-    let sock = root().join("out/easel/owner/sock");
+    let sock = sock_of(&root().join("out/easel/owner"));
     let ino = std::fs::metadata(&sock).unwrap().ino();
     let o = Command::new(env!("CARGO_BIN_EXE_easel")).args(["serve", name]).env("EASEL_ROOT", root()).output().unwrap();
     assert!(!o.status.success() && String::from_utf8_lossy(&o.stderr).contains("another easel serves"), "{}", String::from_utf8_lossy(&o.stderr));
@@ -311,4 +345,40 @@ fn a_second_server_is_refused_and_a_dead_ones_socket_is_recovered() {
     assert_eq!(servers(name).len(), 1);
     ok(&["-s", name, "do", "assert(x == 1)"]);
     ok(&["-s", name, "close"]);
+}
+
+/// The server's socket for a session directory, by the rule in main.rs's
+/// short_sock: a long checkout path puts it in a private directory in the
+/// temp dir (or /tmp), or leaves it where it was if no private one is to be had.
+fn sock_of(dir: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::MetadataExt;
+    let p = dir.join("sock");
+    if p.as_os_str().len() < 100 {
+        return p;
+    }
+    // the server hashes its canonical root (session.rs's root())
+    std::fs::create_dir_all(dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let mut h: u64 = 0xcbf29ce484222325; // save.rs's fnv1a
+    for &b in dir.as_os_str().as_encoded_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    let uid = std::fs::metadata(&dir).unwrap().uid();
+    let file = format!("{h:016x}.sock");
+    for base in [std::env::temp_dir(), std::path::PathBuf::from("/tmp")] {
+        let private = base.join(format!("easel-{uid}"));
+        let s = private.join(&file);
+        if s.as_os_str().len() < 100 {
+            // the server makes it (0700) on first use, and uses it only if it is private
+            use std::os::unix::fs::DirBuilderExt;
+            let _ = std::fs::DirBuilder::new().mode(0o700).create(&private);
+            if let Ok(m) = std::fs::symlink_metadata(&private)
+                && m.is_dir() && m.uid() == uid && m.mode() & 0o077 == 0
+            {
+                return s;
+            }
+        }
+    }
+    p
 }

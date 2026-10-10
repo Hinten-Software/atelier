@@ -51,7 +51,7 @@ fn lose(lua: &Lua, st: &S, m: Value, o: Option<Table>) -> Result<usize> {
     let (p0, p1) = pair(&o, "pressure")?.unwrap_or((0.35, 0.02));
     let every = o.get::<Option<f32>>("every")?.unwrap_or(1.2).max(0.2);
     let fixed_angle = num(&o, "angle")?;
-    let pile = crate::api::pile_of(&o.get::<Value>("pile")?, "lose")?;
+    let pile = crate::api::pile_now(st, &o.get::<Value>("pile")?, "lose", 0.5)?;
     let tubes = st.borrow().tubes.clone();
     let jitter = crate::api::style(st)?.mix_jitter;
 
@@ -101,6 +101,7 @@ fn lose(lua: &Lua, st: &S, m: Value, o: Option<Table>) -> Result<usize> {
     for (pts, _from, _into) in plans {
         // a light load from the pile (remixed a little: a pile knifed by hand is uneven)
         let paint = tubes.remix(&pile.mix, jitter, &mut Rng::new(rng.next_u64())).laid(pile.medium);
+        let paint = if pile.thinner() > 0.0 { paint.with_thinner(pile.thinner()) } else { paint };
         let want = pile.mix.color;
         held.wipe(0.9);
         held.load(paint, load);

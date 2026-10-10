@@ -5,14 +5,14 @@
 body { background-color: var(--bg) !important }  /* (OBS's default custom CSS makes the body transparent) */
 #transport { display: none !important }
 footer { padding: 8px 14px !important }
-body.nocode main { grid-template-columns: minmax(0,54fr) minmax(0,46fr) !important }
+main { grid-template-columns: minmax(0,54fr) minmax(0,46fr) !important }
 #view .pic img { filter: none !important }
 /* what the painter is studying now (a close-up, a squint, a check in grays, a reference picture) is part of the show: as big as the painting, under its label */
 #view.two { grid-template-rows: minmax(0,1fr) minmax(0,1fr) !important; gap: 14px !important }
 #other:not([hidden]) { display: flex !important; flex-direction: column !important; align-items: stretch !important; gap: 6px !important }
 #other img { object-position: center !important }
-#cap2 { order: 0 !important; font-size: 19px !important; text-align: center !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
-#cap2 b { display: inline !important; font-size: 19px !important; margin-right: 10px }
+#cap2 { order: 0 !important; font-size: 19px !important; text-align: center !important; white-space: normal; overflow-wrap: anywhere }
+#cap2 b { display: inline !important; font-size: 19px !important; margin-right: 0 }
 /* a tall canvas (portrait, square or nearly: #view.tall): side by side, each the pane's full height, instead of two half-height rows */
 #view.two.tall { grid-template-rows: minmax(0,1fr) !important; grid-template-columns: minmax(0,1fr) minmax(0,1fr) !important }
 #view.two.tall .pic img { object-position: center top !important }
