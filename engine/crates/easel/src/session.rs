@@ -25,18 +25,35 @@ pub const BOX_MARK: &str = "--@ box";
 /// the head of its session file. A log without it was painted with engine 1:
 /// every log before the version was recorded.
 pub const ENGINE_MARK: &str = "--@ engine";
-/// The head line naming the width a painting is painted at (atelier change, 2026-10-06): a log
-/// without one was painted at `LEGACY_WIDTH`, so earlier paintings replay as they were painted.
-pub const WIDTH_MARK: &str = "--@ width";
-pub const LEGACY_WIDTH: usize = 2400;
-/// The widths a painting may be painted at.
-pub const WIDTHS: [usize; 2] = [2400, 4800];
+/// Marks a sketch: a painting painted at `SKETCH_WIDTH`, not the live width.
+/// A log replays at the width it was painted at, whatever its file is named.
+pub const SKETCH_MARK: &str = "--@ sketch";
+/// A sketch's width (px): a quarter of the live width, some 16 times faster,
+/// for trying out a composition before the painting.
+pub const SKETCH_WIDTH: usize = crate::LIVE_WIDTH / 4;
+
+/// What the engine version (`paint::ENGINE`) changes in the easel's Lua: from
+/// engine 3, `pairs` and `next` walk every table in a fixed order, not only
+/// tables with object keys (prelude.lua `ordered`), so a failed chunk's
+/// rollback puts back all a later chunk can see and needs no rebuild from the
+/// log (heap.lua `restore`). Older logs were painted with Lua's own order for
+/// tables keyed by values and replay with it.
+pub fn canonical_tables(engine: u32) -> bool {
+    engine >= 3
+}
 
 /// The longest a chunk of a live session may run (the longest of 2,502 painters' chunks on
 /// 2026-09-27 took 94 s). A chunk that runs longer is stopped like a failed one: nothing it
 /// did is kept. Replays have no limit: a chunk in the log succeeded once and must replay the
 /// same on a slower or busier machine.
 pub const CHUNK_LIMIT: Duration = Duration::from_secs(600);
+
+/// The head line naming the width a painting is painted at (atelier change, 2026-10-06): a log
+/// without one was painted at `LEGACY_WIDTH` (or is a sketch, `SKETCH_MARK`).
+pub const WIDTH_MARK: &str = "--@ width";
+pub const LEGACY_WIDTH: usize = crate::LIVE_WIDTH;
+/// The widths a painting may name.
+pub const WIDTHS: [usize; 2] = [2400, 4800];
 
 /// A chunk's limit at a width: `CHUNK_LIMIT` at the legacy width, scaled with the pixel count
 /// above it (atelier change, 2026-10-06), so a chunk that fit at 2400 px still fits at 4800.
@@ -55,15 +72,20 @@ struct Snap {
     canvas: Option<Canvas>,
     style: Option<Rc<Style>>,
     setup: Option<String>,
+    canvas_src: Option<String>,
     seed: u64,
     clock: f64,
     clock0: f64,
     hand: crate::time::Hand,
+    board: crate::board::Board,
     /// The last world view made (depth options resolve against it).
     view: Option<crate::world::ViewU>,
     /// The Lua heap (heap.lua's snapshot).
     heap: Table,
     brushes: Vec<(Rc<RefCell<Held>>, Held)>,
+    knives: Vec<(Rc<RefCell<paint::Knife>>, paint::Knife)>,
+    /// The rags in the hand, as the brushes.
+    rags: Vec<(Rc<RefCell<paint::rag::Rag>>, paint::rag::Rag)>,
 }
 
 pub struct Session {
@@ -88,7 +110,10 @@ pub struct Session {
     /// A failed chunk left tables different after restoration. Their entries are
     /// back but maybe not their layout (which Lua gives a program no way to
     /// set), so `pairs` could walk them in another order than a replay of the
-    /// log: the state is rebuilt from the log (`rebuild`) before the next chunk.
+    /// log, or `#` find another border: the state is rebuilt from the log
+    /// (`rebuild`) before the next chunk. From engine 3 (`canonical_tables`)
+    /// only `#` can differ, so only a changed table with more than one border
+    /// (holes before its last integer key) makes a session stale.
     pub stale: bool,
     /// Stale because putting back what a failed chunk did failed (not just a layout).
     pub unrestored: bool,
@@ -98,6 +123,10 @@ pub struct Session {
     globals: BTreeMap<String, (Value, usize)>,
     /// The easel's own globals (its verbs, prelude.lua's replacements, Lua's libraries).
     own: BTreeMap<String, Value>,
+    /// Chunks run before this session's own log (a session restored from a save,
+    /// `save::read`): its next chunk is chunk `chunks_before + log.len() + 1`, as at the end
+    /// of the log it was saved from. 0 for every other session.
+    pub chunks_before: usize,
     /// Creation serials of the state's objects (outlives the state).
     _serials: Box<Serials>,
     /// Tests: the step of `run` that fails ("flush", "globals" or "restore").
@@ -139,27 +168,29 @@ impl Session {
         }
         let dbg: Table = lua.globals().get("debug")?;
         lua.globals().raw_set("debug", Value::Nil)?;
-        let (snap_f, restore_f): (Function, Function) = lua.load(include_str!("heap.lua")).set_name("heap.lua").call(dbg.clone())?;
+        let canon = canonical_tables(tubes.engine);
+        let probe = if canon { layout_probe(&lua)? } else { None };
+        let (snap_f, restore_f): (Function, Function) = lua.load(include_str!("heap.lua")).set_name("heap.lua").call((dbg.clone(), canon, probe))?;
         let id = serials.id_fn(&lua)?;
         let getmt: Function = dbg.get("getmetatable")?;
         let getinfo: Function = dbg.get("getinfo")?;
         // an error of the easel's own, for the prelude to know them by
         let fail = lua.create_function(|_, ()| Err::<(), _>(mlua::Error::runtime("")))?;
-        let prelude: (Function, Table, Function, Function) = lua.load(include_str!("prelude.lua")).set_name("prelude.lua").call((id, getmt, getinfo, fail))?;
+        let prelude: (Function, Table, Function, Function) = lua.load(include_str!("prelude.lua")).set_name("prelude.lua").call((id, getmt, getinfo, fail, canon))?;
         let st = Rc::new(RefCell::new(Studio::new(width, tubes)));
         api::install(&lua, st.clone())?;
         let deadline = Rc::new(Cell::new(None::<Instant>));
         let d = deadline.clone();
-        let limit_min = chunk_limit_for(width).as_secs() / 60;
         lua.set_hook(mlua::HookTriggers::new().every_nth_instruction(HOOK_EVERY), move |_, _| match d.get() {
             Some(t) if Instant::now() > t => Err(mlua::Error::runtime(format!(
-                "the chunk ran longer than {limit_min} minutes and was stopped; nothing it did was kept"
+                "the chunk ran longer than {} minutes and was stopped; nothing it did was kept",
+                CHUNK_LIMIT.as_secs() / 60
             ))),
             _ => Ok(mlua::VmState::Continue),
         })?;
         let own = global_values(&lua)?;
         let globals = own.iter().map(|(k, v)| (k.clone(), (v.clone(), 0))).collect();
-        Ok(Session { lua: ManuallyDrop::new(lua), state, st, log: Vec::new(), replay: false, deadline, chunk_limit: chunk_limit_for(width), heap: Some((snap_f, restore_f)), prelude: Some(prelude), stale: false, unrestored: false, globals, own, _serials: serials, #[cfg(test)] fail_at: Cell::new(None) })
+        Ok(Session { lua: ManuallyDrop::new(lua), state, st, log: Vec::new(), replay: false, deadline, chunk_limit: chunk_limit_for(width), heap: Some((snap_f, restore_f)), prelude: Some(prelude), stale: false, unrestored: false, globals, own, chunks_before: 0, _serials: serials, #[cfg(test)] fail_at: Cell::new(None) })
     }
 
     /// A session that replays a program from the default box (tests;
@@ -201,7 +232,15 @@ impl Session {
             let h = b.borrow().clone();
             (b, h)
         }).collect();
-        Ok(Snap { canvas: s.canvas.clone(), style: s.style.clone(), setup: s.setup.clone(), seed: s.seed, clock: s.clock, clock0: s.clock0, hand: s.hand.clone(), view: s.view.clone(), heap, brushes })
+        let knives = s.live_knives().into_iter().map(|k| {
+            let h = k.borrow().clone();
+            (k, h)
+        }).collect();
+        let rags = s.live_rags().into_iter().map(|r| {
+            let v = *r.borrow();
+            (r, v)
+        }).collect();
+        Ok(Snap { canvas: s.canvas.clone(), style: s.style.clone(), setup: s.setup.clone(), canvas_src: s.canvas_src.clone(), seed: s.seed, clock: s.clock, clock0: s.clock0, hand: s.hand.clone(), board: s.board.clone(), view: s.view.clone(), heap, brushes, knives, rags })
     }
 
     /// Put everything back as it was at `snap`. Returns how many Lua tables
@@ -213,14 +252,22 @@ impl Session {
         for (b, h) in &snap.brushes {
             *b.borrow_mut() = h.clone();
         }
+        for (k, h) in &snap.knives {
+            *k.borrow_mut() = h.clone();
+        }
+        for (r, v) in &snap.rags {
+            *r.borrow_mut() = *v;
+        }
         let mut s = self.st.borrow_mut();
         s.canvas = snap.canvas.clone();
         s.style = snap.style.clone();
         s.setup = snap.setup.clone();
+        s.canvas_src = snap.canvas_src.clone();
         s.seed = snap.seed;
         s.clock = snap.clock;
         s.clock0 = snap.clock0;
         s.hand = snap.hand.clone();
+        s.board = snap.board.clone();
         s.view = snap.view.clone();
         Ok(mismatches)
     }
@@ -274,7 +321,7 @@ impl Session {
             self.rebuild()?;
         }
         let mut snap = if !self.replay { Some(self.snap().map_err(|e| e.to_string())?) } else { None };
-        let n = self.log.len() as u64 + 1;
+        let n = (self.chunks_before + self.log.len()) as u64 + 1;
         self.prelude.as_ref().unwrap().0.call::<()>(()).map_err(|e| e.to_string())?;
         self.st.borrow_mut().begin(n);
         let t0 = Instant::now();
@@ -365,6 +412,9 @@ impl Session {
         if engine != 1 {
             let _ = writeln!(s, "{ENGINE_MARK} {engine}");
         }
+        if self.st.borrow().width == SKETCH_WIDTH {
+            let _ = writeln!(s, "{SKETCH_MARK}");
+        }
         // only a painting width other than the legacy one is named (test sessions use small widths)
         let width = self.st.borrow().width;
         if width != LEGACY_WIDTH && WIDTHS.contains(&width) {
@@ -405,6 +455,73 @@ impl Session {
             let _ = writeln!(s, "{c}\t{k}\t{}", describe(v));
         }
         s
+    }
+
+    /// The piles the painting's globals hold, in `globals`' order: (name, recipe, the paint
+    /// a brush loads from it before the hand's unevenness). Reads the userdata in Rust: runs
+    /// no Lua and changes nothing (the palette look, look.rs `palette`).
+    pub fn piles(&self) -> Vec<(String, String, paint::Paint)> {
+        let mut g: Vec<_> = self.globals.iter().filter(|(k, (_, c))| *c > 0 && is_name(k)).collect();
+        g.sort_by_key(|(k, (_, c))| (*c, *k));
+        g.into_iter()
+            .filter_map(|(k, (v, _))| match v {
+                Value::UserData(u) => u.borrow::<api::PileU>().ok().map(|p| (k.clone(), p.recipe(), p.paint())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// What the global `name` puts on a knife held up to the canvas (the look
+    /// `--hold`): a knife's own load, with its blade's length and how full it
+    /// is, or a pile as its heap is on the board now, as a fresh full load on
+    /// a blade 30 units long. Reads only: no Lua runs and nothing changes.
+    pub fn held(&self, name: &str) -> Result<(paint::Paint, f32, f32), String> {
+        let found = self.globals.get(name).filter(|(_, c)| *c > 0).map(|(v, _)| v);
+        if let Some(Value::UserData(u)) = found {
+            if let Ok(k) = u.borrow::<api::KnifeU>() {
+                let k = k.k.borrow();
+                return match k.paint() {
+                    Some(p) => Ok((p, k.width, k.fullness().clamp(0.0, 1.0))),
+                    None => Err(format!("look --hold {name}: the knife is clean; load it first (k:load(pile))")),
+                };
+            }
+            if let Ok(p) = u.borrow::<api::PileU>() {
+                // Project the same fresh visit as a knife load, without changing
+                // the live board's dirt, ordering or last-carried paint.
+                let st = self.st.borrow();
+                let mut board = st.board.clone();
+                board.visit(p.heap, 0.0);
+                let mut projected = p.clone();
+                if let Some(h) = board.heap(p.heap).filter(|h| h.changed) {
+                    projected.mix = st.tubes.pile(h.fractions());
+                    projected.mix.solvent = h.solvent;
+                    projected.mix.oil_rate = h.oil_rate;
+                    projected.medium = h.medium;
+                    projected.thinner = projected.thinner.map(|_| h.thinner);
+                }
+                return Ok((projected.paint(), 30.0, 1.0));
+            }
+        }
+        let mut names: Vec<&str> = self
+            .globals
+            .iter()
+            .filter(|(k, (v, c))| *c > 0 && is_name(k) && matches!(v, Value::UserData(u) if u.borrow::<api::KnifeU>().is_ok() || u.borrow::<api::PileU>().is_ok()))
+            .map(|(k, _)| k.as_str())
+            .collect();
+        names.sort();
+        Err(format!("look --hold {name}: no global of that name holds a knife or a pile ({})", if names.is_empty() { "there is none yet".to_string() } else { names.join(", ") }))
+    }
+
+    /// The ground's color, from the `canvas{}` layers: each layer's paint over the raw linen
+    /// and the layers under it at its thickness (`Paint::over`; the weave left out).
+    pub fn ground_color(&self) -> Option<paint::Rgb> {
+        let st = self.st.borrow();
+        let sty = st.style.as_ref()?;
+        let mut c = sty.raw;
+        for g in &sty.ground {
+            c = paint::Paint::new(g.color, g.hiding, g.stiff).over(c, g.um / paint::COAT_UM);
+        }
+        Some(c)
     }
 
     pub fn status(&self) -> String {
@@ -619,6 +736,66 @@ fn fixed_lua(libs: StdLib) -> mlua::Result<(Lua, *mut mlua::ffi::lua_State, Box<
     }
 }
 
+/// The head of Lua 5.5's `Table` (lobject.h): what `#t` reads besides the
+/// entries is the array part's size and the length hint stored at `array`
+/// (ltable.h `lenhint`, ltable.c `luaH_getn`).
+#[repr(C)]
+struct TableHead {
+    next: *const c_void,
+    tt: u8,
+    marked: u8,
+    flags: u8,
+    lsizenode: u8,
+    asize: u32,
+    array: *const u32,
+}
+
+/// A table's array size and length hint, read without changing them (`#t`
+/// would move the hint): with its entries, all `#t` depends on. heap.lua
+/// compares them across a failed chunk for tables with more than one border.
+fn table_layout(t: &Table) -> (u32, u32) {
+    // SAFETY: for a table `lua_topointer` gives its `Table` (lapi.c), alive while `t` is;
+    // `array` points at the hint when the array part isn't empty (ltable.c `luaH_resize`).
+    unsafe {
+        let h = &*(t.to_pointer() as *const TableHead);
+        let hint = if h.asize > 0 && !h.array.is_null() { *h.array } else { 0 };
+        (h.asize, hint)
+    }
+}
+
+/// Whether `table_layout` reads this Lua's tables right, tried once in a
+/// Lua of its own: known array sizes and hints (ltable.c `luaH_resize` sets
+/// the hint to half the size; `#t` of a full array part sets it to the size).
+fn table_layout_reads_right() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| {
+        let probe = || -> mlua::Result<bool> {
+            let (lua, state, _serials) = fixed_lua(StdLib::NONE)?;
+            let t: Table = lua.load("return {1, 2, 3, 4, 5, 6, 7, 8}").eval()?;
+            let before = table_layout(&t);
+            let n = t.raw_len();
+            let after = table_layout(&t);
+            let e = lua.create_table()?;
+            let empty = table_layout(&e);
+            drop((t, e));
+            drop(lua);
+            unsafe { mlua::ffi::lua_close(state) };
+            Ok((before, n, after, empty) == ((8, 4), 8, (8, 8), (0, 0)))
+        };
+        probe().unwrap_or(false)
+    })
+}
+
+/// `table_layout` for heap.lua, if it reads this Lua's tables right;
+/// otherwise none, and heap.lua takes every table with more than one border
+/// as moved by a failed chunk.
+fn layout_probe(lua: &Lua) -> mlua::Result<Option<Function>> {
+    if !table_layout_reads_right() {
+        return Ok(None);
+    }
+    Ok(Some(lua.create_function(|_, t: Table| Ok(table_layout(&t)))?))
+}
+
 /// The order a fresh Lua walks a table of string keys in: fixed when Lua
 /// is built with a constant `luai_makeseed`, different run to run otherwise.
 pub fn hash_probe() -> String {
@@ -709,6 +886,29 @@ pub fn logged_box(text: &str) -> Result<Option<String>, String> {
     Ok(found)
 }
 
+/// The engine version a session file names in its head (its `ENGINE_MARK`
+/// line before the first chunk): 1 if it names none.
+pub fn logged_engine(text: &str) -> Result<u32, String> {
+    let mut found = None;
+    for l in text.lines() {
+        let l = l.trim();
+        if l.starts_with(MARK) {
+            break;
+        }
+        if let Some(rest) = l.strip_prefix(ENGINE_MARK) {
+            let v = rest.strip_prefix(' ').and_then(|v| v.trim().parse::<u32>().ok()).filter(|v| (1..=paint::ENGINE).contains(v));
+            let Some(v) = v else {
+                return Err(format!("the log's line {l:?} names no engine this easel has ({ENGINE_MARK} <1 to {}>)", paint::ENGINE));
+            };
+            if found.is_some() {
+                return Err(format!("the log names its engine twice ({ENGINE_MARK} lines)"));
+            }
+            found = Some(v);
+        }
+    }
+    Ok(found.unwrap_or(1))
+}
+
 /// The width a session file names in its head (its `WIDTH_MARK` line before
 /// the first chunk): `LEGACY_WIDTH` if it names none.
 pub fn logged_width(text: &str) -> Result<usize, String> {
@@ -732,27 +932,10 @@ pub fn logged_width(text: &str) -> Result<usize, String> {
     Ok(found.unwrap_or(LEGACY_WIDTH))
 }
 
-/// The engine version a session file names in its head (its `ENGINE_MARK`
-/// line before the first chunk): 1 if it names none.
-pub fn logged_engine(text: &str) -> Result<u32, String> {
-    let mut found = None;
-    for l in text.lines() {
-        let l = l.trim();
-        if l.starts_with(MARK) {
-            break;
-        }
-        if let Some(rest) = l.strip_prefix(ENGINE_MARK) {
-            let v = rest.strip_prefix(' ').and_then(|v| v.trim().parse::<u32>().ok()).filter(|v| (1..=paint::ENGINE).contains(v));
-            let Some(v) = v else {
-                return Err(format!("the log's line {l:?} names no engine this easel has ({ENGINE_MARK} <1 to {}>)", paint::ENGINE));
-            };
-            if found.is_some() {
-                return Err(format!("the log names its engine twice ({ENGINE_MARK} lines)"));
-            }
-            found = Some(v);
-        }
-    }
-    Ok(found.unwrap_or(1))
+/// Whether a session file's head marks it a sketch (a `SKETCH_MARK` line
+/// before the first chunk).
+pub fn logged_sketch(text: &str) -> bool {
+    text.lines().map(str::trim).take_while(|l| !l.starts_with(MARK)).any(|l| l == SKETCH_MARK)
 }
 
 /// Where the box of a new painting is set: a file `box` next to the easel's
@@ -876,6 +1059,37 @@ pub fn root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(tube_box)]
+    fn palette_add_refreshes_recipe_and_dilutes_materials() {
+        let mut s = Session::new(48).unwrap();
+        s.run(CANVAS).unwrap();
+        s.run(r#"p = pile{{"lead white", 2}, oil="poppy", turps=0.6, thinner=0.4}
+            p = p:add{{"cobalt blue", 2}}
+            local parts = p:parts()
+            assert(#parts == 2 and parts[1][2] == 2 and parts[2][2] == 2)
+            assert(math.abs(p.thinner - 0.2) < 0.00001)
+            assert(tostring(p):find("cobalt blue 2", 1, true))"#).unwrap();
+        let p = s.globals["p"].0.as_userdata().unwrap().borrow::<api::PileU>().unwrap();
+        assert!((p.mix.solvent - 0.3).abs() < 1e-5);
+        assert!((p.mix.oil_rate - 0.8).abs() < 1e-5);
+    }
+
+    #[test]
+    #[cfg(tube_box)]
+    fn a_retained_palette_pile_can_be_added_after_many_new_heaps() {
+        let mut s = Session::new(48).unwrap();
+        s.run(CANVAS).unwrap();
+        s.run(r#"p = pile{{"lead white", 1}}
+            for i = 1, 100 do pile{{"cobalt blue", 1}} end
+            p = p:add{{"cobalt blue", 1}}
+            assert(#p:parts() == 2)"#).unwrap();
+        let st = s.st.borrow();
+        assert_eq!(st.board.live().len(), crate::board::LIVE);
+        let p = s.globals["p"].0.as_userdata().unwrap().borrow::<api::PileU>().unwrap();
+        assert_eq!(st.board.live().last().unwrap().id, p.heap);
+    }
 
     #[cfg(tube_box)]
     const W: usize = 160;
@@ -1162,38 +1376,295 @@ mod tests {
         assert_eq!(bits(&s), bits(&b));
     }
 
+    /// A session painting with engine `v` from the default box.
+    #[cfg(tube_box)]
+    fn with_engine(v: u32) -> Session {
+        let mut tubes = Palette::tube_box();
+        tubes.engine = v;
+        Session::with_box(W, tubes).unwrap()
+    }
+
+    /// A fresh replay of a session's log, as a reopen or `easel run` makes it.
+    #[cfg(tube_box)]
+    fn replayed(s: &Session) -> Session {
+        let prog = s.program("t");
+        let mut b = Session::replay_with(W, box_for(Some(&prog)).expect("(EASEL_BOX set in the test's environment?)")).unwrap();
+        for c in parse_program(&prog) {
+            b.run(&c).unwrap();
+        }
+        b
+    }
+
+    /// Everything `easel run --state-digest` hashes (main.rs `state_digest_line`: the canvas
+    /// checkpoint, the held brushes, the studio's fields), unhashed, and the painting's globals.
+    #[cfg(tube_box)]
+    fn state(s: &Session) -> (Vec<u8>, String) {
+        let mut st = s.st.borrow_mut();
+        let mut canvas = Vec::new();
+        if let Some(c) = st.canvas.as_ref() {
+            c.write_state(&mut canvas, "").unwrap();
+        }
+        let brushes: Vec<String> = st.live_brushes().iter().map(|b| format!("{:?}", b.borrow())).collect();
+        let studio = format!("seed={} clock={:?} clock0={:?} chunk={} calls={} setup={:?} piles={:?} rng={:?}", st.seed, st.clock, st.clock0, st.chunk, st.calls, st.setup, st.hand.piles, st.rng);
+        drop(st);
+        (canvas, format!("{}\n{studio}\n{}", brushes.join("\n"), s.globals()))
+    }
+
     /// A failed chunk can leave a table laid out differently (grown, or refilled by the
-    /// rollback) though its contents are back: `pairs` then walks it in another order than
-    /// a replay of the log does, unless the session rebuilds from the log.
+    /// rollback) though its contents are back: under engines 1 and 2 `pairs` then walks it
+    /// in another order than a replay of the log does, so the session rebuilds from the log;
+    /// from engine 3 `pairs` walks every table in a fixed order and it needn't. Either way
+    /// the session goes on as its replay does.
     #[test]
     #[cfg(tube_box)]
     fn after_a_failed_chunk_pairs_walks_tables_as_the_replay_does() {
-        let order = "local o = {}; for k in pairs(t) do o[#o + 1] = k end; print(table.concat(o, ' '))";
-        let mut s = Session::new(W).unwrap();
-        let mut live = vec![s.run("t = {}; for i = 1, 30 do t['k' .. i] = i end").unwrap().out];
-        // a failure that touched no earlier table costs no rebuild
-        s.run("local u = {}; u.x = pencil(); error('stop')").unwrap_err();
+        for engine in [2, 3] {
+            let canon = canonical_tables(engine);
+            let order = "local o = {}; for k in pairs(t) do o[#o + 1] = k end; print(table.concat(o, ' '))";
+            let mut s = with_engine(engine);
+            let mut live = vec![s.run("t = {}; for i = 1, 30 do t['k' .. i] = i end").unwrap().out];
+            // a failure that touched no earlier table costs no rebuild
+            s.run("local u = {}; u.x = pencil(); error('stop')").unwrap_err();
+            assert!(!s.stale);
+            // Updating an existing array value restores both contents and next order;
+            // it must not pay for an unnecessary replay.
+            s.run("a = {1, 2, 3}").unwrap();
+            live.push(String::new());
+            s.run("a[2] = 99; error('stop')").unwrap_err();
+            assert!(!s.stale, "an exactly restored table should not rebuild");
+            assert_eq!(s.lua.globals().get::<Table>("a").unwrap().get::<i64>(2).unwrap(), 2);
+            // Sparse-array length is observable too, even if next order is unchanged: a
+            // changed table with holes rebuilds under every engine.
+            live.push(s.run("sparse = {}; sparse[2] = 2; sparse_length = #sparse").unwrap().out);
+            s.run("for i = 9, 13 do sparse[i] = i end; for i = 9, 13 do sparse[i] = nil end; sparse[2] = 99; error('stop')").unwrap_err();
+            assert!(s.stale, "engine {engine}: a changed sparse table must rebuild");
+            live.push(s.run("assert(#sparse == sparse_length)").unwrap().out);
+            // grows the table and empties it again: the same contents, a bigger table
+            s.run("for i = 1, 200 do t['x' .. i] = i end; for i = 1, 200 do t['x' .. i] = nil end; error('stop')").unwrap_err();
+            assert_eq!(s.stale, !canon, "engine {engine}: a grown and emptied table");
+            live.push(s.run(order).unwrap().out);
+            // leaves keys behind for the rollback to take out
+            s.run("for i = 1, 200 do t['y' .. i] = i end; error('stop')").unwrap_err();
+            assert_eq!(s.stale, !canon, "engine {engine}: keys left for the rollback");
+            live.push(s.run(order).unwrap().out);
+            let mut b = with_engine(engine);
+            b.set_replaying(true);
+            let replayed: Vec<String> = s.log.iter().map(|c| b.run(&c.src).unwrap().out).collect();
+            assert_eq!(live, replayed, "engine {engine}");
+        }
+    }
+
+    /// Engine 3: `#t` of a table with more than one border depends on its layout (array
+    /// size and length hint, ltable.c `luaH_getn`), which a failed chunk can move with
+    /// every entry, and the `next` order, put back: by adding keys and taking them out
+    /// again, or by `#t` itself. The session rebuilds, and goes on printing what a replay
+    /// of its log prints.
+    #[test]
+    #[cfg(tube_box)]
+    fn under_engine_3_a_failed_chunk_that_moved_a_border_rebuilds() {
+        for (setup, failed, after, want) in [
+            // grown into an array part and emptied again
+            ("t = {}; t[2] = 2; print(#t)", "t[1] = 1; t[3] = 3; t[1] = nil; t[3] = nil; error('stop')", "print(#t)", "0\n"),
+            // the same array part, another length hint
+            ("t = {1, nil, 3, 4}; print(#t)", "t[2] = 2; local n = #t; t[2] = nil; error('stop')", "print(#t)", "1\n"),
+        ] {
+            let mut s = with_engine(3);
+            let mut live = vec![s.run(setup).unwrap().out];
+            s.run(failed).unwrap_err();
+            assert!(s.stale, "{failed}: the border moved, so the session must rebuild");
+            live.push(s.run(after).unwrap().out);
+            assert_eq!(live[1], want, "{failed}");
+            let mut b = with_engine(3);
+            b.set_replaying(true);
+            let replayed: Vec<String> = s.log.iter().map(|c| b.run(&c.src).unwrap().out).collect();
+            assert_eq!(live, replayed, "{failed}");
+            // a failed chunk that leaves the layout alone still costs no rebuild
+            s.run("local n = t[2]; error('stop')").unwrap_err();
+            assert!(!s.stale, "{failed}: nothing moved");
+        }
+    }
+
+    /// Engine 3: a failed chunk that set 40 globals and changed tables of every kind
+    /// (strings, arrays, mixed, nested, object keys; grown, added to and emptied again,
+    /// keys left behind) is put back without a rebuild, and the session goes on exactly as
+    /// a fresh replay of its log: the same state digest, globals, and `pairs` order after.
+    #[test]
+    #[cfg(tube_box)]
+    fn under_engine_3_a_failed_chunk_needs_no_rebuild() {
+        let mut s = with_engine(3);
+        let mut live = Vec::new();
+        for c in [
+            CANVAS,
+            r#"words = {}; for i = 1, 30 do words['w' .. i] = i end
+               nums = {10, 20, 30}
+               mixed = {1, 2, x = 'a', [2.5] = 'f', [true] = 'b'}
+               nest = {a = {b = {c = 1}}, list = {{1}, {2}}}
+               objs = {}; objs[words] = 1; objs[nums] = 2
+               local n = 0; function bump() n = n + 1; return n end
+               b = brush("round", 4); b:load(pile{{"bone black", 1}}, 0.8); b:stroke({{200, 300}, {800, 320}})"#,
+        ] {
+            live.push(s.run(c).unwrap().out);
+        }
+        let failed = r#"for i = 1, 40 do _G['g' .. i] = {i} end
+            for i = 1, 200 do words['x' .. i] = i end; for i = 1, 200 do words['x' .. i] = nil end
+            for i = 1, 50 do words['y' .. i] = i end
+            nums[2] = 99; for i = 4, 100 do nums[i] = i end
+            mixed.y = 1; mixed[2.5] = nil; mixed[true] = nil; mixed[false] = 0
+            nest.a.b.c = 2; nest.a.b.d = {}; nest.list[3] = {3}; nest.list[1][2] = 'x'; nest.a = {}
+            objs[mixed] = 3; objs[words] = nil
+            bump(); b:stroke({{100, 100}, {900, 600}})
+            error('stop')"#;
+        let e = s.run(failed).unwrap_err();
+        assert!(e.contains("stop"), "{e}");
+        assert!(!s.stale, "engine 3 rebuilt after a failed chunk");
+        // what a later chunk sees, `pairs` order included, before and after adding keys
+        let walk = r#"local function keys(t, depth)
+                local o = {}
+                for k, v in pairs(t) do
+                    local kk = type(k) == 'table' and ('obj' .. tostring(objs[k] or '?')) or tostring(k)
+                    o[#o + 1] = (type(v) == 'table' and depth > 0) and (kk .. '{' .. keys(v, depth - 1) .. '}') or kk
+                end
+                return table.concat(o, ' ')
+            end
+            local g = {}; for k in pairs(_G) do g[#g + 1] = k end
+            local nx, k = {}, nil
+            repeat k = next(words, k); nx[#nx + 1] = tostring(k) until k == nil
+            print(table.concat(g, ' ')); print(table.concat(nx, ' '))
+            for _, name in ipairs{'words', 'nums', 'mixed', 'nest', 'objs'} do print(name, keys(_G[name], 3)) end
+            print(bump(), #nums, #words, g1)"#;
+        for c in [
+            walk,
+            "words.z = 1; words.a = 2; nums[4] = 40; mixed[0] = 'z'; nest.a.e = 1; objs[nest] = 4; for i = 1, 40 do _G['h' .. i] = i end",
+            walk,
+            "b:stroke({{150, 500}, {850, 450}}); wait(30)",
+        ] {
+            live.push(s.run(c).unwrap().out);
+        }
         assert!(!s.stale);
-        // Updating an existing array value restores both contents and next order;
-        // it must not pay for an unnecessary replay.
-        s.run("a = {1, 2, 3}").unwrap();
-        live.push(String::new());
-        s.run("a[2] = 99; error('stop')").unwrap_err();
-        assert!(!s.stale, "an exactly restored table should not rebuild");
-        assert_eq!(s.lua.globals().get::<Table>("a").unwrap().get::<i64>(2).unwrap(), 2);
-        // Sparse-array length is observable too, even if next order is unchanged.
-        live.push(s.run("sparse = {}; sparse[2] = 2; sparse_length = #sparse").unwrap().out);
-        s.run("for i = 9, 13 do sparse[i] = i end; for i = 9, 13 do sparse[i] = nil end; sparse[2] = 99; error('stop')").unwrap_err();
-        live.push(s.run("assert(#sparse == sparse_length)").unwrap().out);
-        // grows the table and empties it again: the same contents, a bigger table
-        s.run("for i = 1, 200 do t['x' .. i] = i end; for i = 1, 200 do t['x' .. i] = nil end; error('stop')").unwrap_err();
-        live.push(s.run(order).unwrap().out);
-        // leaves keys behind for the rollback to take out
-        s.run("for i = 1, 200 do t['y' .. i] = i end; error('stop')").unwrap_err();
-        live.push(s.run(order).unwrap().out);
-        let mut b = Session::replay(W).unwrap();
-        let replayed: Vec<String> = s.log.iter().map(|c| b.run(&c.src).unwrap().out).collect();
-        assert_eq!(live, replayed);
+        let mut b = replayed(&s);
+        assert!(state(&s) == state(&b), "the session differs from a fresh replay of its log");
+        // and the replay printed the same (pairs order included)
+        let mut c = with_engine(3);
+        c.set_replaying(true);
+        let outs: Vec<String> = s.log.iter().map(|ch| c.run(&ch.src).unwrap().out).collect();
+        assert_eq!(live, outs);
+        // nothing of the failed chunk is left: bump's count, nums' length, no g1
+        assert!(live[2].ends_with("1\t3\t0\tnil\n"), "{}", live[2]);
+        // a later failure in the replayed session doesn't rebuild either
+        b.set_replaying(false);
+        b.run(failed).unwrap_err();
+        assert!(!b.stale);
+    }
+
+    /// Engines 1 and 2 keep Lua's own `pairs` order for tables keyed by values (it is what
+    /// their logs were painted with), and so the rebuild: a failed chunk that grew `_G` by 40
+    /// globals rebuilds from the log; one new global, which doesn't grow it, doesn't.
+    #[test]
+    #[cfg(tube_box)]
+    fn under_engine_2_a_failed_chunk_that_grew_a_table_rebuilds() {
+        let build = "t = {}; for i = 1, 30 do t['k' .. i * 7] = i end";
+        let order = "local o = {}; for k in pairs(t) do o[#o + 1] = k end; print(table.concat(o, ' '))";
+        // Lua's own order, in a plain state with the same hash seed
+        let raw = {
+            let (lua, state, _serials) = fixed_lua(StdLib::TABLE | StdLib::STRING).unwrap();
+            let o: String = lua.load(format!("{build}; local o = {{}}; for k in pairs(t) do o[#o + 1] = k end; return table.concat(o, ' ')")).eval().unwrap();
+            drop(lua);
+            unsafe { mlua::ffi::lua_close(state) };
+            o
+        };
+        for engine in [1, 2] {
+            let mut s = with_engine(engine);
+            s.run(build).unwrap();
+            assert_eq!(s.run(order).unwrap().out.trim_end(), raw, "engine {engine} walks in Lua's order");
+            s.run("g1 = 1; error('stop')").unwrap_err();
+            assert!(!s.stale, "engine {engine}: one new global");
+            let e = s.run("for i = 1, 40 do _G['g' .. i] = i end; error('stop')").unwrap_err();
+            assert!(e.contains("stop"), "{e}");
+            assert!(s.stale, "engine {engine}: 40 new globals left _G in another order, which only a rebuild puts right");
+            let live = s.run("local o = {}; for k in pairs(_G) do o[#o + 1] = k end; print(table.concat(o, ' '))").unwrap().out;
+            assert!(!s.stale, "the session rebuilt before that chunk");
+            let mut b = with_engine(engine);
+            b.set_replaying(true);
+            let outs: Vec<String> = s.log.iter().map(|c| b.run(&c.src).unwrap().out).collect();
+            assert_eq!(outs.last().unwrap(), &live, "engine {engine}");
+        }
+        // engine 3 walks the same table in its fixed order instead
+        let mut s = with_engine(3);
+        s.run(build).unwrap();
+        let mut want: Vec<String> = (1..=30).map(|i| format!("k{}", i * 7)).collect();
+        want.sort();
+        assert_eq!(s.run(order).unwrap().out.trim_end(), want.join(" "));
+    }
+
+    /// Real failed chunks, under engines 2 and 3: how long each took, whether the session
+    /// went stale, and how long it then took to be ready for the next chunk (the rebuild, if
+    /// stale). Not run by default; `EASEL_ROLLBACK_CASES` names a file of tab-separated lines
+    /// `<log> <chunks before the failure> <file holding the failed chunk>`, replayed at
+    /// `EASEL_ROLLBACK_WIDTH` (default 320) px. Each log replays once per engine, each failed
+    /// chunk run live at its place:
+    ///
+    ///   EASEL_ROLLBACK_CASES=cases.tsv cargo test -p easel --bin easel -- --ignored --nocapture real_failed_chunks
+    #[test]
+    #[ignore]
+    fn real_failed_chunks() {
+        let Ok(cases) = std::env::var("EASEL_ROLLBACK_CASES") else { return };
+        let width: usize = std::env::var("EASEL_ROLLBACK_WIDTH").ok().and_then(|w| w.parse().ok()).unwrap_or(320);
+        let mut logs: BTreeMap<String, Vec<(usize, String)>> = BTreeMap::new();
+        for line in std::fs::read_to_string(&cases).unwrap().lines().filter(|l| !l.trim().is_empty()) {
+            let f: Vec<&str> = line.split('\t').collect();
+            logs.entry(f[0].to_string()).or_default().push((f[1].parse().unwrap(), f[2].to_string()));
+        }
+        for (log, mut fails) in logs {
+            fails.sort();
+            let text = std::fs::read_to_string(&log).unwrap();
+            let chunks = parse_program(&text);
+            for engine in [2, 3] {
+                let mut tubes = box_for(Some(&text)).unwrap();
+                tubes.engine = engine;
+                let mut s = Session::with_box(width, tubes).unwrap();
+                let mut done = 0;
+                for (before, file) in &fails {
+                    s.set_replaying(true);
+                    for c in &chunks[done..*before] {
+                        s.run(c).unwrap();
+                    }
+                    done = *before;
+                    s.set_replaying(false);
+                    let failed = std::fs::read_to_string(file).unwrap();
+                    let t = Instant::now();
+                    let e = s.run(&failed).unwrap_err();
+                    let chunk = t.elapsed().as_secs_f64();
+                    let stale = s.stale;
+                    let t = Instant::now();
+                    if s.stale {
+                        s.rebuild().unwrap();
+                    }
+                    let ready = t.elapsed().as_secs_f64();
+                    let e1 = e.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                    let name = file.rsplit('/').next().unwrap();
+                    println!("{name}\tafter {before}\tengine {engine}\tstale {stale}\tfailed chunk {chunk:.3} s\trecovery {:.3} s\trebuild {ready:.2} s\t{}", chunk + ready, &e1[..e1.len().min(60)]);
+                }
+            }
+        }
+    }
+
+    /// Engine 3's fixed order: booleans, numbers, strings (each ascending), then objects in
+    /// the order they were made; `next` the same. Lua's own `next` is handed out nowhere.
+    #[test]
+    #[cfg(tube_box)]
+    fn under_engine_3_every_table_walks_in_a_fixed_order() {
+        let mut s = with_engine(3);
+        let out = s.run(r#"local a, b = {}, {}
+            local t = {b = 1, a = 1, [3] = 1, [1] = 1, [true] = 1, [false] = 1, [2.5] = 1, [-1] = 1}
+            t[b] = 'b'; t[a] = 'a'
+            local o = {}
+            for k, v in pairs(t) do o[#o + 1] = type(k) == 'table' and v or tostring(k) end
+            local n, k = {}, nil
+            repeat k = next(t, k); if k ~= nil then n[#n + 1] = type(k) == 'table' and t[k] or tostring(k) end until k == nil
+            print(table.concat(o, ' ')); print(table.concat(n, ' '))
+            assert(pairs(1) == next)
+            for _, x in ipairs{{}, {1, 2}, {x = 1}} do assert(select(1, pairs(x)) ~= select(1, pairs(1))) end"#).unwrap().out;
+        assert_eq!(out, "false true -1 1 2.5 3 a b a b\nfalse true -1 1 2.5 3 a b a b\n");
     }
 
     /// The pencil's shared methods are out of a chunk's reach, so a failed chunk can't
@@ -1285,20 +1756,25 @@ mod tests {
     #[test]
     #[cfg(tube_box)]
     fn plain_tables_keep_lua_order() {
-        // tables without object keys walk in stock Lua's order (same seed),
-        // so existing paintings replay as before
+        // under engines 1 and 2 tables without object keys walk in stock Lua's
+        // order (same seed), so their paintings replay as before (engine 3:
+        // `under_engine_3_every_table_walks_in_a_fixed_order`)
         let build = "t = {}; for i = 1, 40 do t['k' .. i * 7919] = i end; for i = 1, 10 do t[i * 0.5] = -i end; t[true] = 0";
         let (lua, state, _serials) = fixed_lua(StdLib::TABLE).unwrap();
         let want: String = lua.load(format!("{build}; local o = {{}}; for k, v in next, t do o[#o + 1] = v end; return table.concat(o, ',')")).eval().unwrap();
         drop(lua);
         unsafe { mlua::ffi::lua_close(state) };
-        let mut s = Session::replay(W).unwrap();
-        s.run(build).unwrap();
-        s.run("local o = {}; for k, v in pairs(t) do o[#o + 1] = v end; print(table.concat(o, ','))").unwrap();
-        assert_eq!(s.st.borrow().out.trim_end(), want);
-        s.run("local o = {}; for k, v in next, t do o[#o + 1] = v end; print(table.concat(o, ','))").unwrap();
-        assert_eq!(s.st.borrow().out.trim_end(), want);
+        for engine in [1, 2] {
+            let mut s = with_engine(engine);
+            s.set_replaying(true);
+            s.run(build).unwrap();
+            s.run("local o = {}; for k, v in pairs(t) do o[#o + 1] = v end; print(table.concat(o, ','))").unwrap();
+            assert_eq!(s.st.borrow().out.trim_end(), want, "engine {engine}");
+            s.run("local o = {}; for k, v in next, t do o[#o + 1] = v end; print(table.concat(o, ','))").unwrap();
+            assert_eq!(s.st.borrow().out.trim_end(), want, "engine {engine}");
+        }
         // __pairs is honored
+        let mut s = Session::replay(W).unwrap();
         s.run("local p = setmetatable({}, {__pairs = function(t) return function(_, k) if not k then return 1, 'one' end end, t, nil end}); for k, v in pairs(p) do assert(k == 1 and v == 'one') end").unwrap();
     }
 
@@ -1368,7 +1844,7 @@ mod tests {
         let mut a = Session::new(W).unwrap();
         a.run(CANVAS).unwrap();
         let prog = a.program("t");
-        let want = format!("-- easel session \"t\": a painting replayed chunk by chunk.\n-- Each \"--@ chunk\" line starts one chunk as it was run at the easel.\n--@ engine 2\n\n--@ chunk 1\n{CANVAS}\n");
+        let want = format!("-- easel session \"t\": a painting replayed chunk by chunk.\n-- Each \"--@ chunk\" line starts one chunk as it was run at the easel.\n--@ engine 5\n\n--@ chunk 1\n{CANVAS}\n");
         assert_eq!(prog, want);
         assert_eq!(logged_box(&prog).unwrap(), None);
         assert_eq!(box_for(Some(&prog)).map(|b| b.name), Ok(paint::palette::DEFAULT_BOX), "(EASEL_BOX set in the test's environment?)");
@@ -1418,14 +1894,34 @@ mod tests {
         assert!(e.contains("no tube \"rose madder\""), "{e}");
     }
 
-    /// The guide's tube table is the painters' box's: the every box (the atelier, 2026-10-07; the default
-    /// box before).
+    /// The guide's tube table is the every box's (atelier change, 2026-10-07: the painters' box; the runner writes a
+    /// studio's copy with its own box's table, runner/studio.py).
     #[test]
     #[cfg(feature = "box-every")]
     fn the_guide_shows_the_painters_box() {
         let guide = include_str!("../../../notes/easel_guide.md");
         let table: String = guide.lines().skip_while(|l| !l.starts_with("| tube | pigment |")).take_while(|l| l.starts_with('|')).map(|l| format!("{l}\n")).collect();
         assert_eq!(table, Palette::named_box("every").unwrap().table());
+    }
+
+    /// A painting at 4800 px names its width; a log without the line was
+    /// painted at 2400 and replays at 2400 (atelier change, 2026-10-06).
+    #[test]
+    fn the_log_names_its_width() {
+        let mut a = Session::new(4800).unwrap();
+        a.run(CANVAS).unwrap();
+        let prog = a.program("t");
+        assert!(prog.contains(&format!("{WIDTH_MARK} 4800\n")), "{prog}");
+        assert_eq!(logged_width(&prog), Ok(4800));
+        assert_eq!(logged_width(&prog.replace(&format!("{WIDTH_MARK} 4800\n"), "")), Ok(LEGACY_WIDTH));
+        let mut b = Session::new(LEGACY_WIDTH).unwrap();
+        b.run(CANVAS).unwrap();
+        assert!(!b.program("t").contains(WIDTH_MARK));
+        assert_eq!(chunk_limit_for(4800), CHUNK_LIMIT * 4);
+        assert_eq!(chunk_limit_for(LEGACY_WIDTH), CHUNK_LIMIT);
+        for bad in ["--@ width 1000", "--@ width x", "--@ width 4800\n--@ width 4800"] {
+            assert!(logged_width(&format!("{bad}\n\n--@ chunk 1\n")).is_err(), "{bad}");
+        }
     }
 
     // a view's form counts visible bodies only, not proxies
@@ -1448,26 +1944,6 @@ mod tests {
                   local v = w:view()
                   assert(v.form.parts == 2, 'mixed: ' .. v.form.parts)
                   assert(v:part(1) == 1 and v:part(2) == 0 and v:part(3) == 2)"#).unwrap();
-    }
-
-    /// A painting at 4800 px names its width; a log without the line was
-    /// painted at 2400 and replays at 2400 (atelier change, 2026-10-06).
-    #[test]
-    fn the_log_names_its_width() {
-        let mut a = Session::new(4800).unwrap();
-        a.run(CANVAS).unwrap();
-        let prog = a.program("t");
-        assert!(prog.contains(&format!("{WIDTH_MARK} 4800\n")), "{prog}");
-        assert_eq!(logged_width(&prog), Ok(4800));
-        assert_eq!(logged_width(&prog.replace(&format!("{WIDTH_MARK} 4800\n"), "")), Ok(LEGACY_WIDTH));
-        let mut b = Session::new(LEGACY_WIDTH).unwrap();
-        b.run(CANVAS).unwrap();
-        assert!(!b.program("t").contains(WIDTH_MARK));
-        assert_eq!(chunk_limit_for(4800), CHUNK_LIMIT * 4);
-        assert_eq!(chunk_limit_for(LEGACY_WIDTH), CHUNK_LIMIT);
-        for bad in ["--@ width 1000", "--@ width x", "--@ width 4800\n--@ width 4800"] {
-            assert!(logged_width(&format!("{bad}\n\n--@ chunk 1\n")).is_err(), "{bad}");
-        }
     }
 
     /// A new painting's log names the engine it is painted with; a log
@@ -1500,22 +1976,243 @@ mod tests {
     /// before engine 2, at a small width to keep the test short): two
     /// studios' paintings (paint-studio-6399ad and -db6324), hand-timed, with
     /// paint worked over drying paint.
+    // Replays two studios' whole paintings: not run by any test command (the overnight
+    // plan of 2026-10-04 forbids painting replays in tests). scripts/tests/old_logs.sh
+    // checks the same rule on a tiny engine-1 log and on the first three chunks of each
+    // of these two logs, at 128 to 160 px; notes/speed/SKIPPED.md.
     #[test]
+    #[ignore = "replays whole paintings: never run"]
     #[cfg(feature = "replay")]
     fn logs_without_an_engine_line_replay_as_before() {
         for (name, want) in [("studio_6399ad", "4f3abae7eb080221"), ("studio_db6324", "009ec933d082a252")] {
-            let text = std::fs::read_to_string(format!("{}/tests/engine1/{name}.lua", env!("CARGO_MANIFEST_DIR"))).unwrap();
-            let mut s = Session::replay_with(320, box_for(Some(&text)).expect("(EASEL_BOX set in the test's environment?)")).unwrap();
-            for (i, c) in parse_program(&text).iter().enumerate() {
-                s.run(c).unwrap_or_else(|e| panic!("{name} chunk {}: {e}", i + 1));
-            }
-            let c = s.canvas().unwrap();
-            let mut h = 0xcbf2_9ce4_8422_2325u64;
-            for b in c.seen().iter().flat_map(|p| p.map(f32::to_bits)).chain(c.kept_surface_um().2.iter().map(|v| v.to_bits())) {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100_0000_01b3);
-            }
-            assert_eq!(format!("{h:016x}"), want, "{name} no longer replays as it did");
+            let (s, _) = replay_fixture(&format!("engine1/{name}"));
+            assert_eq!(canvas_hash(&s), want, "{name} no longer replays as it did");
         }
+    }
+
+    /// The knife lays paint from its bead and scrapes wet paint back onto it.
+    #[test]
+    #[cfg(tube_box)]
+    fn the_knife_lays_and_scrapes() {
+        let mut s = Session::new(W).unwrap();
+        s.run(CANVAS).unwrap();
+        let bare = bits(&s);
+        s.run(r#"k = knife{width=30}; k:load(pile{{"bone black", 1}}, 0.5); full0 = k:fullness()
+                  k:lay({{200, 300}, {600, 300}}, {pressure=0.4})
+                  assert(k:fullness() < full0, "laying takes paint off the blade")"#).unwrap();
+        assert_ne!(bare, bits(&s), "the knife laid paint");
+        s.run(r#"k:wipe(); assert(k:fullness() == 0)
+                  k:scrape({{200, 300}, {600, 300}})
+                  assert(k:fullness() > 0, "scraping takes wet paint onto the blade")"#).unwrap();
+        let e = s.run("knife{width=1}").unwrap_err();
+        assert!(e.contains("2 to 200"), "{e}");
+    }
+
+    #[test]
+    #[cfg(tube_box)]
+    fn knife_rejects_invalid_loads_and_paths_without_changing_state() {
+        let mut s = Session::new(W).unwrap();
+        s.run(CANVAS).unwrap();
+        s.run(r#"k = knife{width=30}; p = pile{{"bone black", 1}}; k:load(p, 0.5)"#).unwrap();
+        for call in ["k:load(p, 3.4e38)", "k:lay({{100, 300}, {0/0, 300}})", "k:scrape({{100, 300}, {1e9, 300}})", "k:lay({{100, 300}}, {angle=math.huge})", "local pts = {}; for i = 1, 24 do pts[i] = {i % 2 == 0 and 20000 or -20000, 300} end; k:lay(pts)"] {
+            let before = bits(&s);
+            let e = s.run(call).unwrap_err();
+            assert!(e.contains("k:"), "{call}: {e}");
+            assert_eq!(before, bits(&s), "{call}");
+        }
+    }
+
+    /// A failed chunk leaves a knife as it was, as it leaves a brush.
+    #[test]
+    #[cfg(tube_box)]
+    fn a_failed_chunk_leaves_the_knife_alone() {
+        let mut s = Session::new(W).unwrap();
+        s.run(CANVAS).unwrap();
+        s.run(r#"k = knife{width=30}; k:load(pile{{"bone black", 1}}, 0.5); full0 = k:fullness()"#).unwrap();
+        let before = bits(&s);
+        let e = s.run("k:lay({{200, 300}, {600, 300}}); error('stop')").unwrap_err();
+        assert!(e.contains("stop"), "{e}");
+        assert_eq!(before, bits(&s));
+        s.run("assert(k:fullness() == full0)").unwrap();
+    }
+
+    /// A double-loaded, streaky pass paints something else than the plain
+    /// pass, and the same again in a second session; a part-loaded brush too.
+    #[test]
+    #[cfg(tube_box)]
+    fn double_loads_and_streaks_paint_and_replay() {
+        let paint = |opts: &str| {
+            let mut s = Session::new(W).unwrap();
+            s.run(CANVAS).unwrap();
+            s.run(&format!(
+                r#"p = pile{{{{"lead white", 3}}, {{"cobalt blue", 1}}}}; q = pile{{{{"vermilion", 1}}}}
+                   work(rect(100, 100, 600, 300), {{pile=p{opts}}})
+                   b = brush("flat", 12); b:load(p, 0.8); b:load(q, 0.5, {{side=1, share=0.4, streak=0.5}}); b:stroke({{{{150, 500}}, {{700, 500}}}})"#
+            ))
+            .unwrap();
+            bits(&s)
+        };
+        let double = paint(", streak=0.8, second={pile=q, load=0.4, side=1, share=0.5}");
+        assert_eq!(double, paint(", streak=0.8, second={pile=q, load=0.4, side=1, share=0.5}"));
+        assert_ne!(double, paint(""));
+        let mut s = Session::new(W).unwrap();
+        s.run(CANVAS).unwrap();
+        let e = s.run(r#"b = brush("flat", 12); b:load(pile{{"vermilion", 1}}, 0.5, {side=2})"#).unwrap_err();
+        assert!(e.contains("side is -1..1"), "{e}");
+        let e = s.run(r#"work(everywhere(), {pile=pile{{"vermilion", 1}}, second={load=0.4}})"#).unwrap_err();
+        assert!(e.contains("work second"), "{e}");
+    }
+
+    /// A sketch's log says it is one, so it replays at its width under any
+    /// file name; a painting's log doesn't.
+    /// The scratch canvas is set up with the painting's `canvas{...}` as the easel wrote it
+    /// back (`Studio::canvas_src`): run in a fresh session it makes the same canvas, every
+    /// option kept (a two-layer ground with texture and absorbent, and a raw canvas).
+    #[test]
+    #[cfg(tube_box)]
+    fn a_canvas_written_back_sets_up_the_same_canvas() {
+        for call in [
+            r#"canvas{size=320, aspect=1.25, linen={14, 17}, seed=9, ground={{pile={{"lead white", 3}, {"yellow ochre", 0.5}}, um=90, apply="brush"}, {pile={{"lead white", 1}}, um=40.5, apply="knife", texture=0.7, absorbent=0.6}}}"#,
+            r#"canvas{size=300, aspect=1, linen=20, seed=4, raw="cotton duck"}"#,
+        ] {
+            let mut a = Session::new(160).unwrap();
+            a.run(call).unwrap();
+            let src = a.st.borrow().canvas_src.clone().expect("canvas{} writes itself back");
+            let mut b = Session::new(160).unwrap();
+            b.run(&src).unwrap_or_else(|e| panic!("{src}: {e}"));
+            let (ca, cb) = (a.canvas().unwrap(), b.canvas().unwrap());
+            let bits = |c: &Canvas| c.seen().iter().flat_map(|p| p.map(f32::to_bits)).collect::<Vec<_>>();
+            assert!(bits(&ca) == bits(&cb), "{call}\nwritten back as {src}: another canvas");
+            assert_eq!(a.st.borrow().setup, b.st.borrow().setup, "{src}");
+        }
+    }
+
+    #[test]
+    #[cfg(tube_box)]
+    fn a_sketch_s_log_says_so() {
+        let mut a = Session::new(SKETCH_WIDTH).unwrap();
+        a.run(CANVAS).unwrap();
+        let prog = a.program("sketch-1");
+        assert!(prog.contains(&format!("\n{SKETCH_MARK}\n\n{MARK} 1\n")), "{prog}");
+        assert!(logged_sketch(&prog));
+        let mut b = Session::new(W).unwrap();
+        b.run(&format!("{CANVAS}\n-- {SKETCH_MARK} (in a chunk it is a comment)")).unwrap();
+        assert!(!logged_sketch(&b.program("sketchbook")));
+    }
+
+    /// What only engine 4 models is refused in a painting painted with an
+    /// older engine, where it would do nothing.
+    #[test]
+    #[cfg(tube_box)]
+    fn an_older_engine_s_painting_refuses_turps_and_absorbent_grounds() {
+        let old = || {
+            let mut tubes = Palette::tube_box();
+            tubes.engine = 2;
+            Session::with_box(W, tubes).unwrap()
+        };
+        let mut s = old();
+        let e = s.run(&CANVAS.replace(r#"apply="brush"}"#, r#"apply="brush", absorbent=true}"#)).unwrap_err();
+        assert!(e.contains("absorbent= needs engine 4"), "{e}");
+        s.run(CANVAS).unwrap();
+        let e = s.run(r#"pile{{"lead white", 1}, turps=0.5}"#).unwrap_err();
+        assert!(e.contains("turps= needs engine 4"), "{e}");
+        // (nor has it the knife: its globals are the ones it was painted with)
+        s.run("assert(knife == nil)").unwrap();
+        let mut s = Session::new(W).unwrap();
+        s.run(&CANVAS.replace(r#"apply="brush"}"#, r#"apply="brush", absorbent=true}"#)).unwrap();
+        s.run(r#"pile{{"lead white", 1}, turps=0.5}; pile{{"lead white", 1}, blot=0.3, oil="poppy"}; pile{{"lead white", 1}, thinner=0.5}"#).unwrap();
+    }
+
+    /// A mix's printed recipe gives each heap its share, whatever its own
+    /// recipe sums to, and p:add counts in the units that recipe prints.
+    #[test]
+    #[cfg(tube_box)]
+    fn a_mix_prints_its_heaps_in_their_shares_and_adds_in_those_units() {
+        let mut s = Session::new(W).unwrap();
+        s.run(CANVAS).unwrap();
+        s.run(r#"local a = pile{{"lead white", 3}, {"cobalt blue", 1}}; local b = pile{{"vermilion", 1}}
+                 m = mix{{a, 1}, {b, 1}}
+                 local w = {}; for _, p in ipairs(m:parts()) do w[p[1]] = p[2] end
+                 assert(math.abs(w["vermilion"] - 1) < 1e-5 and math.abs(w["lead white"] - 0.75) < 1e-5, "half of the mix is vermilion")
+                 m2 = m:add{{"vermilion", 2}}
+                 local v = {}; for _, p in ipairs(m2:parts()) do v[p[1]] = p[2] end
+                 assert(math.abs(v["vermilion"] - 3) < 1e-5, "two parts more in the printed units")"#).unwrap();
+    }
+
+    /// pile{oil=} grinds the paint in that oil: its drying rate against
+    /// linseed's (paint's oil_rate_scales_drying has what the rate does).
+    #[test]
+    #[cfg(tube_box)]
+    fn a_pile_s_oil_sets_its_drying_rate() {
+        let mut s = Session::new(W).unwrap();
+        s.run(CANVAS).unwrap();
+        s.run(r#"pl = pile{{"lead white", 1}}; pli = pile{{"lead white", 1}, oil="linseed"}
+                 pw = pile{{"lead white", 1}, oil="walnut"}; pp = pile{{"lead white", 1}, oil="poppy"}"#).unwrap();
+        let rate = |n: &str| match &s.globals[n].0 {
+            Value::UserData(u) => u.borrow::<api::PileU>().unwrap().mix.oil_rate,
+            o => panic!("{n} is {o:?}"),
+        };
+        assert_eq!([rate("pl"), rate("pli"), rate("pw"), rate("pp")], [1.0, 1.0, 0.8, 0.6]);
+        let e = s.run(r#"pile{{"lead white", 1}, oil="olive"}"#).unwrap_err();
+        assert!(e.contains("linseed"), "{e}");
+    }
+
+    /// A gesture's points are checked before its curve is sampled (a point
+    /// that is nowhere would be sampled without end), and its pressure keeps
+    /// a press that falls between its evenly spaced knots.
+    #[test]
+    #[cfg(tube_box)]
+    fn a_gesture_checks_its_points_and_keeps_a_press() {
+        let mut s = Session::new(W).unwrap();
+        s.run(CANVAS).unwrap();
+        s.run(r#"b = brush("round", 6); b:load(pile{{"bone black", 1}}, 0.9); full0 = b:fullness()"#).unwrap();
+        for bad in ["{{100, 300}, {math.huge, 300}}", "{{100, 300}, {0/0, 300}}", "{{100, 300}, {1e9, 300}}"] {
+            let e = s.run(&format!("b:gesture({bad})")).unwrap_err();
+            assert!(e.contains("not on or near the canvas"), "{bad}: {e}");
+        }
+        let bare = bits(&s);
+        // one pressed point among 33, the others lifted: it paints
+        s.run(r#"local pts = {}; for i = 0, 32 do pts[#pts + 1] = {100 + 20 * i, 300, i == 1 and 1 or 0} end
+                  b:gesture(pts, {ramps={0, 0}})
+                  assert(b:fullness() < full0, "the pressed point laid paint")"#).unwrap();
+        assert_ne!(bare, bits(&s));
+    }
+
+    /// An engine-2 painting replays as engine 2, bit for bit as it did before
+    /// engine 3 (recorded at 7b80cb0, round 23): a test sheet of lead white
+    /// and bone black laid at different times over five days, lifted at
+    /// every stage of drying and painted across, with waits of hours and
+    /// days. Its log goes on naming engine 2.
+    #[test]
+    #[cfg(feature = "replay")]
+    fn engine_2_logs_replay_as_before() {
+        let (s, text) = replay_fixture("engine2/drying_sheet");
+        assert_eq!(s.canvas().unwrap().engine(), 2);
+        assert_eq!(s.program("painting"), text);
+        assert_eq!(canvas_hash(&s), "2d2bc0a5b6922d4a", "the engine-2 drying sheet no longer replays as it did");
+    }
+
+    /// Replay `tests/<name>.lua` at 320 px with the box and engine its log
+    /// names.
+    #[cfg(feature = "replay")]
+    fn replay_fixture(name: &str) -> (Session, String) {
+        let text = std::fs::read_to_string(format!("{}/tests/{name}.lua", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let mut s = Session::replay_with(320, box_for(Some(&text)).expect("(EASEL_BOX set in the test's environment?)")).unwrap();
+        for (i, c) in parse_program(&text).iter().enumerate() {
+            s.run(c).unwrap_or_else(|e| panic!("{name} chunk {}: {e}", i + 1));
+        }
+        (s, text)
+    }
+
+    /// FNV-1a of the canvas as seen and its surface relief.
+    #[cfg(feature = "replay")]
+    fn canvas_hash(s: &Session) -> String {
+        let c = s.canvas().unwrap();
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for b in c.seen().iter().flat_map(|p| p.map(f32::to_bits)).chain(c.kept_surface_um().2.iter().map(|v| v.to_bits())) {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100_0000_01b3);
+        }
+        format!("{h:016x}")
     }
 }

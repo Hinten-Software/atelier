@@ -32,6 +32,15 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+## StyLua
+
+The studio's display-only Lua formatter bundles unmodified WebAssembly and
+browser bindings from `@johnnymorganz/stylua` 2.5.2, published at
+https://registry.npmjs.org/@johnnymorganz/stylua/-/stylua-2.5.2.tgz.
+Source: https://github.com/JohnnyMorganz/StyLua/tree/v2.5.2.
+License: MPL-2.0, included in `studio/vendor/stylua/LICENSE.md`.
+These assets load locally only when the code view is opened.
+
 ## Mixbox
 
 The paint engine (`crates/paint`) mixes pigments with Mixbox 2.0.0, used
@@ -50,10 +59,3 @@ If you want to obtain commercial license, please contact: mixbox@scrtwpns.com
 License: Creative Commons Attribution-NonCommercial 4.0 International,
 https://creativecommons.org/licenses/by-nc/4.0/. This project uses it
 non-commercially.
-
-## claude-paint
-
-The engine (`engine/`), the easel guide and physics note (`materials/`), the
-viewer (`viewer/`) and the easel client (`easel-mcp/src/upstream/`) come from
-claude-paint by Alice, https://github.com/aliceisjustplaying/claude-paint. Code
-under the MIT License (`LICENSE-claude-paint`); texts under CC BY 4.0.

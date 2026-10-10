@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = []
+# dependencies = ["pillow"]
 # ///
 """The studio: watch a painter paint, live or replayed.
 
@@ -25,6 +25,7 @@ import re
 import threading
 import urllib.parse
 from datetime import datetime
+from palette_board import palette_board
 
 SESSIONS = os.path.expanduser("~/.pi/agent/sessions")
 # --public: painters only, nothing that names this machine's owner (for a link shown to others)
@@ -37,6 +38,14 @@ def scrub(body):
     """The home folder as ~ and the account name as `user`, in a response's text."""
     return re.sub(re.escape(USER.encode()), b"user", body.replace(HOME.encode(), b"~"), flags=re.I)
 HERE = os.path.dirname(os.path.abspath(__file__))
+VIEWER_ASSETS = {
+    "stream.css": "text/css; charset=utf-8",
+    "code-display.js": "text/javascript; charset=utf-8",
+    "code-format.js": "text/javascript; charset=utf-8",
+    "vendor/stylua/stylua_lib_web.js": "text/javascript; charset=utf-8",
+    "vendor/stylua/stylua_lib_bg.wasm": "application/wasm",
+    "vendor/stylua/LICENSE.md": "text/plain; charset=utf-8",
+}
 _cache = {}  # path -> {"offset", "events", "images", "calls"}: one session file, parsed so far
 _streams = {}  # key -> a stitched stream of session files (see stream())
 _locks = {}
@@ -79,7 +88,7 @@ def session_model(path):
 
 
 # Painters' sessions, by folder: round 16+ studios, the round 14-15 chain painters and the
-# earlier rounds' painter worktrees. Everything else (judges, tests, work on the project)
+# earlier rounds' painter worktrees (rounds 1-4 and 7-13). Everything else (judges, tests, work on the project)
 # shows only with "all".
 _thinking = {}  # path -> the session's thinking level
 
@@ -112,7 +121,7 @@ _lanes = {"at": 0.0, "map": {}}
 
 
 def lanes():
-    """paint-studio-... -> (round, lane, painter number, painters in the lane), from the runners'
+    """paint-studio-... -> (round, lane, painter number, painters in the lane, outcome), from the runners'
     studio lists (reread every 30 s)."""
     import time
     if time.time() - _lanes["at"] > 30:
@@ -127,7 +136,29 @@ def lanes():
             for k, studio in names.items():
                 lane, n = keys[k]
                 size = sum(1 for l, _ in keys.values() if l == lane)
-                m[studio] = (rnd, lane, int(n) if n else 0, size)
+                number = int(n) if n else 0
+                rd = os.path.join(os.path.dirname(f), lane)
+                outcome = None
+                try:
+                    with open(os.path.join(rd, f"p{number}_outcome.json")) as fh:
+                        candidate = json.load(fh)
+                    if (isinstance(candidate, dict) and candidate.get("status") in
+                            ("finished", "cap_reached", "crash_limit_reached") and
+                            isinstance(candidate.get("reason"), str)):
+                        outcome = candidate
+                except (OSError, ValueError):
+                    pass
+                if outcome is None:
+                    try:
+                        with open(os.path.join(rd, f"p{number}.painted")) as fh:
+                            reason = fh.read()
+                        if "NOT FINISHED" in reason and "MAX_SITTINGS" in reason:
+                            outcome = {"status": "cap_reached", "reason": reason.strip()}
+                        elif re.search(r"the painter is done: sitting \d+ added no painting", reason):
+                            outcome = {"status": "finished", "reason": reason.strip()}
+                    except OSError:
+                        pass
+                m[studio] = (rnd, lane, number, size, outcome)
         _lanes.update(at=time.time(), map=m)
     return _lanes["map"]
 
@@ -196,7 +227,13 @@ def in_reference(path, cwd):
     return len(parts) > 1 and parts[0].lower() == "reference"
 
 
-PAINTER = re.compile(r"^(paint-studio-[0-9a-f]+|paint-r\d+-p\d+|claude-paint-r\d+-(arm\d|tree\d|astra|fable|flash|p\d))$")
+PAINTER = re.compile(r"^(paint-studio-[0-9a-f]+|paint-r\d+-p\d+|claude-paint-r\d+-(arm\d|tree\d|astra|fable|flash|p\d|python)"
+                     r"|claude-paint-amnesia-(winter|coast|mountains)|claude-paint-easel[34]-(free|green|near))$")
+# a folder whose session files are separate painters (round 1's three painters ran in one worktree): each its own
+# painter, named folder-<subject>, by the start of its session file's name
+SPLIT = {"claude-paint-fresh": {"claude-paint-fresh-winter": "2026-09-22T21-59-38-550Z",
+                                "claude-paint-fresh-coast": "2026-09-22T21-59-38-576Z",
+                                "claude-paint-fresh-mountains": "2026-09-22T21-59-38-610Z"}}
 
 
 def short(d):
@@ -215,15 +252,25 @@ def list_sessions():
         name = short(d)
         fs.sort(key=os.path.basename)  # session file names begin with the start time
         info = [{"path": f, "model": session_model(f), "mtime": os.path.getmtime(f), "size": os.path.getsize(f)} for f in fs]
+        if name in SPLIT:
+            for p, start in SPLIT[name].items():
+                for i in info:
+                    if os.path.basename(i["path"]).startswith(start):
+                        out.append({"p": p, "folder": p, "painter": True, "model": i["model"], "sittings": 1,
+                                    "thinking": session_thinking(i["path"]), **about_brief(name),
+                                    "round": "", "lane": "", "n": 0, "chain": 0, "outcome": None,
+                                    "files": [i["path"]], "mtime": i["mtime"], "size": i["size"]})
+            continue
         if PAINTER.match(name):
             models = []
             for i in info:
                 if i["model"] and i["model"] not in models:
                     models.append(i["model"])
-            rnd, lane, n, size = lanes().get(name, ("", "", 0, 0))
+            rnd, lane, n, size, outcome = lanes().get(name, ("", "", 0, 0, None))
             out.append({"p": name, "folder": name, "painter": True, "model": " → ".join(models), "sittings": len(fs),
                         "thinking": session_thinking(fs[-1]), **about_brief(name),
                         "round": rnd, "lane": lane, "n": n, "chain": size if size > 1 else 0,
+                        "outcome": outcome,
                         "files": fs, "mtime": max(i["mtime"] for i in info), "size": sum(i["size"] for i in info)})
         else:
             out += [dict(i, s=i["path"], folder=name, painter=False) for i in info]
@@ -235,6 +282,9 @@ def painter_files(name):
     """The session files of a painter folder (given by its short name), in start order."""
     if not name or "/" in name or name.startswith("."):
         return []
+    for folder, ps in SPLIT.items():
+        if name in ps:
+            return sorted(glob.glob(os.path.join(SESSIONS, "*-src-a-" + folder + "--", ps[name] + "*.jsonl")))
     for d in glob.glob(os.path.join(SESSIONS, "*" + name + "*")):
         if short(os.path.basename(d)) == name:
             return sorted(glob.glob(os.path.join(d, "*.jsonl")), key=os.path.basename)
@@ -279,6 +329,11 @@ def _parse(path):
         if d.get("type") == "model_change":
             c["events"].append({"ts": ts, "kind": "note", "text": "model " + d.get("modelId", "")})
             continue
+        if d.get("type") == "compaction":
+            clock = summary_clock(d.get("summary", ""))
+            if clock:
+                c["events"].append({"ts": ts, "kind": "clock", "clock": clock, "text": clock})
+            continue
         if d.get("type") != "message":
             continue
         m = d.get("message", {})
@@ -306,6 +361,10 @@ def _parse(path):
                             ev["ref"] = True  # it reads from reference/ (see in_reference)
                     elif name == "paint":  # the painter harness's easel tools (round 19 on)
                         ev.update(kind="paint", code=a.get("lua", ""))
+                        if a.get("scratch"):  # on the scratch canvas beside the painting
+                            ev["scratch"] = True
+                            if a.get("new_scratch"):
+                                ev["new_scratch"] = True
                     elif name == "look":
                         ev.update(kind="look", text=look_text(a))
                     elif name == "note":
@@ -318,10 +377,14 @@ def _parse(path):
             parent = c["calls"].get(m.get("toolCallId"))
             txt = _text(content)
             if parent is not None and (txt or m.get("isError")):
+                ev = c["events"][parent]
+                if ev["kind"] == "paint" and ev.get("scratch") and re.search(
+                        r"^a (?:fresh scratch canvas|scratch canvas beside the painting)|\(the scratch canvas couldn't be reopened, so it is put aside\)", txt, re.M):
+                    ev["scratch_reset"] = True
                 if txt:
-                    c["events"][parent]["out"] = txt[-1500:]
+                    ev["out"] = txt[-1500:]
                 if m.get("isError"):
-                    c["events"][parent]["err"] = True
+                    ev["err"] = True
                 c["changed"].append(parent)
             for x in content:
                 if x.get("type") == "image" and x.get("data"):
@@ -331,14 +394,164 @@ def _parse(path):
                     ev = {"ts": ts, "kind": "image", "img": idx, "path": src}
                     if parent is not None and c["events"][parent]["kind"] == "look":
                         ev["look"] = c["events"][parent]["text"]  # what the painter asked to see (see is_whole)
+                    if re.search(r"palette (?!False)", ev.get("look", "")):
+                        chips = palette_board(base64.b64decode(x["data"]))
+                        if chips:
+                            ev["palette"] = chips
                     if parent is not None and c["events"][parent].get("ref"):
                         ev["ref"] = True  # a reference picture: never the painting
                     c["events"].append(ev)
         elif role == "user":
             t = _text(content)
             if t.strip():
-                c["events"].append({"ts": ts, "kind": "user", "text": t[:2000]})
+                ev = {"ts": ts, "kind": "user", "text": t[:2000]}
+                clock = summary_clock(t)  # the recovery summary can be longer than the displayed text
+                if clock:
+                    ev["clock"] = clock
+                c["events"].append(ev)
+    if not any(e["kind"] == "look" for e in c["events"]):
+        mark_whole(c, path)
     return c["events"], c["images"]
+
+
+def _signature(data):
+    """A picture's proportions, its 32 x 24 grays (centered, scaled to unit spread) and its mean chroma (0-255;
+    about 0 for a check in grays); None if it can't be read."""
+    from PIL import Image
+    import io
+    try:
+        with Image.open(io.BytesIO(base64.b64decode(data))) as im:
+            w, h = im.size
+            rgb = list(im.convert("RGB").resize((32, 24)).getdata())
+    except Exception:
+        return None
+    px = [0.299 * r + 0.587 * g + 0.114 * b for r, g, b in rgb]
+    m = sum(px) / len(px)
+    sd = (sum((v - m) ** 2 for v in px) / len(px)) ** 0.5 or 1.0
+    chroma = sum(max(c) - min(c) for c in rgb) / len(rgb)  # 0 for a picture in grays
+    return w / h, [(v - m) / sd for v in px], chroma
+
+
+# mark_whole's answers, by session file (its path, size and number of pictures), kept between runs: the export
+# runs every minute and decoding every early painter's pictures takes minutes
+WHOLE_CACHE = os.path.expanduser("~/.cache/claude-paint-studio/whole.json")
+_whole = {}
+
+
+def _whole_cache():
+    if "d" not in _whole:
+        try:
+            with open(WHOLE_CACHE) as fh:
+                _whole["d"] = json.load(fh)
+        except (OSError, ValueError):
+            _whole["d"] = {}
+    return _whole["d"]
+
+
+def _save_whole_cache():
+    os.makedirs(os.path.dirname(WHOLE_CACHE), exist_ok=True)
+    tmp = f"{WHOLE_CACHE}.{os.getpid()}.tmp"
+    with open(tmp, "w") as fh:
+        json.dump(_whole["d"], fh)
+    os.replace(tmp, WHOLE_CACHE)
+
+
+def mark_whole(c, path):
+    """Before the look tool a painter opened its renders as image files, the whole canvas and close-ups alike; the
+    file's name doesn't say which. A picture is the whole canvas (e["whole"]) when its proportions are the canvas's
+    (the most common among its pictures, within 2%), it isn't in grays (a value check) and its 32 x 24 grays correlate at 0.75 or more with the next
+    whole picture after it. The chain starts, at the end, from the picture of the canvas's proportions most like the
+    others among the last eight. A close-up of the same proportions differs from the whole too much to pass; where
+    the painting changed a lot between two looks (an early lay-in) the chain stops, and before that the view shows
+    the last picture opened, as without this. Where the easel command that wrote a picture can be read (_look_said),
+    it decides instead."""
+    ims = [e for e in c["events"] if e["kind"] == "image" and not e.get("ref")]
+    key = f"v4:{path}:{os.path.getsize(path)}:{len(ims)}"
+    done = _whole_cache().get(key)
+    if done is not None and len(done) == len(ims):
+        for e, w in zip(ims, done):
+            e["whole"] = w
+        return
+    sig = c.setdefault("sig", {})
+    for e in ims:
+        if e["img"] not in sig:
+            sig[e["img"]] = _signature(c["images"][e["img"]][1])
+    shapes = [round(sig[e["img"]][0], 2) for e in ims if sig[e["img"]]]
+    if not shapes:
+        return
+    canvas = max(set(shapes), key=shapes.count)
+    fits = [e for e in ims if sig[e["img"]] and abs(sig[e["img"]][0] / canvas - 1) < 0.02]
+    # a check of the whole in grays (or blurred to grays) isn't the painting as it looks
+    chromas = sorted(sig[e["img"]][2] for e in fits)
+    if chromas and chromas[len(chromas) // 2] > 10:
+        fits = [e for e in fits if sig[e["img"]][2] > 3]
+    corr = lambda a, b: sum(x * y for x, y in zip(sig[a["img"]][1], sig[b["img"]][1])) / len(sig[a["img"]][1])
+    for e in ims:
+        e["whole"] = False
+    if not fits:
+        return
+    tail = fits[-8:]
+    anchor = max(tail, key=lambda a: sum(corr(a, b) for b in tail))
+    anchor["whole"] = True
+    later = anchor
+    for e in reversed(fits[:fits.index(anchor)]):
+        if corr(e, later) >= 0.75:
+            e["whole"] = True
+            later = e
+    later = anchor
+    for e in fits[fits.index(anchor) + 1:]:
+        if corr(e, later) >= 0.75:
+            e["whole"] = True
+            later = e
+    for e in ims:  # where the command that made the picture says what it showed, that decides
+        said = _look_said(c["events"], e)
+        if said is not None:
+            e["whole"] = said
+    # a round 16-18 studio painter looked through the easel (its pictures under out/easel/): a picture it made
+    # elsewhere (a mirrored or cut-out copy in a scratch folder) isn't the canvas as the easel shows it. (Earlier
+    # painters rendered their finals into scratch folders themselves: this doesn't apply to them.)
+    if os.path.basename(c.get("cwd", "").rstrip("/")).startswith("paint-studio-"):
+        for e in ims:
+            if "out/easel/" not in e.get("path", ""):
+                e["whole"] = False
+    _whole_cache()[key] = [e["whole"] for e in ims]
+    _save_whole_cache()
+
+
+def _look_said(events, image):
+    """Whether the easel command that wrote this picture asked for the whole canvas (rounds 16-18 called the easel
+    from the shell: `easel look --crop ...`, `easel do '...' --look`): True or False from its options, None when no
+    command names the file or which of several looks wrote it can't be told."""
+    name = os.path.basename(image.get("path", ""))
+    if not name:
+        return None
+    k = events.index(image)
+    cmd = next((e for e in reversed(events[:k]) if e["kind"] == "cmd" and name in (e.get("out") or "")), None)
+    if cmd is None:
+        return None
+    text, out = cmd.get("text", ""), cmd.get("out") or ""
+    looks = re.findall(r"\beasel\s+look\b([^\n;&|]*)", text)
+    files = re.findall(r"look-\d+\.\w+", out)
+    if looks and len(files) == len(looks) and name in files:
+        opts = looks[files.index(name)]
+    elif looks and len(files) < len(looks):  # some looks failed: decided only if all of them agree
+        wholes = {not re.search(r"--(crop|mode|light|survey|compare|hold|palette)\b", o) for o in looks}
+        return wholes.pop() if len(wholes) == 1 else None
+    elif not looks and re.search(r"\beasel\s+do\b", text) and re.search(r"(?m)--look\b", text) and len(files) == 1:
+        opts = ""
+    else:
+        return None
+    return not re.search(r"--(crop|mode|light|survey|compare|hold|palette)\b", opts)
+
+
+def summary_clock(text):
+    """The latest recorded time in the painter harness's saved clock section."""
+    section = re.search(r"(?m)^## The canvas clock\n([\s\S]*?)(?=\n## |\Z)", text)
+    if not section:
+        return None
+    times = re.findall(r"(?m)^- Latest (?:painting time the easel printed|journal entry stamped): "
+                       r"(day ([1-9]\d*), ([01]\d|2[0-3]):([0-5]\d))[ \t]*$", section[1])
+    return max(times, key=lambda t: tuple(map(int, t[1:])))[0] if times else None
 
 
 def look_text(args):
@@ -347,8 +560,9 @@ def look_text(args):
 
 
 def is_whole(look):
-    """A look request that shows the whole canvas as it is: no crop, no mode (value, squint, mirror) and not the palette."""
-    return look is not None and not re.search(r"crop|mode|palette (?!False)", look)
+    """A look request that shows the whole canvas as it is: no crop, no mode (value, squint, mirror), no light,
+    not the palette, not a survey's tile, not a comparison, not a held knife and not the scratch canvas."""
+    return look is not None and not re.search(r"crop|mode|light|compare|hold|(?:palette|survey|scratch) (?!False)", look)
 
 
 # a closing reply that begins with the painting's title: "**The Silent Shore**", "### *Hünengrab im Abendlicht* (...)",
@@ -358,17 +572,33 @@ TITLE = re.compile(r"\s*(?:\([^)\n]{1,16}\)\S{0,3}\s+)?(?:#{1,6}\s*)?(\*\*?|__?)
 TITLE_LINE = re.compile(r"[ \t]*(?:#{1,6}[ \t]*)?(\*\*?|__?)([^*_\n]{2,100}?)\1[ \t]*")
 
 
+# or named in the first line of its closing words: "I've called it **Grainstack, Evening**.", "I've finished
+# **Nymphéas, reflet du soir** (...)", "I'm leaving **Luncheonette, Four O'Clock** finished as it is."
+NAMED = re.compile(r"[^\n*_]{0,40}?\b(?:call(?:ed|ing)?|title[ds]?|name[ds]?|finish(?:ed|ing)?|left|leav(?:e|ing)"
+                   r"|complet(?:ed|e|ing))(?:\s+(?:it|this|(?:the|this|my)\s+(?:painting|picture|canvas)))?\s+(\*\*?|__?)([^*_\n]{2,100}?)\1(?![*_\w])")
+
+
+def clean_title(t):
+    """A title without the quotation marks some painters put inside the bold."""
+    return t.strip().strip('"\u201c\u201d').strip() or None
+
+
 def title_of(say):
     """The painting's title from the painter's last words, if they begin with one or have one alone on a line among
     their first three paragraphs; else None."""
-    m = TITLE.match(say or "")
+    m = TITLE.match(say or "") or NAMED.match(say or "")
     if m:
-        return m.group(2).strip()
+        return clean_title(m.group(2))
     for para in [p for p in re.split(r"\n\s*\n", say or "") if p.strip()][1:3]:
         m = TITLE_LINE.fullmatch(para.strip("\n"))
         if m:
-            return m.group(2).strip()
+            return clean_title(m.group(2))
     return None
+
+
+def title_of_closings(says):
+    """The title in the newest closing words that name one (a last sitting that only looked may not repeat it)."""
+    return next((t for t in map(title_of, reversed(says)) if t), None)
 
 
 REFERENCE = object()  # in a glance's calls: a read of a reference picture
@@ -416,10 +646,10 @@ def _glance_file(path):
                     look, k = g["calls"].get(m.get("toolCallId")), 0
                     for x in content:
                         if x.get("type") == "image" and x.get("data"):
-                            if look is not REFERENCE:
+                            if look is None:
                                 g["last"] = (g["n"], at, k)
-                                if is_whole(look):
-                                    g["whole"] = g["last"]
+                            elif look is not REFERENCE and is_whole(look):
+                                g["whole"] = (g["n"], at, k)
                             g["n"] += 1
                             k += 1
         return g
@@ -436,10 +666,10 @@ def glance(files):
         if g["last"]:
             last, lsrc = base + g["last"][0], (f,) + g["last"][1:]
         base += g["n"]
-    say = next((g["say"] for g in reversed(gs) if g["say"]), "")
+    title = title_of_closings([g["say"] for g in gs if g["say"]])
     if look is None:
         look, src = last, lsrc
-    return {"look": look, "title": title_of(say), "src": src}
+    return {"look": look, "title": title, "src": src}
 
 
 def glance_image(src):
@@ -512,11 +742,14 @@ ARCHIVE = os.path.join(os.path.dirname(HERE), "archive", "sources")
 def painting_sources(events):
     """The folder to read the painting's source files from and those files, relative to it: the ones
     the page may ask for. The folder is the painter's (its last start) or, once that is gone,
-    archive/sources/<its name>. The files: paintings/lua/painting.lua and, from the events, every .lua
+    archive/sources/<its name>. The files: paintings/lua/painting.lua, paintings/lua/scratch.lua once the
+    painter paints there and, from the events, every .lua
     under paintings/lua/ and .rs under paintings/ the painter wrote or edited or rendered with
     `cargo paint <bin>`. Nothing else in the folder (the brief, notes, bin/, settings) is served."""
     cwd = next((e["cwd"] for e in reversed(events) if e["kind"] == "start"), "")
     rels = {"paintings/lua/painting.lua"}
+    if any(e["kind"] == "paint" and e.get("scratch") for e in events):
+        rels.add("paintings/lua/scratch.lua")
     for e in events:
         if e["kind"] in ("write", "edit"):
             p = e.get("path", "")
@@ -545,14 +778,14 @@ class H(http.server.BaseHTTPRequestHandler):
         pass
 
     def _send(self, code, body, ctype):
-        if PUBLIC and not ctype.startswith("image/"):
+        if PUBLIC and not ctype.startswith("image/") and ctype != "application/wasm":
             body = scrub(body)
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         # a look never changes: the browser keeps it (and asks again for everything else)
         self.send_header("Cache-Control", "private, max-age=86400, immutable" if ctype.startswith("image/") else "no-store")
         if PUBLIC:
-            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+            self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; "
                              "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:")
         self.end_headers()
         self.wfile.write(body)
@@ -572,9 +805,10 @@ class H(http.server.BaseHTTPRequestHandler):
             if PUBLIC:
                 page = page.replace(b'<label id="allwrap"', b'<label id="allwrap" hidden')
             return self._send(200, page, "text/html; charset=utf-8")
-        if u.path == "/stream.css":  # the livestream's layout: the page loads it itself with ?stream=1
-            with open(os.path.join(HERE, "stream.css"), "rb") as fh:
-                return self._send(200, fh.read(), "text/css; charset=utf-8")
+        asset = u.path.lstrip("/")
+        if asset in VIEWER_ASSETS:
+            with open(os.path.join(HERE, asset), "rb") as fh:
+                return self._send(200, fh.read(), VIEWER_ASSETS[asset])
         if u.path == "/api/sessions":
             ss = list_sessions()
             for s in ss:

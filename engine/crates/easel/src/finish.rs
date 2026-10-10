@@ -43,6 +43,36 @@ fn needs_dry(st: &S, what: &str) -> Result<()> {
     Ok(())
 }
 
+/// The finishing chunk `scripts/finish_painting` appends to a painter's log (and `easel
+/// finish` runs on a save): wait a month at a time until every film is touch-dry (the
+/// finishing verbs refuse wet paint), for at most ten years, then varnish (`coats` as given,
+/// a number), crack and light the relief, each if asked. Byte for byte the chunk the script
+/// wrote before it asked the easel for it.
+pub fn chunk(coats: &str, varnish: bool, cracks: bool, relief: bool) -> String {
+    let mut s = String::from(
+        "-- finishing, applied after the session by scripts/finish_painting
+local function when_dry(f)
+  for _ = 1, 120 do
+    local ok, e = pcall(f)
+    if ok then return end
+    if not tostring(e):find('not all dry', 1, true) then error(e, 0) end
+    wait(30 * 24 * 60)
+  end
+  error('still not dry after ten years', 0)
+end",
+    );
+    if varnish {
+        s.push_str(&format!("\nwhen_dry(function() varnish{{coats={coats}}} end)"));
+    }
+    if cracks {
+        s.push_str("\nwhen_dry(function() cracks{} end)");
+    }
+    if relief {
+        s.push_str("\nwhen_dry(function() relief() end)");
+    }
+    s
+}
+
 pub(crate) fn install(lua: &Lua, st: S) -> Result<()> {
     let g = lua.globals();
     let st1 = st.clone();
@@ -54,13 +84,25 @@ pub(crate) fn install(lua: &Lua, st: S) -> Result<()> {
                 (num(o, "coats")?.unwrap_or(0.4), num(o, "vary")?.unwrap_or(0.12), o.get::<Option<u32>>("seed")?.unwrap_or(98))
             }
         };
+        if !(coats.is_finite() && vary.is_finite() && coats >= 0.0 && vary >= 0.0) {
+            return err("varnish: coats and vary must be nonnegative and finite");
+        }
         // brushed over the whole canvas once it is dry
         needs_dry(&st1, "varnish")?;
         time::verb(&st1, Verb::Pass, |s| {
             let var = Fbm::new(s.seed as u32 + seed, 3, 400.0);
             let c = s.canvas.as_mut().ok_or_else(no_canvas)?;
             c.glaze(&Pigment::varnish(hex(MASTIC)), None, |x, y| coats + vary * var.get(x, y));
-            brushed(c, None);
+            // (a varnished surface is glossy: engine 4 shows no matte veil;
+            // no coats, no varnish, and from engine 4 not the hand's time for
+            // brushing it: an older log keeps the time it always had)
+            let laid = coats > 0.0 || vary > 0.0;
+            if laid {
+                c.varnished();
+            }
+            if laid || c.engine() < 4 {
+                brushed(c, None);
+            }
             Ok(())
         })
     })?)?;
@@ -119,5 +161,26 @@ mod tests {
             assert!(e.contains("not all dry yet") && e.contains("wait first"), "{verb}: {e}");
         }
         s.run("wait(90*24*60); varnish()").unwrap();
+    }
+
+    // A varnish of no coats lays nothing: the picture is seen as it was; a
+    // varnish makes a lean, matte passage glossy, and it is seen deeper.
+    #[test]
+    fn a_varnish_of_no_coats_changes_nothing() {
+        let mut s = Session::new(100).unwrap();
+        s.run(r#"canvas{size=300, aspect=1, linen=15,
+                ground={{pile={{"lead white",1}},um=100,apply="knife"}}}"#).unwrap();
+        s.run(r#"b = brush("flat", 60); b:load(pile{{"bone black",1}, blot=0.5}); b:stroke({100,500,900,500}); wait(90*24*60)"#).unwrap();
+        let seen = |s: &Session| -> Vec<u32> { s.canvas().unwrap().seen().iter().flat_map(|p| p.map(f32::to_bits)).collect() };
+        let before = seen(&s);
+        for options in ["coats=0, vary=-1", "coats=-2, vary=0.5"] {
+            let e = s.run(&format!("varnish{{{options}}}")).unwrap_err();
+            assert!(e.contains("must be nonnegative"), "{e}");
+            assert_eq!(before, seen(&s));
+        }
+        s.run("varnish{coats=0, vary=0}").unwrap();
+        assert_eq!(before, seen(&s));
+        s.run("varnish()").unwrap();
+        assert_ne!(before, seen(&s));
     }
 }
