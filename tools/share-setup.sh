@@ -22,8 +22,12 @@ if [ "${1:-}" = --check ]; then
   exit 0
 fi
 
-# the way in: search (not list) through the folders above, so the user can reach the shares and see nothing else
-for d in "$HOME" /Users/Shared; do has "$d" || chmod +a "$U allow search" "$d"; done
+# the way in: search (not list) through the folders above, so the user can reach the shares and see nothing else.
+# Only where it is closed: /Users/Shared is the system's and open to everyone already (drwxrwxrwt)
+for d in "$HOME" /Users/Shared; do
+  if has "$d" || [ "$(stat -f %Sp "$d" | cut -c10)" != - ]; then continue; fi  # 10th: others may search
+  chmod +a "$U allow search" "$d"
+done
 for d in "$DATA" $roots; do
   if has "$d"; then echo "already readable: $d"; continue; fi
   chmod -R +a "$U allow $READ" "$d"
