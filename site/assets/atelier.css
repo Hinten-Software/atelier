@@ -49,10 +49,6 @@ h1, h2 { font-weight: normal; letter-spacing: .02em; }
 .piece img { width: 100%; height: auto; display: block; border: 1px solid var(--line); background: var(--card); cursor: zoom-in; }
 .label { font: 14px/1.6 var(--sans); color: var(--muted); margin: 18px 0 0; }
 .label .title { font: 22px/1.3 var(--serif); color: var(--fg); display: block; margin-bottom: 4px; }
-.words { white-space: pre-wrap; max-width: 38rem; margin: 5vh 0; }
-.words.given { white-space: normal; margin: 3vh 0 5vh; }
-.words.given p { margin: 0 0 .9em; }
-.words h2 { font: 13px var(--sans); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
 .actions { font: 14px var(--sans); margin: 3vh 0; }
 .prose { padding: 6vh 0 10vh; }
 .prose h1 { font-size: 28px; }
@@ -84,7 +80,27 @@ footer nav a { margin-right: 16px; }
 .lightbox .prev { left: 4px; } .lightbox .next { right: 4px; }
 @media (max-width: 640px) { .lightbox { padding: 2vh 8px; } .lightbox .nav { font-size: 40px; padding: 8px; top: auto; bottom: 8px; transform: none; } }
 
-/* a text in full: the notebook, the chapter placed in it */
-.written { max-width: 38rem; margin: 3vh 0; border-top: 1px solid var(--line); padding-top: 14px; }
-.written summary { font: 13px var(--sans); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); cursor: pointer; }
-.written pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 15px/1.6 var(--serif); margin: 14px 0 0; }
+/* what was written: below the paintings, folded under quiet headings; opened, read in a bounded scroll area */
+.texts { max-width: 38rem; margin: 0 0 8vh; }
+.texts:empty { display: none; }
+.texts .aside { margin: 0; padding: 14px 0; border-top: 1px solid var(--line); }
+.written { border-top: 1px solid var(--line); }
+.texts > .written:last-child { border-bottom: 1px solid var(--line); }
+.written summary { font: 13px/1.4 var(--sans); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); cursor: pointer;
+  list-style: none; padding: 14px 1.6em 14px 0; position: relative; }
+.written summary::-webkit-details-marker { display: none; }
+.written summary::after { content: "+"; position: absolute; right: 2px; top: 12px; font: 16px/1.2 var(--sans); letter-spacing: 0; }
+.written[open] summary::after { content: "\2013"; }
+.written summary:hover { color: var(--fg); }
+.written summary:focus-visible, .written .scroll:focus-visible { outline: 1px solid var(--muted); outline-offset: 3px; }
+.written .scroll { max-height: min(60vh, 34rem); overflow-y: auto; overscroll-behavior: contain; margin: 0 0 18px;
+  padding: 18px 22px; background: var(--card); border: 1px solid var(--line); scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+.written pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 15px/1.65 var(--serif); margin: 0; }
+.written .scroll p { font-size: 15px; margin: 0 0 .9em; overflow-wrap: anywhere; }
+.written .scroll p:last-child { margin-bottom: 0; }
+@media (max-width: 640px) { .written .scroll { padding: 14px 14px; max-height: 65vh; } }
+
+/* the short facts of a work: what they were given, their tubes */
+.facts { max-width: 38rem; margin: 0 0 4vh; font: 14px/1.6 var(--sans); color: var(--muted); }
+.facts dt { font-size: 12px; letter-spacing: .14em; text-transform: uppercase; margin-top: 10px; }
+.facts dd { margin: 2px 0 0; font: 16px/1.5 var(--serif); color: var(--fg); overflow-wrap: anywhere; }

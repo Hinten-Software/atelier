@@ -76,9 +76,33 @@ function whileOpen(render) {
   run();
 }
 
-// a text in full, as written (set as text, ATL-13), folded under its heading; open: shown unfolded
-function written(heading, text, open) {
-  return el("details", { class: "written", open: !!open }, el("summary", { textContent: heading }), el("pre", { textContent: text.trim() }));
+// a text in full, as written (set as text, ATL-13), folded under a quiet heading below the paintings; opened, it
+// reads in a bounded scroll area instead of pushing the page on. text: a string, or paragraphs already made
+function written(heading, text) {
+  const area = el("div", { class: "scroll", tabIndex: 0, "aria-label": heading },
+    ...(typeof text === "string" ? [el("pre", { textContent: text.trim() })] : text));
+  area.setAttribute("role", "region");  // focusable, so it scrolls from the keyboard too
+  return el("details", { class: "written" }, el("summary", { textContent: heading }), area);
+}
+
+// texts that live through the minute's refresh: a block whose words did not change is the same node, left in place
+// (open or folded, scrolled where the reader left it); one that changed is made anew, open if the reader had it open
+const kept = new Map();  // key -> {sig, node}
+function steady(box, blocks) {  // blocks: [key, sig, make]
+  const keys = new Set(blocks.map(([key]) => key));
+  for (const key of kept.keys()) if (!keys.has(key)) kept.delete(key);
+  const nodes = blocks.map(([key, sig, make]) => {
+    const old = kept.get(key);
+    if (old && old.sig === sig) return old.node;
+    const node = make();
+    if (old && old.node.open && node.tagName === "DETAILS") node.open = true;
+    kept.set(key, { sig, node });
+    return node;
+  });
+  if (nodes.length === box.children.length && nodes.every((n, i) => box.children[i] === n)) return;  // nothing moved
+  const at = nodes.map((n) => n.querySelector(".scroll")?.scrollTop || 0);
+  box.replaceChildren(...nodes);
+  nodes.forEach((n, i) => { const s = n.querySelector(".scroll"); if (s && at[i]) s.scrollTop = at[i]; });
 }
 
 function label(w) {
@@ -142,16 +166,22 @@ async function walls() {
   const atBirth = [];
   for (let n = birth.walls_at_birth || 0; n >= 1; n--) atBirth.push({ src: `/studio/data/walls-${a}/${n}.jpg`, title: String(n) });
   const all = [...items, ...atBirth];
+  // below the walls, folded: what was written. The paintings come first; the words wait until someone asks for them
+  const texts = [];
+  const last = done[0];
+  if (last && last.notebook) texts.push(["notebook", `${last.number}\n${last.notebook}`,
+    () => written(`Their notebook, as they left it after work ${last.number}`, last.notebook)]);
   if (birth.temperament_note) {  // the owner's note for visitors: a heading line, then paragraphs, set as text (ATL-13)
     const [head, ...rest] = birth.temperament_note.split(/\n/);
     const paras = rest.join("\n").split(/\n\s*\n/).map((x) => x.trim()).filter(Boolean);
-    easel.append(paras.length
-      ? el("section", { class: "words given" }, el("h2", { textContent: head }), ...paras.map((x) => el("p", { textContent: x })))
-      : el("p", { class: "state", textContent: head }));
+    texts.push(["note", birth.temperament_note, () => paras.length
+      ? written(head, paras.map((x) => el("p", { textContent: x })))
+      : el("p", { class: "state aside", textContent: head })]);
   }
-  if (birth.temperament_text) easel.append(written("The chapter, as placed", birth.temperament_text, true));
-  const last = works.filter((w) => w.finished).sort((x, y) => y.number - x.number)[0];
-  if (last && last.notebook) easel.append(written(`Their notebook, as they left it after work ${last.number}`, last.notebook));
+  if (birth.temperament_text) texts.push(["chapter", birth.temperament_text, () => written("The chapter, as placed", birth.temperament_text)]);
+  let tbox = document.getElementById("texts");  // a page cached from before it had one: made beside the walls
+  if (!tbox) document.getElementById("walls").after(tbox = el("section", { class: "texts", id: "texts", "aria-label": "What was written" }));
+  steady(tbox, texts);
   const box = document.getElementById("walls");
   const kids = [];
   if (!all.length) kids.push(el("p", { class: "empty", textContent: "The walls are bare." }));
@@ -181,12 +211,17 @@ async function work() {
   const img = el("img", { src: finalImg(w), alt: w.title || "Untitled", onclick: () => lightbox([{ src: finalImg(w), title: w.title || "Untitled" }], 0) });
   box.append(el("div", { class: "piece" }, img, label(w)));
   box.append(el("p", { class: "actions" }, el("a", { href: `/studio/?p=${encodeURIComponent(w.viewer)}`, textContent: "Watch it being painted" })));
-  if (w.theme) box.append(el("div", { class: "words" }, el("h2", { textContent: "They were given" }), el("p", { textContent: w.theme })));
+  // short facts stay in sight, quietly; the long texts wait, folded, below
+  const facts = el("dl", { class: "facts" });
+  if (w.theme) facts.append(el("dt", { textContent: "They were given" }), el("dd", { textContent: w.theme }));
   // a work painted from a box of fewer tubes than all of them (atelier paint --box): said as a theme is
-  if (w.box && w.box !== "every") box.append(el("div", { class: "words" }, el("h2", { textContent: "Their tubes" }),
-    el("p", { textContent: `The ${w.box} box, not all fifty-four. The painter wasn't told its name.` })));
-  if (w.reply) box.append(el("div", { class: "words" }, el("h2", { textContent: "The painter's words" }), el("p", { textContent: plain(w.reply) })));
-  if (w.notebook) box.append(written("Their notebook after this painting", w.notebook));
+  if (w.box && w.box !== "every") facts.append(el("dt", { textContent: "Their tubes" }),
+    el("dd", { textContent: `The ${w.box} box, not all fifty-four. The painter wasn't told its name.` }));
+  if (facts.children.length) box.append(facts);
+  const texts = el("div", { class: "texts" });
+  if (w.reply) texts.append(written("The painter's words", plain(w.reply)));
+  if (w.notebook) texts.append(written("Their notebook after this painting", w.notebook));
+  if (texts.children.length) box.append(texts);
 }
 
 // ---- notes: one guestbook for the whole atelier (/notes/). Plain text in, plain text out (ATL-13).
