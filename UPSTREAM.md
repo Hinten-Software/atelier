@@ -11,6 +11,10 @@ What we take, and where it lives here: `tools/upstream/map.txt`. Not taken: the 
 painters and motifs (they steer a painter's subject), the pi harness's runner (painter.ts, its prompt and
 compaction), her rounds, records, archive and paintings.
 
+In touch: https://github.com/aliceisjustplaying/claude-paint/issues/37 (2026-10-10): the atelier introduced, the
+scratch-canvas classifier finding and the borderline rag test reported, and a question whether she'd take the width
+as an option (`--@ width`, her default 2400). If she does, "The atelier's changes" below shrink.
+
 ## Taking a newer claude-paint
 
 She develops actively; this is routine. In a worktree of its own (the runner paints from `main`'s files):
