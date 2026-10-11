@@ -188,6 +188,10 @@ class Work:
                     self.set("not-finished", why="the work's budget ceiling")
                 elif why:
                     self.close(why)
+                elif (until := standing_until()) and datetime.now().astimezone() >= until:
+                    # the owner's go has ended: no new sitting (one already going finishes); the work stays open
+                    log(f"{self.id}: the standing go ended {until:%F %H:%M}; no new sitting, the runner stops, the work stays open")
+                    raise SystemExit(0)
                 else:
                     self.sitting()
             elif st == "limit-wait":

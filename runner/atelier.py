@@ -186,6 +186,9 @@ def cmd_tick(a):
     from datetime import datetime
     import budget
     if not STANDING.exists() or datetime.now().astimezone() >= datetime.fromisoformat(STANDING.read_text().strip()):
+        if budget.OPEN.exists():  # the go the studios were opened for has ended: the night window and the cap again
+            budget.OPEN.unlink()
+            event(f"the owner's go has ended: painting window {budget.WINDOW} and ${budget.DAILY_USD:.0f} a day again")
         return
     w = open_work()
     if w:

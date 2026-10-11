@@ -66,6 +66,8 @@ def main():
               and budget.window() == "23-7" and budget.daily_cap() == budget.DAILY_USD, budget.window())
         budget.WINDOW = "always"
         (DATA / "run" / "until").write_text("2000-01-01T00:00:00+00:00\n")
+        opened.touch()
+        check("the go ended: the studios are closed again", tick() == [] and not opened.exists())
         left.write_text("1\n")
         check("after the standing go: nothing starts, the count is kept", tick() == [] and left.read_text().strip() == "1")
     finally:
