@@ -32,6 +32,8 @@ await check("absolute path refused", "read", { path: "/etc/hosts" }, (t, e) => e
 await check("link out refused", "read", { path: "walls/escape/hosts" }, (t, e) => e);
 await check("binary refused", "read", { path: "walls/blob" }, (t, e) => e && t.includes("isn't text"));
 await check("folder listing", "read", { path: "walls" }, (t, e) => !e && t.includes("1 Test Study"));
+// Claude Code puts a reply of about 50 KB in a file and shows a preview: no reply may come near it (the guide is 51 KB)
+await check("the guide is read in parts under 40 KB", "read", { path: "easel guide" }, (t, e) => !e && t.length < 40_000 && t.includes("read on with offset"));
 await check("a painting on the walls is an image", "read", { path: "walls/1 Test Study" }, (t, e) => !e && t.includes("[image]"));
 await check("paintings/ refused", "read", { path: "paintings/lua/painting.lua" }, (t, e) => e);
 await check("long file is capped", "read", { path: "easel guide" }, (t, e) => !e && t.length <= 61_000);

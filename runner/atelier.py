@@ -8,6 +8,7 @@
     atelier resume [--clear REASON]            continue an interrupted work (a person, after a reboot or a crash);
                                                --clear: continue a work the white-room audit stopped (logged)
     atelier next                               whose turn it is (fewest works)
+    atelier withdraw --why TEXT                end the open work stopped by the audit as not finished, private (logged)
     atelier tick                               (launchd, every 10 minutes) the owner's standing go: resume or start
     atelier export                             export the site now (the runner does every 2 minutes during a work)
     atelier serve [--host H] [--port P]        serve the export on the LAN
@@ -89,7 +90,7 @@ def cmd_paint(a):
     if not CLAUDE.exists():
         raise SystemExit(f"no pinned Claude Code at {CLAUDE} (RUN-15)")
     from config import DEFAULT_BOX, boxes
-    box = a.box or DEFAULT_BOX
+    box = getattr(a, "box", None) or DEFAULT_BOX  # (the tick gives no box: the default)
     if box not in boxes():
         raise SystemExit(f"no box {box!r}; the boxes: {', '.join(boxes())} (tools/build-engine.sh builds them)")
     w = Work.create(Artist(a.artist), a.theme, a.by, box)
@@ -195,6 +196,13 @@ def cmd_tick(a):
         if runner_alive(w) or w.state["state"] in TERMINAL:
             return
         if w.state["state"] == "stopped":
+            if classifier_misfire(w) and auto_withdrawn_today() < 3:
+                # Claude's own safety classifier stopped the painter's first reply before any paint was laid: its notice
+                # reached the model, so the audit stopped the sitting. Nothing of the work exists yet; it is withdrawn
+                # (logged, private) and the next work starts (the owner, 2026-10-10; at most 3 a day)
+                cmd_withdraw(argparse.Namespace(why="auto: Claude's safety classifier stopped the painter's first reply, "
+                                                    "before any paint was laid"))
+                return
             log(f"tick: {w.id} was stopped by the white-room audit; it waits for a person")
             return
         log(f"tick: {w.id} has no runner; resuming it")
@@ -220,6 +228,45 @@ def cmd_tick(a):
     if starts is not None:
         STARTS_LEFT.write_text(f"{starts - 1}\n")  # used up before the start: a start that fails is not retried forever
     cmd_paint(argparse.Namespace(artist=id, theme=None, by="owner"))
+
+
+def classifier_misfire(w: Work) -> bool:
+    """Stopped only because Claude's safety classifier's notice reached the model, in its first sitting, no chunk run."""
+    hits, sittings = w.state.get("hits") or [], w.state.get("sittings") or []
+    painted = (w.artist.studio / "paintings" / "lua" / "painting.lua")
+    return (len(sittings) == 1 and bool(hits) and all("safety classifier" in h for h in hits)
+            and not (painted.exists() and "--@ chunk" in painted.read_text()))
+
+
+def auto_withdrawn_today() -> int:
+    from datetime import date
+    h = DATA / "history.md"
+    return sum(1 for l in (h.read_text().splitlines() if h.exists() else [])
+               if l.startswith(f"- {date.today():%Y-%m-%d}") and "withdrawn by the tick, not finished: auto:" in l)
+
+
+def cmd_withdraw(a):
+    """A work the audit stopped, ended by a person instead of resumed: not finished, contaminated (never public), its
+    reason in its manifest and in history.md. Its notebook edits were rolled back when it stopped."""
+    from works import now
+    w = open_work()
+    if not w:
+        raise SystemExit("no open work")
+    if w.state["state"] != "stopped":
+        raise SystemExit(f"{w.id} is {w.state['state']}: only a work the audit stopped is withdrawn")
+    subprocess.run([str(w.artist.studio / "bin" / "easel"), "close"], cwd=w.artist.studio, capture_output=True, timeout=120)
+    s = w.state
+    manifest = {"id": w.id, "artist": s["artist"], "studio": w.artist.name, "number": s["number"], "title": None,
+                "mode": s["mode"], "theme": s["theme"], "box": s.get("box"), "started_by": s["started_by"],
+                "start": s["created"], "end": now(), "pauses": s.get("pauses", []),
+                "sittings": [{k: r.get(k) for k in ("n", "start", "end", "how")} for r in s["sittings"]],
+                "audit_hits": s["hits"], "contaminated": True, "replay": None, "replay_verified": False,
+                "finished": False, "why": f"withdrawn: {a.why}"}
+    (w.pkg / "manifest.json").write_text(json.dumps(manifest, indent=1))
+    w.set("not-finished", why=f"withdrawn: {a.why}")
+    CURRENT.unlink(missing_ok=True)
+    event(f"work {w.id} withdrawn by {'the tick' if a.why.startswith('auto:') else 'a person'}, not finished: {a.why}")
+    print(f"{w.id} withdrawn; the next work can start")
 
 
 def cmd_boxes(a):
@@ -263,6 +310,8 @@ def main():
     sv.add_argument("--port", type=int, default=8800)
     sub.add_parser("export")
     sub.add_parser("boxes")
+    wd = sub.add_parser("withdraw")
+    wd.add_argument("--why", required=True)
     sub.add_parser("sync")
     sub.add_parser("backup")
     a = p.parse_args()
