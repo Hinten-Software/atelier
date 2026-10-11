@@ -32,7 +32,9 @@ ACCEPTED = {
                               r" - Platform: darwin\n - Shell: [\w./-]+\n - OS Version: [\w. ]+\n</system-reminder>$"),
     "model": re.compile(r"(?s)^<system-reminder>\nYou are powered by the model named [\w. ]+\. The exact model ID is "
                         r"[\w-]+\. Assistant knowledge cutoff is \w+ \d{4}\.\n</system-reminder>$"),
-    "date": re.compile(r"^<system-reminder>\nToday's date is \d{4}-\d{2}-\d{2}\.\n</system-reminder>$"),
+    # ... and, in a sitting that runs past midnight, its notice of the new date (ii-007, 2026-10-11)
+    "date": re.compile(r"^<system-reminder>\n(?:Today's date is \d{4}-\d{2}-\d{2}\.|The date has changed\. Today's date is now "
+                       r"\d{4}-\d{2}-\d{2}\. No need to announce the new date — the user's own clock shows it\.)\n</system-reminder>$"),
     "session_context": "", "credential_org": "", "prompt_snapshot": "", "thinking_drop": "",
 }
 

@@ -463,6 +463,7 @@ def title_of(say):
     """The painting's title from the painter's last words; None if there is none. A label ("**Note:**") or a
     heading-like phrase ending in a colon is never a title (atelier QA Q17)."""
     t = _title_of(say)
+    t = t and t.strip("\"'“”‘’ ") or None  # **"Title"**: the quotes are not the title's
     return None if t is None or t.endswith(":") or t.lower() in ("note", "notes", "why i stopped") else t
 
 
@@ -470,6 +471,8 @@ def _title_of(say):
     # the atelier's painters most often name it in their first sentence: "... and called it **Estuary, Last Light**."
     first = next((p for p in re.split(r"\n\s*\n", say or "") if p.strip()), "")
     m = re.search(r"\b(?:call(?:ed|ing)?|titled?|titling|nam(?:ed|ing|e))\s+(?:it\s+)?\*\*([^*\n]{2,80})\*\*", first)
+    # ... or announce it: "The painting is finished: **"Pear Tree in Blossom"**" (i-005)
+    m = m or re.search(r"\b(?:finished|complete[d]?):\s*\*\*([^*\n]{2,80})\*\*", first)
     if m:
         return m.group(1).strip()
     m = TITLE.match(say or "")

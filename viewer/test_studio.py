@@ -331,6 +331,9 @@ def test_the_brief_names_the_artist_and_whose_paintings_the_reference_pictures_a
     ("**The Blue Barn**\n\nA barn at dusk.", "The Blue Barn"),
     # a sign-off line first, the title alone on the next paragraph (Space Bunny, paint-studio-ba1453)
     ("I'm stopping here. The painting is finished as far as I can take it.\n\n**Quinces, Raking Light**\n\nA low-key still life.", "Quinces, Raking Light"),
+    # announced with a colon, in quotes inside the bold (atelier i-005)
+    ('The painting is finished: **"Pear Tree in Blossom"**\n\nIt\'s a spring morning.', "Pear Tree in Blossom"),
+    ("I'm done for today: **more glazes** tomorrow, I think.", None),
     ("I'll start by reading the brief.", None),
     ("Next I'll **glaze** the sky.\n\nThen the trees.", None),
 ])
