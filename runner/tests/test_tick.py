@@ -70,6 +70,31 @@ def main():
         check("the go ended: the studios are closed again", tick() == [] and not opened.exists())
         left.write_text("1\n")
         check("after the standing go: nothing starts, the count is kept", tick() == [] and left.read_text().strip() == "1")
+        left.unlink()
+        (DATA / "run" / "until").write_text("2099-01-01T00:00:00+00:00\n")
+        # a work the audit stopped (not Claude's classifier): in the window it is set aside so the night goes on,
+        # outside it waits for a person (the owner, 2026-10-11)
+        stopped = type("W", (), {"id": "ii-007", "state": {"state": "stopped", "hits": ["attachment 'date' differs"]}})()
+        withdrawn = []
+        atelier.open_work = lambda: stopped
+        atelier.runner_alive = lambda w: False
+        atelier.classifier_misfire = lambda w: False
+        atelier.cmd_withdraw = lambda a: withdrawn.append(a.why)
+        budget.WINDOW = "always"
+        check("a stop in the window is set aside", tick() == [] and len(withdrawn) == 1
+              and withdrawn[0].startswith("auto: set aside") and "date" in withdrawn[0], withdrawn)
+        budget.in_window = lambda: False
+        withdrawn.clear()
+        check("a stop outside the window waits for a person", tick() == [] and not withdrawn)
+        # a failed export is tried again by the tick
+        exported = []
+        atelier.export_now = lambda: exported.append(1)
+        (DATA / "run" / "export-failed").write_text("x\n")
+        tick()
+        check("a failed export is tried again", exported == [1])
+        (DATA / "run" / "export-failed").unlink()
+        tick()
+        check("... and not when the last one went well", exported == [1])
     finally:
         shutil.rmtree(DATA, ignore_errors=True)
     print("all passed" if not failed else f"{failed} failed")

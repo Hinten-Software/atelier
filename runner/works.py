@@ -39,6 +39,8 @@ KILL_GRACE = 30        # seconds between SIGTERM and SIGKILL (QA Q21)
 STANDING = DATA / "run" / "until"  # the owner's standing go: an ISO time until which the studios paint in turn
 # ... and, if this file is there, how many new works it may still start (the owner, 2026-10-10: "iii-003 plus one")
 STARTS_LEFT = DATA / "run" / "starts-left"
+# there while the last export failed: the tick tries again, the morning report tells (runner/report.py)
+EXPORT_FAILED = DATA / "run" / "export-failed"
 
 
 def standing_until() -> datetime | None:
@@ -428,6 +430,9 @@ def export_now():
                        capture_output=True, text=True, env=os.environ | {"ATELIER_DATA": str(DATA)})
     if r.returncode:
         log(f"export failed ({r.returncode}): {(r.stderr or r.stdout).strip()[:500]}")
+        EXPORT_FAILED.write_text(f"{time.strftime('%F %T')} {(r.stderr or r.stdout).strip()[:500]}\n")
+    else:
+        EXPORT_FAILED.unlink(missing_ok=True)
 
 
 class Exporter(threading.Thread):

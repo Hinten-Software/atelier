@@ -24,7 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import CLAUDE, DATA, REPO, TOKEN  # noqa: E402
 from studio import Artist, birth, registry  # noqa: E402
-from works import CURRENT, RUN, STANDING, STARTS_LEFT, TERMINAL, Work, event, log  # noqa: E402
+from works import CURRENT, EXPORT_FAILED, RUN, STANDING, STARTS_LEFT, TERMINAL, Work, event, export_now, log  # noqa: E402
 
 
 def alive(pid: int) -> bool:
@@ -183,9 +183,12 @@ def cmd_backup(a):
 def cmd_tick(a):
     """The owner's standing go (2026-10-07: all three studios, in turn, at night, within the budget, until the time in
     DATA/run/until). Run every 10 minutes by launchd (deploy/mac/): resumes a work a reboot cut off, else starts the
-    next studio's work when the window is open and today's budget allows. Never clears an audit stop."""
+    next studio's work when the window is open and today's budget allows. An audit stop is never cleared: in the
+    window it is set aside (withdrawn) so the night goes on, else it waits for a person. A failed export is tried again."""
     from datetime import datetime
     import budget
+    if EXPORT_FAILED.exists() and not ((w := open_work()) and runner_alive(w)):  # a running work exports on its own
+        export_now()
     if not STANDING.exists() or datetime.now().astimezone() >= datetime.fromisoformat(STANDING.read_text().strip()):
         if budget.OPEN.exists():  # the go the studios were opened for has ended: the night window and the cap again
             budget.OPEN.unlink()
@@ -202,6 +205,13 @@ def cmd_tick(a):
                 # (logged, private) and the next work starts (the owner, 2026-10-10; at most 3 a day)
                 cmd_withdraw(argparse.Namespace(why="auto: Claude's safety classifier stopped the painter's first reply, "
                                                     "before any paint was laid"))
+                return
+            if budget.in_window() and auto_withdrawn_today() < 3:
+                # any other stop, once the night's painting time has come: set aside (withdrawn, never public) so the
+                # night goes on with the next studio; the morning report names it (the owner, 2026-10-11, after ii-007
+                # held the queue from midnight to the end). Outside the window it waits for a person, as before.
+                hit = (w.state.get("hits") or ["?"])[0]
+                cmd_withdraw(argparse.Namespace(why=f"auto: set aside so the night goes on; the audit had stopped it: {hit[:200]}"))
                 return
             log(f"tick: {w.id} was stopped by the white-room audit; it waits for a person")
             return

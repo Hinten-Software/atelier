@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The morning report (runner/report.py): at 07:30, what the night did and what needs a person, as a notification
+     and DATA/run/reports/<date>.md. Install as atelier.tick.plist is (HOME_DIR replaced by the user's home). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>atelier.report</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/opt/python@3.13/libexec/bin/python3</string>
+    <string>HOME_DIR/dev/atelier/runner/report.py</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>30</integer></dict>
+  <key>WorkingDirectory</key><string>HOME_DIR/atelier-data</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/opt/homebrew/opt/python@3.13/libexec/bin:/opt/homebrew/bin:/usr/bin:/bin</string></dict>
+  <key>StandardOutPath</key><string>HOME_DIR/atelier-data/run/report.log</string>
+  <key>StandardErrorPath</key><string>HOME_DIR/atelier-data/run/report.log</string>
+</dict>
+</plist>

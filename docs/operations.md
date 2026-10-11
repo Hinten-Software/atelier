@@ -85,11 +85,20 @@ every); the painter is never told a box's name.
 - **Present the repository**: README for visitors, screenshots, a first release.
 - **Optional WAF rule** against scanner noise (.env, wp-, .php paths), if the stats get too noisy.
 
-## The standing go (2026-10-07 to 2026-10-11)
+## The standing go (since 2026-10-07; renewed 2026-10-11 until 2026-11-01)
 
 `atelier tick` (deploy/mac/atelier.tick.plist, a LaunchAgent, every 10 minutes and at login) carries the owner's
 standing go: until the time in DATA/run/until, it resumes a work a reboot cut off, and otherwise starts the next
 studio's work (fewest works first) when the night window is open and today's budget allows. It never clears an audit
-stop. If DATA/run/starts-left holds a number, the tick starts only that many new works and counts down (the
+stop: in the painting window it sets the stopped work aside (withdrawn, never public, at most 3 a day) so the night
+goes on; outside the window the stop waits for a person. A failed export (DATA/run/export-failed) is tried again. If DATA/run/starts-left holds a number, the tick starts only that many new works and counts down (the
 open work goes on regardless). To end it early: `launchctl unload ~/Library/LaunchAgents/atelier.tick.plist` (or delete DATA/run/until).
 
+## The morning report
+
+`runner/report.py` (deploy/mac/atelier.report.plist, a LaunchAgent, 07:30) reads what the runner wrote in the last
+24 hours and changes nothing: the works that ended (title, replay check, cost), the stops and set-asides, the open
+work, the standing go's end, the spend, the site sync and the backup. It ends with "Needs a person": nothing, or a
+short list (an untitled or unverified painting, a set-aside to judge, a stop waiting, a failing export or NAS copy,
+a go about to end). It is saved as DATA/run/reports/<date>.md and shown as a macOS notification. On demand:
+`python3 runner/report.py`.
