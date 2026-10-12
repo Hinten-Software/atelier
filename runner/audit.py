@@ -116,6 +116,10 @@ class Replies:
 # without `text`). The easel's eight tools only; anything else in that form is still a hit.
 OWN_ARGUMENT_ERROR = re.compile(r"MCP error -32602: Input validation error: Invalid arguments for tool "
                                 r"(paint|look|note|status|log|read|write|edit): [^\n]{0,600}", re.S)
+# Claude Code's answer to a call by a name it has no tool for (ii-008, 2026-10-12: `note` for `mcp__easel__note`): it
+# carries only the name the painter wrote, so nothing from outside. The exact form, a plain tool name; anything else
+# in a tool_use_error is still a hit.
+NO_SUCH_TOOL = re.compile(r"<tool_use_error>Error: No such tool available: [A-Za-z0-9_-]{1,64}</tool_use_error>")
 
 
 def _tool_result(x: dict, config_dir: Path, replies: Replies | None) -> list[str]:
@@ -135,7 +139,8 @@ def _tool_result(x: dict, config_dir: Path, replies: Replies | None) -> list[str
             elif p.get("type") != "image":
                 return [f"a {p.get('type')!r} part in a tool result"]
     hits = [h for t in texts for h in private_hits(t)]
-    if replies is not None and not (OWN_ARGUMENT_ERROR.fullmatch(" ".join(texts)) or replies.take(texts)):
+    own = " ".join(texts)
+    if replies is not None and not (OWN_ARGUMENT_ERROR.fullmatch(own) or NO_SUCH_TOOL.fullmatch(own) or replies.take(texts)):
         hits.append(f"a tool result the easel didn't send: {' | '.join(texts)[:300]!r}")
     return hits
 
