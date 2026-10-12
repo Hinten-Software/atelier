@@ -386,7 +386,7 @@ class Work:
             "sittings": [{k: r.get(k) for k in ("n", "start", "end", "how", "date_shown", "message")} for r in self.state["sittings"]],
             "model": a_model(a), "model_seen": model_seen(self.state["sittings"]), "effort": a_effort(a),
             "claude_code": CLAUDE_VERSION, "hashes": self.state["hashes"], "audit_hits": self.state["hits"],
-            "contaminated": bool(self.state.get("contaminated")), "replay": self.state.get("verdict"),
+            "contaminated": bool(self.state.get("contaminated")), "restarted": self.state.get("restarted", []), "replay": self.state.get("verdict"),
             "replay_verified": self.state.get("verified", False),
             "final_sha256": sha256(pkg / "final.png") if (pkg / "final.png").exists() else None,
             "finished": finished,  # written last: only once it hangs (QA Q8)

@@ -89,7 +89,9 @@ every); the painter is never told a box's name.
 
 `atelier tick` (deploy/mac/atelier.tick.plist, a LaunchAgent, every 10 minutes and at login) carries the owner's
 standing go: until the time in DATA/run/until, it resumes a work a reboot cut off, and otherwise starts the next
-studio's work (fewest works first) when the night window is open and today's budget allows. It never clears an audit
+studio's work (fewest works first) when the night window is open and today's budget allows. If Claude's safety classifier stopped a work's
+first reply before any paint was laid, the same work starts afresh in a new session (twice at most; then it is set
+aside). It never clears any other audit
 stop: in the painting window it sets the stopped work aside (withdrawn, never public, at most 3 a day) so the night
 goes on; outside the window the stop waits for a person. A failed export (DATA/run/export-failed) is tried again. If DATA/run/starts-left holds a number, the tick starts only that many new works and counts down (the
 open work goes on regardless). To end it early: `launchctl unload ~/Library/LaunchAgents/atelier.tick.plist` (or delete DATA/run/until).

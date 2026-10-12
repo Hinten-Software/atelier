@@ -199,10 +199,16 @@ def cmd_tick(a):
         if runner_alive(w) or w.state["state"] in TERMINAL:
             return
         if w.state["state"] == "stopped":
-            if classifier_misfire(w) and auto_withdrawn_today() < 3:
+            if classifier_misfire(w) and len(w.state.get("restarted") or []) < RESTARTS:
                 # Claude's own safety classifier stopped the painter's first reply before any paint was laid: its notice
-                # reached the model, so the audit stopped the sitting. Nothing of the work exists yet; it is withdrawn
-                # (logged, private) and the next work starts (the owner, 2026-10-10; at most 3 a day)
+                # reached the model, so the audit stopped the sitting. Nothing of the work exists yet, so the same work
+                # starts afresh in a new session that has seen none of it (the owner, 2026-10-12: about 1 start in 60,
+                # runner/startprobe.py)
+                restart(w)
+                return
+            if classifier_misfire(w) and auto_withdrawn_today() < 3:
+                # ... and stopped again after RESTARTS fresh starts: withdrawn (logged, private) and the next work starts
+                # (the owner, 2026-10-10; at most 3 a day)
                 cmd_withdraw(argparse.Namespace(why="auto: Claude's safety classifier stopped the painter's first reply, "
                                                     "before any paint was laid"))
                 return
@@ -248,6 +254,24 @@ def classifier_misfire(w: Work) -> bool:
             and not (painted.exists() and "--@ chunk" in painted.read_text()))
 
 
+RESTARTS = 2  # fresh starts for a work whose first reply Claude's classifier stopped, before it is set aside
+
+
+def restart(w: Work):
+    """A work whose first sitting Claude's classifier stopped before any paint was laid (classifier_misfire) starts
+    afresh: a new session and the first message, as if the stopped sitting had not been. Nothing of it reaches the new
+    one: the sitting's writes to the notebook, toolkit and journal were rolled back when it stopped, and no chunk ran.
+    The stopped sitting and its hits are kept in state["restarted"], the manifest and history.md."""
+    subprocess.run([str(w.artist.studio / "bin" / "easel"), "close"], cwd=w.artist.studio, capture_output=True, timeout=120)
+    s = w.state
+    s.setdefault("restarted", []).append({"sittings": s["sittings"], "hits": s["hits"]})
+    s.update(sittings=[], hits=[], contaminated=False)
+    w.set("prepared")
+    event(f"work {w.id} started afresh by the tick (fresh start {len(s['restarted'])} of {RESTARTS}): Claude's safety "
+          "classifier had stopped the painter's first reply, before any paint was laid")
+    detach(w)
+
+
 def auto_withdrawn_today() -> int:
     from datetime import date
     h = DATA / "history.md"
@@ -270,7 +294,7 @@ def cmd_withdraw(a):
                 "mode": s["mode"], "theme": s["theme"], "box": s.get("box"), "started_by": s["started_by"],
                 "start": s["created"], "end": now(), "pauses": s.get("pauses", []),
                 "sittings": [{k: r.get(k) for k in ("n", "start", "end", "how")} for r in s["sittings"]],
-                "audit_hits": s["hits"], "contaminated": True, "replay": None, "replay_verified": False,
+                "audit_hits": s["hits"], "contaminated": True, "restarted": s.get("restarted", []), "replay": None, "replay_verified": False,
                 "finished": False, "why": f"withdrawn: {a.why}"}
     (w.pkg / "manifest.json").write_text(json.dumps(manifest, indent=1))
     w.set("not-finished", why=f"withdrawn: {a.why}")

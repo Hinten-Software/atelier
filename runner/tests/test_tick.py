@@ -86,6 +86,34 @@ def main():
         budget.in_window = lambda: False
         withdrawn.clear()
         check("a stop outside the window waits for a person", tick() == [] and not withdrawn)
+        # Claude's classifier stopped the first reply: the same work starts afresh, twice at most, then is set aside
+        studio = DATA / "studio"
+        (studio / "bin").mkdir(parents=True)
+        (studio / "bin" / "easel").write_text("#!/bin/sh\n")
+        (studio / "bin" / "easel").chmod(0o755)
+        events, detached = [], []
+        misfit = type("W", (), {"id": "iii-007", "artist": type("A", (), {"studio": studio})(),
+                                "set": lambda self, st: self.state.update(state=st)})()
+        misfit.state = {"state": "stopped", "sittings": [{"n": 1, "how": "audit"}], "hits": ["a safety classifier's notice"],
+                        "contaminated": True}
+        atelier.open_work = lambda: misfit
+        atelier.classifier_misfire = lambda w: True
+        atelier.event = events.append
+        atelier.detach = detached.append
+        budget.in_window = lambda: True
+        withdrawn.clear()
+        tick()
+        s = misfit.state
+        check("a classifier stop starts the work afresh", s["state"] == "prepared" and detached == [misfit] and not withdrawn
+              and s["sittings"] == [] and s["hits"] == [] and not s["contaminated"], s)
+        check("... the stopped sitting is kept, and logged", len(s["restarted"]) == 1
+              and s["restarted"][0]["hits"] == ["a safety classifier's notice"] and "afresh" in events[-1], events)
+        s.update(state="stopped", sittings=[{"n": 1, "how": "audit"}], hits=["a safety classifier's notice"])
+        tick()
+        check("a second one: afresh again", s["state"] == "prepared" and len(s["restarted"]) == 2 and not withdrawn)
+        s.update(state="stopped", sittings=[{"n": 1, "how": "audit"}], hits=["a safety classifier's notice"])
+        tick()
+        check("a third: set aside", len(withdrawn) == 1 and "classifier" in withdrawn[0] and len(s["restarted"]) == 2, withdrawn)
         # a failed export is tried again by the tick
         exported = []
         atelier.export_now = lambda: exported.append(1)
