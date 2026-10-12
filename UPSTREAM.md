@@ -14,6 +14,9 @@ compaction), her rounds, records, archive and paintings.
 In touch: https://github.com/aliceisjustplaying/claude-paint/issues/37 (2026-10-10): the atelier introduced, the
 scratch-canvas classifier finding and the borderline rag test reported, and a question whether she'd take the width
 as an option (`--@ width`, her default 2400). If she does, "The atelier's changes" below shrink.
+2026-10-12, a follow-up there: measured with `runner/startprobe.py`, her `scratch` description stopped 32 of 60 starts,
+ours 1 of 60; a small PR with the wording offered. If her description changes, ours goes (server.ts and below) and
+the probe runs again on the merged tools.
 
 ## Taking a newer claude-paint
 
