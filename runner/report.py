@@ -70,13 +70,14 @@ def report(hours: float) -> tuple[str, list[str]]:
 
     # the atelier's events: stops, set-asides, the go
     events = stamped(DATA / "history.md", since, "- ")
-    notable = [(t, x) for t, x in events if re.search(r"stopped by|withdrawn|set aside|go has ended|run is done|ceiling", x)]
+    notable = [(t, x) for t, x in events if re.search(r"^work \S+ (sitting \d+ stopped by|withdrawn|started afresh)|go has ended|"
+                                                      r"run is done|ceiling", x)]
     if notable:
         lines += ["", "## Events"] + [f"- {t:%a %H:%M} {x[:300]}" for t, x in notable]
     for t, x in notable:
-        if "set aside" in x:
-            needs.append(f"{x.split(' withdrawn')[0].removeprefix('work ')} was set aside after an audit stop: "
-                         "is the stop a rule to fix?")
+        # only the tick's own set-aside line (an event that merely mentions one, e.g. a rule fixed, is not)
+        if m := re.match(r"work (\S+) withdrawn by the tick, not finished: auto: set aside", x):
+            needs.append(f"{m.group(1)} was set aside after an audit stop: is the stop a rule to fix?")
 
     # what is open now
     lines += ["", "## Now"]
