@@ -72,7 +72,13 @@ footer nav a { margin-right: 16px; }
 
 /* a painting, close up */
 .lightbox { position: fixed; inset: 0; z-index: 50; background: rgba(12, 11, 10, .94); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 3vh 64px 2vh; cursor: zoom-out; outline: none; }
-.lightbox img { max-width: 100%; max-height: calc(100vh - 110px); object-fit: contain; display: block; }
+/* whole: as large as the window allows, and on a zoomed page no smaller than 600 px, so browser zoom enlarges it too */
+.lightbox img { max-width: max(100%, 600px); max-height: max(calc(100vh - 110px), 600px); object-fit: contain; display: block; }
+.lightbox { overflow: auto; overscroll-behavior: contain; }
+/* full size: every pixel of the painting, moved about in by scrolling; the caption and arrows wait */
+.lightbox.full { display: block; padding: 0; }
+.lightbox.full img { max-width: none; max-height: none; height: auto; margin: 0 auto; }
+.lightbox.full .cap, .lightbox.full .nav { display: none; }
 .lightbox .cap { color: #e9e5dc; font: 15px var(--serif); margin: 14px 0 0; text-align: center; }
 .lightbox .cap .state { color: #8f897e; }
 .lightbox .nav { position: absolute; top: 50%; transform: translateY(-50%); background: none; border: 0; color: #e9e5dc; font: 54px/1 var(--serif); padding: 12px 18px; cursor: pointer; opacity: .65; }
@@ -104,3 +110,20 @@ footer nav a { margin-right: 16px; }
 .facts { max-width: 38rem; margin: 0 0 4vh; font: 14px/1.6 var(--sans); color: var(--muted); }
 .facts dt { font-size: 12px; letter-spacing: .14em; text-transform: uppercase; margin-top: 10px; }
 .facts dd { margin: 2px 0 0; font: 16px/1.5 var(--serif); color: var(--fg); overflow-wrap: anywhere; }
+
+/* the owner's essays: a painting above, then the words, as quiet as the rest */
+.essay .frontispiece { margin: 0 0 4vh; }
+.essay .frontispiece img { width: 100%; display: block; border: 1px solid var(--line); background: var(--card); }
+.essay .frontispiece figcaption { margin-top: 10px; }
+.essay h1 + .state { margin-top: -10px; }
+.essay-item { margin: .6em 0; }
+.frontis { max-width: 38rem; margin: -4vh 0 8vh; }
+
+/* the walls by season, once there is more than one: the current one hangs, earlier ones are folded under their name */
+.walls.seasons { display: block; padding: 3vh 0 10vh; }
+.season > .walls { padding: 2vh 0 4vh; }
+.season h2.state, .season summary { font: 13px/1.4 var(--sans); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); margin: 0; }
+details.season { border-top: 1px solid var(--line); }
+details.season summary { cursor: pointer; padding: 14px 0; list-style: none; }
+details.season summary::-webkit-details-marker { display: none; }
+details.season summary:hover { color: var(--fg); }

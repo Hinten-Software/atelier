@@ -20,7 +20,19 @@ const artistOf = (id) => id.split("-")[0];
 const studioName = (a) => `Studio ${ROMAN[a] || a.toUpperCase()}`;
 const plain = (s) => (s || "").replace(/\*\*(.+?)\*\*/g, "$1").replace(/`([^`]+)`/g, "$1");
 const day = (iso) => iso ? new Date(iso + "T12:00:00Z").toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "UTC" }) : "";
+// the season a painting was finished in, as the walls group them: Winter runs December to February
+const season = (iso) => {
+  if (!iso) return "Undated";
+  const [y, m] = iso.split("-").map(Number);
+  if (m === 12) return `Winter ${y}–${String(y + 1).slice(2)}`;
+  if (m <= 2) return `Winter ${y - 1}–${String(y).slice(2)}`;
+  return `${m <= 5 ? "Spring" : m <= 8 ? "Summer" : "Autumn"} ${y}`;
+};
 const finalImg = (w, small) => `/studio/data/${w.viewer}/${small ? "final-t.jpg" : "final.jpg"}`;
+const fullImg = (w) => `/studio/data/${w.viewer}/final-f.jpg`;  // the whole painting, every pixel
+// a zoomed page or a dense screen takes the full-size copy by itself; the plain one serves everyone else
+const srcsetOf = (w) => w.px ? `${finalImg(w)} 1600w, ${fullImg(w)} ${w.px}w` : "";
+const closeUp = (w) => ({ src: finalImg(w), srcset: srcsetOf(w), full: w.px ? fullImg(w) : null, px: w.px, title: w.title || "Untitled", href: workHref(w) });
 const workHref = (w) => `/work/?w=${encodeURIComponent(w.id)}`;
 
 async function data() {
@@ -39,8 +51,10 @@ function crumbs(...steps) {  // steps: [text, href] or [text]
   for (const [text, href] of steps) top.append(el("span", { class: "sep", textContent: "/" }), href ? el("a", { href, textContent: text }) : el("span", { textContent: text }));
 }
 
-// ---- a painting, close up: click to open, click or Esc to close; arrows (and swipe) when there are several
-function lightbox(items, start) {  // items: [{src, title, href}]
+// ---- a painting, close up: click to open; click the painting again to see it at full size, every pixel of it, and
+// move about in it (scroll, drag on a phone); click once more to see it whole. A click beside it, or Esc, closes.
+// Arrows (and swipe) when there are several. Nothing more to find: no buttons, no links.
+function lightbox(items, start) {  // items: [{src, srcset, full, title, href}]
   let i = start;
   const img = el("img", { alt: "" }), cap = el("p", { class: "cap" });
   const box = el("div", { class: "lightbox", role: "dialog", "aria-modal": "true", tabIndex: -1 }, img, cap);
@@ -49,19 +63,38 @@ function lightbox(items, start) {  // items: [{src, title, href}]
   if (items.length > 1) box.append(prev, next);
   const show = () => {
     const it = items[i];
-    img.src = it.src; img.alt = it.title || "";
+    box.classList.remove("full"); img.style.width = img.style.height = ""; box.scrollTop = box.scrollLeft = 0;
+    img.srcset = it.srcset || ""; img.sizes = it.srcset ? "(max-width: 640px) 100vw, 1600px" : "";  // as large as it may be shown: browser zoom enlarges it img.src = it.src; img.alt = it.title || "";
+    img.style.cursor = it.full ? "zoom-in" : "zoom-out";
     cap.replaceChildren(it.href ? el("a", { href: it.href, textContent: it.title || "Untitled" }) : it.title || "");
     if (items.length > 1) cap.append(el("span", { class: "state", textContent: `  ${i + 1} of ${items.length}` }));
   };
   const go = (d) => { i = (i + d + items.length) % items.length; show(); };
   const close = () => { box.remove(); document.removeEventListener("keydown", key); document.body.style.overflow = ""; };
-  const key = (e) => { if (e.key === "Escape") close(); else if (items.length > 1 && e.key === "ArrowLeft") go(-1); else if (items.length > 1 && e.key === "ArrowRight") go(1); };
+  const whole = () => show();
+  const fullSize = (e) => {  // where the click fell stays under the pointer: that is where they wanted to look
+    const it = items[i], r = img.getBoundingClientRect(), b = box.getBoundingClientRect();
+    const fx = (e.clientX - r.left) / r.width, fy = (e.clientY - r.top) / r.height;
+    const w = it.px / (window.devicePixelRatio || 1), h = w * r.height / r.width;  // one painting pixel, one screen pixel
+    box.classList.add("full");
+    img.removeAttribute("srcset"); img.removeAttribute("sizes");
+    img.src = it.full; img.style.width = `${w}px`; img.style.height = `${h}px`; img.style.cursor = "zoom-out";
+    box.scrollLeft = fx * w - (e.clientX - b.left);
+    box.scrollTop = fy * h - (e.clientY - b.top);
+  };
+  img.onclick = (e) => {
+    e.stopPropagation();
+    if (box.classList.contains("full")) whole();
+    else if (items[i].full && items[i].px) fullSize(e);
+    else close();
+  };
+  const key = (e) => { if (e.key === "Escape") box.classList.contains("full") ? whole() : close(); else if (items.length > 1 && e.key === "ArrowLeft") go(-1); else if (items.length > 1 && e.key === "ArrowRight") go(1); };
   prev.onclick = (e) => { e.stopPropagation(); go(-1); };
   next.onclick = (e) => { e.stopPropagation(); go(1); };
   box.onclick = (e) => { if (!e.target.closest("a")) close(); };
   let x0 = null;
   box.ontouchstart = (e) => (x0 = e.touches[0].clientX);
-  box.ontouchend = (e) => { if (x0 == null || items.length < 2) return; const dx = e.changedTouches[0].clientX - x0; x0 = null; if (Math.abs(dx) > 50) { e.preventDefault(); go(dx > 0 ? -1 : 1); } };
+  box.ontouchend = (e) => { if (x0 == null || items.length < 2 || box.classList.contains("full")) return; const dx = e.changedTouches[0].clientX - x0; x0 = null; if (Math.abs(dx) > 50) { e.preventDefault(); go(dx > 0 ? -1 : 1); } };
   document.addEventListener("keydown", key);
   document.body.style.overflow = "hidden";
   document.body.append(box); box.focus(); show();
@@ -162,7 +195,7 @@ async function walls() {
   // newest first, wrapping like a hang on a wall; what hung there before their first work comes last
   const done = works.filter((w) => w.finished).sort((x, y) => y.number - x.number);
   const birth = d.artists.find((x) => x.id === a) || {};
-  const items = done.map((w) => ({ src: finalImg(w), title: w.title || "Untitled", href: workHref(w) }));
+  const items = done.map(closeUp);
   const atBirth = [];
   for (let n = birth.walls_at_birth || 0; n >= 1; n--) atBirth.push({ src: `/studio/data/walls-${a}/${n}.jpg`, title: String(n) });
   const all = [...items, ...atBirth];
@@ -185,15 +218,30 @@ async function walls() {
   const box = document.getElementById("walls");
   const kids = [];
   if (!all.length) kids.push(el("p", { class: "empty", textContent: "The walls are bare." }));
-  done.forEach((w, k) => kids.push(el("figure", {},
+  const figs = done.map((w, k) => el("figure", {},
     el("img", { src: finalImg(w, true), alt: w.title || "Untitled", loading: "lazy", onclick: () => lightbox(all, k) }),
     el("figcaption", {}, el("a", { href: workHref(w), class: "t", textContent: w.title || "Untitled" }),
-      el("div", { class: "state", textContent: `work ${w.number}${w.date ? " · " + day(w.date) : ""}` })))));
+      el("div", { class: "state", textContent: `work ${w.number}${w.date ? " · " + day(w.date) : ""}` }))));
+  // a year of paintings stays easy to walk through: the current season on the wall, each earlier one folded under its
+  // name (2026-10-13). While everything is from one season, the wall is as it always was.
+  const seasons = [];
+  done.forEach((w, k) => { const s = season(w.date); if (!seasons.length || seasons.at(-1).name !== s) seasons.push({ name: s, figs: [] }); seasons.at(-1).figs.push(figs[k]); });
+  box.classList.toggle("seasons", seasons.length > 1);
+  if (seasons.length > 1) {
+    seasons.forEach((s, k) => {
+      const grid = el("div", { class: "walls" }, ...s.figs);
+      const count = `${s.figs.length} ${s.figs.length === 1 ? "painting" : "paintings"}`;
+      kids.push(k === 0 ? el("section", { class: "season" }, el("h2", { class: "state", textContent: s.name }), grid)
+        : el("details", { class: "season" }, el("summary", { class: "state", textContent: `${s.name} · ${count}` }), grid));
+    });
+  } else {
+    kids.push(...figs);
+  }
   if (atBirth.length) {
-    kids.push(el("p", { class: "state hung", textContent: birth.walls_note }));
-    atBirth.forEach((it, k) => kids.push(el("figure", {},
+    const hung = [el("p", { class: "state hung", textContent: birth.walls_note }), ...atBirth.map((it, k) => el("figure", {},
       el("img", { src: it.src, alt: "", loading: "lazy", onclick: () => lightbox(all, items.length + k) }),
-      el("figcaption", {}, el("div", { class: "t", textContent: it.title })))));
+      el("figcaption", {}, el("div", { class: "t", textContent: it.title }))))];
+    kids.push(...(seasons.length > 1 ? [el("div", { class: "walls" }, ...hung)] : hung));
   }
   box.replaceChildren(...kids);
   return !!open;
@@ -208,7 +256,8 @@ async function work() {
   const a = artistOf(w.id);
   document.title = `${w.title || "Untitled"} · Atelier`;
   crumbs([studioName(a), `/walls/?s=${a}`], [w.title || "Untitled"]);
-  const img = el("img", { src: finalImg(w), alt: w.title || "Untitled", onclick: () => lightbox([{ src: finalImg(w), title: w.title || "Untitled" }], 0) });
+  const img = el("img", { src: finalImg(w), alt: w.title || "Untitled", onclick: () => lightbox([{ ...closeUp(w), href: null }], 0) });
+  if (w.px) { img.srcset = srcsetOf(w); img.sizes = "(max-width: 1100px) 100vw, 1068px"; }
   box.append(el("div", { class: "piece" }, img, label(w)));
   box.append(el("p", { class: "actions" }, el("a", { href: `/studio/?p=${encodeURIComponent(w.viewer)}`, textContent: "Watch it being painted" })));
   // short facts stay in sight, quietly; the long texts wait, folded, below
@@ -222,6 +271,48 @@ async function work() {
   if (w.reply) texts.append(written("The painter's words", plain(w.reply)));
   if (w.notebook) texts.append(written("Their notebook after this painting", w.notebook));
   if (texts.children.length) box.append(texts);
+  // one quiet line, if the owner set this painting above an essay
+  for (const e of (await essayList()).filter((x) => x.frontispiece === w.id))
+    box.append(el("p", { class: "state frontis" }, "Frontispiece to an essay: ", el("a", { href: essayHref(e), textContent: e.title })));
+}
+
+// ---- the owner's essays (/essays/): data/essays.json exists only once one is published; until then the page and its
+// link are not on the site at all. Each essay may have a finished work above it, its frontispiece. Set as text, with
+// *italics* the only formatting.
+async function essayList() {
+  try { const r = await fetch("/data/essays.json"); return r.ok ? (await r.json()).essays : []; } catch { return []; }
+}
+const essayHref = (e) => `/essays/?e=${encodeURIComponent(e.name)}`;
+function prose(text) {  // *a few words* in italics; everything else as written
+  return text.split(/\*([^*]+)\*/).map((part, k) => (k % 2 ? el("em", { textContent: part }) : part));
+}
+async function essaysPage() {
+  const [list, d] = await Promise.all([essayList(), data()]);
+  const box = document.getElementById("essays");
+  const name = new URLSearchParams(location.search).get("e");
+  const e = name && list.find((x) => x.name === name);
+  if (!e) {
+    crumbs(["Essays"]);
+    box.append(el("h1", { textContent: "Essays" }));
+    if (!list.length) box.append(el("p", { class: "empty", textContent: "Nothing here yet." }));
+    for (const x of list) box.append(el("p", { class: "essay-item" }, el("a", { href: essayHref(x), textContent: x.title }),
+      el("span", { class: "state", textContent: `  ${day(x.published)}` })));
+    return;
+  }
+  document.title = `${e.title} · Atelier`;
+  crumbs(["Essays", "/essays/"], [e.title]);
+  const w = e.frontispiece && d.works.find((x) => x.id === e.frontispiece && x.finished);
+  if (w) box.append(el("figure", { class: "frontispiece" },
+    el("a", { href: workHref(w) }, el("img", { src: finalImg(w), alt: w.title || "Untitled" })),
+    el("figcaption", { class: "state", textContent: `${w.title || "Untitled"}, ${studioName(artistOf(w.id))}, work ${w.number}` })));
+  box.append(el("h1", { textContent: e.title }), el("p", { class: "state", textContent: day(e.published) }));
+  for (const b of e.blocks) box.append(b.h ? el("h2", {}, ...prose(b.h)) : el("p", {}, ...prose(b.p)));
+}
+// the footer's way in, on every page, once there is something to read
+async function essaysLink() {
+  const nav = document.querySelector("footer nav");
+  if (!nav || nav.querySelector('a[href="/essays/"]') || !(await essayList()).length) return;
+  nav.prepend(el("a", { href: "/essays/", textContent: "Essays" }));
 }
 
 // ---- notes: one guestbook for the whole atelier (/notes/). Plain text in, plain text out (ATL-13).
@@ -291,5 +382,7 @@ const pages = {
   walls: () => whileOpen(walls),
   work,
   notes: () => notes(document.getElementById("notes")),
+  essays: essaysPage,
 };
 pages[document.body.dataset.page]?.();
+essaysLink();

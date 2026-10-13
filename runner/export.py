@@ -27,12 +27,14 @@ FARM = WORK / "run" / "farm"
 # what may be published (REC-8): the viewer, its data per work (events, looks and their web copies, the painting's
 # log), the final renders, works.json
 ALLOWED = re.compile(r"^(studio/(index\.html|stream\.css|data/sessions\.json|data/w-[a-z]+-\d{3}/(events\.json|"
-                     r"(img|t|v)/\d+\.(png|jpg|webp)|file/paintings/lua/painting\.lua|final\.png|final(-t)?\.jpg)|viewer-\d+\.js|data/walls-[a-z]+/\d+\.jpg))$|^data/works\.json$"
+                     r"(img|t|v)/\d+\.(png|jpg|webp)|file/paintings/lua/painting\.lua|final\.png|final(-t|-f)?\.jpg)|viewer-\d+\.js|data/walls-[a-z]+/\d+\.jpg))$|^data/(works|essays)\.json$"
                      # the atelier's own pages (site/ in the repository)
-                     r"|^(index\.html|robots\.txt|favicon\.(png|ico)|apple-touch-icon\.png|(about|walls|work|notes)/index\.html|assets/atelier\.(css|js))$")
+                     r"|^(index\.html|robots\.txt|favicon\.(png|ico)|apple-touch-icon\.png|(about|walls|work|notes|essays)/index\.html|assets/atelier\.(css|js))$")
 NOTES_SETTINGS = DATA / "notes.json"  # {"sitekey": "<the Turnstile widget's public site key>"} (deploy/notes)
 PAGES = REPO / "site"
-FINAL_WEB = {"final.jpg": 1600, "final-t.jpg": 640}  # the walls' and the door's copies of a finished painting
+# the walls' and the door's copies of a finished painting, and its full size (None) for a close look: a JPEG of the
+# whole painting, a fifth to a tenth of the PNG (2026-10-13: 0.8-2.6 MB at 4800 px)
+FINAL_WEB = {"final.jpg": 1600, "final-t.jpg": 640, "final-f.jpg": None}
 PUBLIC_MANIFEST = ("id", "studio", "number", "title", "mode", "theme", "box", "start", "end", "model", "effort", "claude_code",
                    "replay_verified", "finished", "contaminated")
 CANARY = "35396958-eb10-44fe-8f7d-0720fe551f10"  # public on purpose (README, every page: REC-9)
@@ -82,6 +84,11 @@ def works_json(works):
             pub["notebook"] = (w / "notebook.after.md").read_text() if (w / "notebook.after.md").exists() else ""
             # the date of the painting as the atelier's calendar has it (the last sitting's day), not a visitor's
             pub["date"] = (man.get("sittings") or [{}])[-1].get("date_shown")
+            # its width in pixels, so a browser knows what the full-size copy holds (srcset)
+            if (w / "final.png").exists():
+                from PIL import Image
+                with Image.open(w / "final.png") as im:
+                    pub["px"] = im.width
         elif state.exists():  # the open work
             st = json.loads(state.read_text())
             pub = {"id": w.name, "number": st["number"], "mode": st["mode"], "theme": st["theme"], "start": st["created"],
@@ -121,8 +128,9 @@ def web_finals(png: Path, data: Path):
         if out.exists() and out.stat().st_mtime >= png.stat().st_mtime:
             continue
         im = Image.open(png).convert("RGB")
-        im.thumbnail((size, size), Image.LANCZOS)
-        im.save(out, "JPEG", quality=86, optimize=True, progressive=True)
+        if size:
+            im.thumbnail((size, size), Image.LANCZOS)
+        im.save(out, "JPEG", quality=86 if size else 88, optimize=True, progressive=True)
 
 
 def scan(site: Path) -> list[str]:
@@ -204,8 +212,10 @@ def main() -> int:
             if not out.exists() or out.stat().st_mtime < png.stat().st_mtime:
                 from PIL import Image
                 Image.open(png).convert("RGB").save(out, "JPEG", quality=88, optimize=True, progressive=True)
+    import essays
+    shown = essays.published()  # the owner's essays: the page and its data only once one is published
     for f in PAGES.rglob("*"):  # the atelier's own pages, scanned and allowlisted like everything else
-        if f.is_file() and not hidden(f.relative_to(PAGES)):
+        if f.is_file() and not hidden(f.relative_to(PAGES)) and (shown or f.relative_to(PAGES).parts[0] != "essays"):
             dst = SITE_ / f.relative_to(PAGES)
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(f, dst)
@@ -221,6 +231,10 @@ def main() -> int:
                     dst.write_text(dst.read_text().replace("TURNSTILE_SITE_KEY", key))
     (SITE_ / "data").mkdir(exist_ok=True)
     (SITE_ / "data" / "works.json").write_text(json.dumps(works_json(works), indent=1))
+    # always there (empty until one is published), so no page asks for it in vain
+    (SITE_ / "data" / "essays.json").write_text(json.dumps({"essays": shown}, indent=1))
+    if not shown:  # the stage is reused: a page from an earlier export goes when no essay is published
+        shutil.rmtree(SITE_ / "essays", ignore_errors=True)
     hits = scan(SITE_)
     for f in SITE_.rglob("*"):  # REC-8: nothing outside the allowlist (the exporter's own list file stays behind)
         rel = str(f.relative_to(SITE_))
