@@ -89,12 +89,25 @@ every); the painter is never told a box's name.
 
 `atelier tick` (deploy/mac/atelier.tick.plist, a LaunchAgent, every 10 minutes and at login) carries the owner's
 standing go: until the time in DATA/run/until, it resumes a work a reboot cut off, and otherwise starts the next
-studio's work (fewest works first) when the night window is open and today's budget allows. If Claude's safety classifier stopped a work's
+studio's work when it is that studio's night (one a week: Studio I Sunday, II Tuesday, III Thursday night, so a new
+painting hangs Monday, Wednesday and Friday morning; NIGHTS in runner/atelier.py; the owner, 2026-10-13) and the night
+window is open and today's budget allows. A studio that began a work in the last 5 days waits for its next night; a
+work set aside leaves the night free for another start. `atelier next` lists the nights. If Claude's safety classifier stopped a work's
 first reply before any paint was laid, the same work starts afresh in a new session (twice at most; then it is set
 aside). It never clears any other audit
 stop: in the painting window it sets the stopped work aside (withdrawn, never public, at most 3 a day) so the night
 goes on; outside the window the stop waits for a person. A failed export (DATA/run/export-failed) is tried again. If DATA/run/starts-left holds a number, the tick starts only that many new works and counts down (the
 open work goes on regardless). To end it early: `launchctl unload ~/Library/LaunchAgents/atelier.tick.plist` (or delete DATA/run/until).
+
+## The owner's essays
+
+Written as plain text files in DATA/essays/<name>.md: a `# Title` line, then `frontispiece: <work id>` (optional: the
+finished work shown above it) and `published: <YYYY-MM-DD>`, then paragraphs separated by an empty line (`## ` for a
+heading, `*words*` for italics). Without a `published` date, or with one still to come, an essay is a draft and
+nothing of it leaves this machine. `python3 runner/essays.py` lists them; `python3 runner/essays.py preview <name>`
+shows one as it will read. The site has no Essays page and no link to one until the first is published; then the
+footer of every page says Essays, and the frontispiece painting's page has one quiet line pointing to its essay.
+The essays are never in a studio: the white room holds for the owner's words too.
 
 ## The morning report
 

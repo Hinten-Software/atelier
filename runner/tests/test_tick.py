@@ -46,6 +46,19 @@ def main():
     atelier.Artist = FakeArtist
     atelier.cmd_paint = lambda a: started.append(a.artist)
     budget.spent_today = lambda: 0.0
+    # the pace (2026-10-13): a studio's own night of the week, one work a week
+    from datetime import datetime
+    night = lambda t: atelier.tonights_studio(datetime.fromisoformat(t))
+    check("Sunday night is Studio I's, also after midnight", night("2026-10-18 23:30") == "i" and night("2026-10-19 03:00") == "i")
+    check("Tuesday night is II's, Thursday night III's", night("2026-10-20 23:30") == "ii" and night("2026-10-22 23:10") == "iii")
+    check("Monday night is no one's", night("2026-10-19 23:30") is None and night("2026-10-20 06:00") is None)
+    real_night, real_lately = atelier.tonights_studio, atelier.started_lately
+    atelier.tonights_studio = lambda: None
+    check("no studio's night: nothing starts", tick() == [])
+    atelier.tonights_studio = lambda: "i"
+    atelier.started_lately = lambda id: True
+    check("a studio that painted this week: nothing starts", tick() == [])
+    atelier.started_lately = lambda id: False
     try:
         (DATA / "run" / "until").write_text("2099-01-01T00:00:00+00:00\n")
         left = DATA / "run" / "starts-left"

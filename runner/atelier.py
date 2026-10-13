@@ -7,7 +7,7 @@
     atelier status                             the artists, and the open work and its state
     atelier resume [--clear REASON]            continue an interrupted work (a person, after a reboot or a crash);
                                                --clear: continue a work the white-room audit stopped (logged)
-    atelier next                               whose turn it is (fewest works)
+    atelier next                               whose night is next
     atelier withdraw --why TEXT                end the open work stopped by the audit as not finished, private (logged)
     atelier tick                               (launchd, every 10 minutes) the owner's standing go: resume or start
     atelier export                             export the site now (the runner does every 2 minutes during a work)
@@ -19,6 +19,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -237,8 +238,10 @@ def cmd_tick(a):
         left = (now.replace(hour=end, minute=0, second=0, microsecond=0) - now).total_seconds()
         if 0 < left < 90 * 60:
             return
-    reg = registry()
-    n, id = sorted((len(Artist(x).works()), x) for x in reg)[0]
+    id = tonights_studio()
+    if id is None or id not in registry() or started_lately(id):
+        return
+    n = len(Artist(id).works())
     log(f"tick: starting {Artist(id).name}'s work {n + 1} (the owner's standing go until {STANDING.read_text().strip()}"
         + (f", {starts - 1} more after this)" if starts is not None else ")"))
     if starts is not None:
@@ -252,6 +255,38 @@ def classifier_misfire(w: Work) -> bool:
     painted = (w.artist.studio / "paintings" / "lua" / "painting.lua")
     return (len(sittings) == 1 and bool(hits) and all("safety classifier" in h for h in hits)
             and not (painted.exists() and "--@ chunk" in painted.read_text()))
+
+
+# the pace (the owner, 2026-10-13: three paintings a week, not two or three a night): each studio paints on its own
+# night of the week, so a new painting hangs on three mornings: Monday (I), Wednesday (II) and Friday (III). Python's
+# weekdays, Monday 0, of the evening the night begins. A work not finished in its night goes on the next nights, as
+# before; a work set aside leaves its studio's night free for another start.
+NIGHTS = {"i": 6, "ii": 1, "iii": 3}
+
+
+def tonights_studio(t: datetime | None = None) -> str | None:
+    """The studio whose night this is: the evening's weekday (after midnight, the night still belongs to the evening)."""
+    t = t or datetime.now()
+    evening = (t - timedelta(hours=12)).weekday() if t.hour < 12 else t.weekday()
+    return next((a for a, d in NIGHTS.items() if d == evening), None)
+
+
+def started_lately(id: str) -> bool:
+    """Whether the studio's newest work began in the last 5 days and wasn't set aside: one work a week, and its night
+    free again for another start if the first was set aside."""
+    works = Artist(id).works()
+    if not works:
+        return False
+    w = works[-1]
+    man = json.loads((w / "manifest.json").read_text()) if (w / "manifest.json").exists() else {}
+    if str(man.get("why") or "").startswith("withdrawn"):
+        return False
+    st = RUN / w.name / "state.json"
+    start = man.get("start") or (json.loads(st.read_text()).get("created") if st.exists() else None)
+    if not start:
+        return False
+    began = datetime.fromisoformat(start.replace("Z", "+00:00"))
+    return datetime.now(began.tzinfo) - began < timedelta(days=5)
 
 
 RESTARTS = 2  # fresh starts for a work whose first reply Claude's classifier stopped, before it is set aside
@@ -311,11 +346,18 @@ def cmd_boxes(a):
 
 
 def cmd_next(a):
+    """Each studio's next night (NIGHTS), soonest first."""
     reg = registry()
     if not reg:
         raise SystemExit("no artists yet")
-    counts = sorted((len(Artist(id).works()), id) for id in reg)
-    print(f"{Artist(counts[0][1]).name} ({counts[0][1]}): {counts[0][0]} works so far")
+    t = datetime.now()
+    tonight = (t - timedelta(hours=12)) if t.hour < 12 else t
+    days = "Monday Tuesday Wednesday Thursday Friday Saturday Sunday".split()
+    for id in sorted(reg, key=lambda x: (NIGHTS.get(x, 9) - tonight.weekday()) % 7):
+        if id in NIGHTS:
+            ahead = (NIGHTS[id] - tonight.weekday()) % 7
+            when = "tonight" if ahead == 0 else f"{days[NIGHTS[id]]} night, {(tonight + timedelta(days=ahead)):%-d %B}"
+            print(f"{Artist(id).name}: {when} ({len(Artist(id).works())} works so far)")
 
 
 def main():
