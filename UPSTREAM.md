@@ -3,7 +3,7 @@
 Source: https://github.com/aliceisjustplaying/claude-paint (Alice; code MIT,
 texts and paintings CC BY 4.0). Gallery: https://stillwet.art.
 
-Merged: `78c86cec692824bf581c84ba0be25c7e4c5e9b06` (2026-10-10), on branch `upstream` (her files, unmodified,
+Merged: `693f49f2` (2026-10-13; before it `78c86ce`, 2026-10-10), on branch `upstream` (her files, unmodified,
 at our paths) and merged into `main`. The exact commit is in `tools/upstream/commit`; every work records it
 (`engine_upstream` in its manifest). First taken: `a198dd0` (2026-10-03, after tag `round-22.1`).
 
@@ -53,16 +53,38 @@ She develops actively; this is routine. In a worktree of its own (the runner pai
 - `materials/easel_guide.md`: the tube table is the every box's (`easel tubes --markdown`; each studio's copy has its
   own box's, runner/studio.py); "close up" for crops; the journal and the log without file paths; two lines
   reworded for the white room ("as dirty as a working palette gets", "as many tiles as one reply holds").
+- `materials/easel_guide.md`, since 693f49f (the owner, 2026-10-13): without her section "Color, planes and open
+  coverage" (warm and cool space, tilted planes, facets, multiple viewpoints: a way of painting, unnamed but
+  recognisable, offered to every painter). The guide documents tools; a manner is the painter's to find. On a merge
+  that brings the section back or changes it, take it out again.
 - `easel-mcp/src/server.ts`: her painter tools over MCP, with the atelier's read/write/edit; the log without its
   box line (a box may be named after a painter); its own survey reply (hers speaks of a budget).
 - `easel-mcp/src/upstream/easel-client.ts`: `WAIT_MS` raised for 4800 px (see below).
 
 Known, hers: `rag::tests::a_dry_rag_leaves_a_pale_tint_and_spirits_lift_nearly_to_the_ground` fails here at 78c86ce
-(0.8993 against its 0.9); the paint crate is hers unchanged.
+and 693f49f alike (0.8993 against its 0.9); the paint crate is hers unchanged.
+
+A copy of the repository for a sync (git worktree) needs two local links the clone doesn't carry:
+`engine/notes/easel_guide.md -> ../../materials/easel_guide.md` (her tests read the guide there) and
+`easel-mcp/node_modules -> ` main's (the packages, when package.json is unchanged). `easel-mcp/test/upstream.ts`
+runs after `tools.ts`, in the same studio: it needs the canvas `tools.ts` paints.
 
 ## Changes
 
 Engine changes are atelier events (requirements ENG-5), listed here with their date and reason.
+
+- 2026-10-13 claude-paint 693f49f merged (the owner: "start with the upstream sync"; 158 commits): painter names and
+  stray references out of the easel guide, its wording plainer; faster replay (reused buffers, less memory traffic,
+  finals from the saved end state), the painting's saved state and final PNGs better guarded; a look's light-mode
+  companions renamed with it; the boxes alma-tadema, cezanne, hopper, inness, sargent and tonn. Her watercolor
+  studio, her Python easel server and live publishing are hers and not used here. Without her guide section "Color,
+  planes and open coverage" (the owner; see "The atelier's changes"). The tools the painters are served are
+  unchanged (easel-tools.ts as before), so our scratch-canvas wording stands. Checked: her tests (the known rag test
+  aside), ours, the white room, the live check at 4800 px, the easel tools, the probes (the long chunk 1427 s, against
+  1607 s before), and i-001 (engine 2) and iii-008 (engine 5) replayed byte for byte. tools/upstream/verify.sh named
+  the session two ways; her easel no longer finds a session opened as "painting" under another name, so every save
+  failed and was reported as DIFFERS. It now uses one name, says FAIL when a save fails, and replays one painting at
+  a time (each takes the machine's cores for 10-15 minutes at 4800 px).
 
 - 2026-10-10 claude-paint 78c86ce merged (the owner: "the new tools and verbs, and the new tube boxes"): engines 3-5
   (slower drying with each tube's own rate, the rag, thinner and turpentine, raw linen, impasto that holds its

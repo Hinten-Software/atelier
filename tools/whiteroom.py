@@ -71,6 +71,9 @@ ALLOW = {
     ("oil_paint_physics.md", "Leveling of a model paint"): "a cited paper",
     ("oil_paint_physics.md", "artists' brushes"): "a cited brush guide",
     ("oil_paint_physics.md", "https://"): "a cited source's URL",
+    # claude-paint 693f49f (2026-10-13)
+    ("oil_paint_physics.md", "free-surface model"): "a physical model (a cited paper's)",
+    ("easel-client.ts", '".gallery" ".relief"'): "a look's companion files' folders, renamed beside it; never in a reply",
     ("server.ts", "limit: how many lines"): "the read tool's line limit parameter",
     ("server.ts", "limit: z.number()"): "the read tool's line limit parameter",
     ("server.ts", "p.limit"): "the read tool's line limit parameter",
