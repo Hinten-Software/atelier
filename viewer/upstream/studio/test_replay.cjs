@@ -153,6 +153,39 @@ async function pollUpdate(v, i, replacement) {
       await v.page.close();
     }
     report.checks.push('canvas reset boundaries, stale whole-look ages, safe crop outlines and rewind in normal/stream and API/static views');
+    for (const streamMode of [false, true]) {
+      const v = await viewer(browser, [ev('start'), ev('paint', {code:'work{}', out:'ok'}, 1),
+        ev('look', {text:''}, 2), ev('image', {img:0, look:''}, 3)], {streamMode, liveFile:false});
+      await v.page.waitForFunction(() => document.getElementById('img').naturalWidth > 0);
+      const painting = await v.page.locator('#img').getAttribute('src');
+      const remains = async () => assert(await v.page.evaluate(src => {
+        const im = document.getElementById('img');
+        return im.getAttribute('src') === src && im.complete && im.naturalWidth > 0 && document.getElementById('nopic').hidden;
+      }, painting), 'the painting stays visible while awaiting the first scratch look');
+      await v.page.evaluate(e => { events.push(e); live = true; show(events.length - 1); },
+        ev('paint', {scratch:true, new_scratch:true, code:'work{}', out:'ok', ts:new Date().toISOString()}, 4));
+      await remains();
+      assert.equal(await v.page.locator('#cap').textContent(), 'The painting · awaiting first scratch look');
+      assert.equal(await v.page.locator('#pip').isVisible(), false);
+      let release;
+      const held = new Promise(resolve => { release = resolve; });
+      await v.page.route(u => u.pathname === '/img' && u.searchParams.get('i') === '1', async route => { await held; await route.fallback(); });
+      const requested = v.page.waitForRequest(request => { const u = new URL(request.url()); return u.pathname === '/img' && u.searchParams.get('i') === '1'; });
+      await v.page.evaluate(e => { events.push(e); show(events.length - 1); }, ev('image', {img:1, look:'scratch True', ts:new Date().toISOString()}, 5));
+      await requested;
+      await v.page.waitForFunction(() => document.getElementById('img').dataset.want.includes('i=1'));
+      await remains();
+      assert.equal(await v.page.locator('#cap').textContent(), 'The painting · awaiting first scratch look');
+      assert.equal(await v.page.locator('#pip').isVisible(), false);
+      release();
+      await v.page.waitForFunction(() => { const im = document.getElementById('img'); return im.dataset.loadedWant === im.dataset.want && im.complete && im.naturalWidth > 0; });
+      assert.notEqual(await v.page.locator('#img').getAttribute('src'), painting);
+      assert.match(await v.page.locator('#cap').textContent(), /^Scratch canvas · /);
+      await v.page.waitForFunction(() => { const im = document.getElementById('pipimg'); return !document.getElementById('pip').hidden && im.complete && im.naturalWidth > 0; });
+      assert.equal(await v.page.locator('#pipimg').getAttribute('data-picture'), '0');
+      await v.page.close();
+    }
+    report.checks.push('first scratch keeps the painting visible until the delayed scratch image loads in normal/stream views');
     const waits = JSON.parse(fs.readFileSync(path.join(root, 'fixtures/monet-waits.json'), 'utf8')).cases;
     for (const staticMode of [false, true]) {
       const sample = waits[1];
@@ -279,6 +312,48 @@ async function pollUpdate(v, i, replacement) {
       report.timings[label] = await page.evaluate(() => { const samples = []; live = false; for (let k = 100; k < 130; k++) { const t = performance.now(); show(k); samples.push(performance.now() - t); } return { samplesMs:samples, totalMs:samples.reduce((a,b) => a+b, 0) }; });
     }
     report.checks.push('sliding journal equivalence and retained blocks'); await largeV.page.close(); if (largeOld) await largeOld.page.close();
+    const queue = await viewer(browser, initial);
+    await seek(queue.page, 2);
+    let releaseWasm;
+    const wasmReady = new Promise(resolve => { releaseWasm = resolve; });
+    await queue.page.route('**/stylua_lib_bg.wasm', async route => {
+      await wasmReady;
+      await route.fulfill({ contentType:'application/wasm', body:fs.readFileSync(path.join(root, 'vendor/stylua/stylua_lib_bg.wasm')) });
+    });
+    await queue.page.evaluate(() => {
+      window.queueResults = [];
+      window.queueWorker = new Worker('code-format.js', { type:'module' });
+      queueWorker.onmessage = ({ data }) => queueResults.push(data);
+      for (let id = 1; id <= 40; id++) queueWorker.postMessage({ id, input:`local latest=${id}\n`, previous:null, changed:[] });
+    });
+    await queue.page.waitForTimeout(100);
+    releaseWasm();
+    await queue.page.waitForFunction(() => queueResults.some(r => r.id === 40));
+    await queue.page.waitForTimeout(100);
+    assert.deepEqual(await queue.page.evaluate(() => queueResults.map(r => r.id)), [40], 'superseded jobs are dropped before WASM formatting');
+    assert.equal(await queue.page.evaluate(() => queueResults[0].text), 'local latest = 40\n');
+    await queue.page.evaluate(() => {
+      window.formatPosts = 0;
+      const post = codeWorker.postMessage.bind(codeWorker);
+      codeWorker.postMessage = data => { if (!data.cancel) formatPosts++; post(data); };
+      live = true; playing = null; document.body.classList.add('nocode');
+      renderCode('hidden.lua', 'local hidden=1', new Set());
+      playing = true; document.body.classList.remove('nocode');
+      renderCode('playing.lua', 'local playing=2', new Set());
+    });
+    assert.equal(await queue.page.evaluate(() => formatPosts), 0, 'hidden live code and active playback never request formatting');
+    await queue.page.waitForFunction(() => document.querySelector('#file').textContent === 'playing.lua' && codeBatch === null);
+    assert.deepEqual((await snapshot(queue.page)).code, ['local playing=2']);
+    await queue.page.evaluate(() => { playing = null; live = false; document.body.classList.add('nocode'); renderCode('step.lua', 'local step=3', new Set(), null, true); });
+    await queue.page.waitForFunction(() => document.querySelector('#file').textContent === 'step.lua' && !document.querySelector('#codeformat').textContent);
+    assert.equal(await queue.page.evaluate(() => formatPosts), 1, 'manual steps can format a hidden pane');
+    await queue.page.evaluate(() => { playing = true; document.querySelector('#play').click(); });
+    await queue.page.waitForFunction(() => !playing && !document.querySelector('#codeformat').textContent);
+    assert.equal(await queue.page.evaluate(() => formatPosts), 2, 'pause formats the current step');
+    report.timings.queue = await queue.page.evaluate(() => ({ submitted:40, completed:queueResults.length, latest:queueResults.at(-1).id, superseded:40 - queueResults.length }));
+    await queue.page.evaluate(() => queueWorker.terminate());
+    report.checks.push('formatter queue drain, hidden-pane gating, raw playback, manual step and pause formatting');
+    await queue.page.close();
     // Check every visible typewriter tick, including partial markdown and escaped literals.
     const thought = '# Title\n\nplain **bold** and _italic_ <tag> & `code`\nsecond line\n\n3. item **one**\n  continued\n4. next\n\n---\n\nFinal *word*.';
     const typedFixture = [ev('start', { cwd:'/painter' }), ev('paint', { code:'local x=1', out:'ok' }, 1), ev('say', { text:'Before typing' }, 2)];

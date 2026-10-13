@@ -3,6 +3,7 @@
     uv run --with pytest pytest studio
 """
 import http.server
+import io
 import json
 import os
 import shutil
@@ -274,6 +275,89 @@ def look(i, png):
                 {"type": "image", "mimeType": "image/png", "data": base64.b64encode(png).decode()}]}}))
 
 
+@pytest.mark.parametrize("public", [False, True])
+@pytest.mark.parametrize("lights", [("gallery",), ("relief",), S.DISPLAY_LIGHTS])
+def test_gallery_companions_are_display_only_and_exported(home, server, monkeypatch, public, lights):
+    import base64
+    import io
+    Image = pytest.importorskip("PIL.Image")
+    monkeypatch.setattr(S, "PUBLIC", public)
+    buf = io.BytesIO()
+    Image.new("RGB", (20, 16), (100, 80, 60)).save(buf, "PNG")
+    colour = buf.getvalue()
+    tmp_path, studio, log = home
+    path = "out/easel/painting/look-0001.png"
+    lit = {}
+    for n, light in enumerate(lights):
+        buf = io.BytesIO()
+        Image.new("RGB", (20, 16), (120 + n * 30, 90, 70)).save(buf, "PNG")
+        lit[light] = buf.getvalue()
+        companion = studio / f"out/easel/painting/.{light}/look-0001.png"
+        companion.parent.mkdir(parents=True)
+        companion.write_bytes(lit[light])
+    entry = look("l1", colour)
+    rows = entry.splitlines()
+    result_row = json.loads(rows[1])
+    result_row["message"]["content"].insert(0, {"type": "text", "text": path + " (20x16)"})
+    entry = rows[0] + "\n" + line(result_row)
+    log.write_text(start(str(studio)) + entry + look("l2", colour))
+    events = json.loads(server(f"/api/events?p={PAINTER}")[1])["events"]
+    pictures = [e for e in events if e["kind"] == "image"]
+    for light in S.DISPLAY_LIGHTS:
+        assert [(e["img"], e.get(light, False)) for e in pictures] == [(0, light in lights), (1, False)]
+    assert server(f"/img?p={PAINTER}&i=0") == (200, colour)
+    for light in S.DISPLAY_LIGHTS:
+        response = server(f"/img?p={PAINTER}&i=0&{light}=1")
+        if light in lights:
+            assert response == (200, lit[light])
+        else:
+            assert response[0] == 404
+        assert server(f"/img?p={PAINTER}&i=1&{light}=1")[0] == 404
+    second = log.with_name("2026-09-30T10-00-00-000Z_s2.jsonl")
+    second.write_text(start(str(studio)) + entry)
+    events = json.loads(server(f"/api/events?p={PAINTER}")[1])["events"]
+    assert [e["img"] for e in events if e["kind"] == "image"] == [0, 1, 2]
+    for light in lights:
+        assert server(f"/img?p={PAINTER}&i=2&{light}=1") == (200, lit[light])
+    out = tmp_path / "out"
+    exported = export(tmp_path, out)
+    assert exported.returncode == 0, exported.stderr
+    d = out / "data" / PAINTER
+    for light in S.DISPLAY_LIGHTS:
+        if light in lights:
+            assert (d / light / "0.png").read_bytes() == lit[light]
+            assert (d / light / "2.png").read_bytes() == lit[light]
+            assert f"data/{PAINTER}/{light}/0.png" in (out / ".studio-export").read_text().splitlines()
+        else:
+            assert not (d / light / "0.png").exists()
+        assert not (d / light / "1.png").exists()
+    assert (d / "img/0.png").read_bytes() == colour
+    exported_events = json.loads((d / "events.json").read_text())["events"]
+    for light in S.DISPLAY_LIGHTS:
+        assert [e.get(light, False) for e in exported_events if e["kind"] == "image"] == [light in lights, False, light in lights]
+        assert S.display_companion(str(studio), str(tmp_path / "outside.png"), light) is None
+    assert S.display_companion(str(studio), path, "../outside") is None
+    assert base64.b64decode(S.image(S.stream("p:" + PAINTER, [str(log), str(second)]), 0)[1]) == colour
+
+
+@pytest.mark.parametrize("light", S.DISPLAY_LIGHTS)
+def test_reading_a_saved_survey_tile_gets_its_gallery_companion(home, server, light):
+    import base64
+    _, studio, log = home
+    path = "out/easel/painting/tile.png"
+    lit = b"\x89PNG\r\n\x1a\nfixture"
+    companion = studio / f"out/easel/painting/.{light}/tile.png"
+    companion.parent.mkdir(parents=True)
+    companion.write_bytes(lit)
+    log.write_text(start(str(studio)) + line({"type": "message", "message": {"role": "assistant", "content": [
+        {"type": "toolCall", "id": "r1", "name": "read", "arguments": {"path": path}}]}})
+        + line({"type": "message", "message": {"role": "toolResult", "toolCallId": "r1", "content": [
+            {"type": "image", "mimeType": "image/png", "data": base64.b64encode(lit).decode()}]}}))
+    events = json.loads(server(f"/api/events?p={PAINTER}")[1])["events"]
+    assert next(e for e in events if e["kind"] == "image")[light] is True
+    assert server(f"/img?p={PAINTER}&i=0&{light}=1") == (200, lit)
+
+
 def test_export_makes_small_web_copies_of_each_look_and_remakes_them_when_it_changes(home):
     Image = pytest.importorskip("PIL.Image")
     import io
@@ -409,6 +493,54 @@ def test_a_held_knife_is_never_the_picker_fallback(home):
     assert S.glance([str(log)])["look"] is None
 
 
+def test_glance_is_a_small_cached_jpeg(home, server, monkeypatch):
+    import hashlib
+    from PIL import Image
+    _, studio, log = home
+    buf = io.BytesIO()
+    Image.new("RGB", (1000, 625), "blue").save(buf, "PNG", compress_level=0)
+    log.write_text(start(str(studio)) + look("l1", buf.getvalue()))
+    monkeypatch.setattr(S, "PUBLIC", True)
+    monkeypatch.setattr(S, "_thumbnails", type(S._thumbnails)())
+    monkeypatch.setattr(S, "GLANCE_CACHE_SIZE", 2)
+    p = next(s for s in json.loads(server("/api/sessions")[1]) if s.get("p") == PAINTER)
+    url = server.base + f"/api/glance?p={PAINTER}&i={p['look']}&epoch={p['epoch']}&version={p['thumb_version']}"
+    with urllib.request.urlopen(url) as response:
+        picture = response.read()
+        assert response.headers["Content-Type"] == "image/jpeg"
+        assert response.headers["Cache-Control"] == "private, max-age=300"
+        etag = response.headers["ETag"]
+        assert etag == '"' + hashlib.sha256(picture).hexdigest() + '"'
+    with Image.open(io.BytesIO(picture)) as thumbnail:
+        assert thumbnail.format == "JPEG"
+        assert thumbnail.size == (360, 225)
+        assert max(thumbnail.size) <= S.GLANCE_SIZE
+    with monkeypatch.context() as cached:
+        cached.setattr(S.Image, "open", lambda *args: pytest.fail("thumbnail was decoded again"))
+        assert get(url) == (200, picture)
+        request = urllib.request.Request(url, headers={"If-None-Match": etag})
+        with pytest.raises(urllib.error.HTTPError) as unchanged:
+            urllib.request.urlopen(request)
+        assert unchanged.value.code == 304
+        assert unchanged.value.read() == b""
+        assert unchanged.value.headers["ETag"] == etag
+        assert unchanged.value.headers["Cache-Control"] == "private, max-age=300"
+    size = log.stat().st_size
+    for color in ("red", "green"):
+        rewritten = io.BytesIO()
+        Image.new("RGB", (1000, 625), color).save(rewritten, "PNG", compress_level=0)
+        log.write_text(start(str(studio)) + look("l1", rewritten.getvalue()))
+        assert log.stat().st_size == size
+        with urllib.request.urlopen(request) as response:
+            updated = response.read()
+            assert response.status == 200
+            assert updated != picture
+            assert response.headers["ETag"] == '"' + hashlib.sha256(updated).hexdigest() + '"'
+    assert len(S._thumbnails) == 2
+    assert hashlib.sha256(buf.getvalue()).digest() not in S._thumbnails
+    assert hashlib.sha256(rewritten.getvalue()).digest() in S._thumbnails
+
+
 @pytest.mark.parametrize("via", ["live server", "static export"])
 def test_the_picker_gets_the_newest_whole_look_and_the_title_from_the_closing_reply(home, server, via):
     # a whole look, then a whole look and a squint asked for together: the picture is the second whole look,
@@ -429,7 +561,11 @@ def test_the_picker_gets_the_newest_whole_look_and_the_title_from_the_closing_re
         p = next(s for s in json.loads((out / "data" / "sessions.json").read_text()) if s["p"] == PAINTER)
         picture = (out / "data" / PAINTER / "img" / f"{p['look']}.png").read_bytes()
     assert (p["look"], p["title"]) == (1, "The Blue Barn")
-    assert picture == png_of("blue")
+    if via == "live server":
+        from PIL import Image
+        assert Image.open(io.BytesIO(picture)).getpixel((0, 0)) == (0, 0, 254)
+    else:
+        assert picture == png_of("blue")
 
 
 @pytest.mark.parametrize("asset,ctype", [
@@ -499,14 +635,24 @@ def test_a_reference_picture_is_marked_and_is_never_the_painters_picture(home, s
     with open(log, "a") as fh:
         fh.write(read_picture("old", "out/easel/look-0000.png", png_of("red")))
     p, picture, _ = painter_and_events()
-    assert (p["look"], picture) == (3, png_of("red"))
+    assert p["look"] == 3
+    if via == "live server":
+        from PIL import Image
+        assert Image.open(io.BytesIO(picture)).getpixel((0, 0)) == (254, 0, 0)
+    else:
+        assert picture == png_of("red")
 
     # its own canvas, then the reference again (by its full path), then a render it reads as the early painters did
     with open(log, "a") as fh:
         fh.write(look("l1", png_of("blue")) + read_picture("r2", f"{studio}/reference/his.png", png_of("green"))
                  + read_picture("r3", "out/easel/look-0001.png", png_of("red")))
     p, picture, events = painter_and_events()
-    assert (p["look"], picture) == (4, png_of("blue"))
+    assert p["look"] == 4
+    if via == "live server":
+        from PIL import Image
+        assert Image.open(io.BytesIO(picture)).getpixel((0, 0)) == (0, 0, 254)
+    else:
+        assert picture == png_of("blue")
     assert [bool(e.get("ref")) for e in events if e["kind"] == "image"] == [True, False, False, False, False, True, False]
     assert [bool(e.get("ref")) for e in events if e["kind"] == "read"] == [True, False, True, False]
 
@@ -552,6 +698,75 @@ def test_the_title_is_where_painters_put_it_in_their_closing_words(say, title):
 def test_a_last_sitting_that_only_looked_keeps_the_earlier_title():
     # paint-studio-b3a3c7: the second sitting's closing words don't repeat the title
     assert S.title_of_closings(["**The Blue Barn**\n\nA barn.", "The painting is exactly as the journal left it."]) == "The Blue Barn"
+
+
+def test_title_labels_allow_nested_emphasis_and_skip_reply_headings():
+    assert S.title_of("**Title: *Cleaners, Late***\n\nThe painting is finished.") == "Cleaners, Late"
+    assert S.title_of("**Saved painting:** `out/painting.png`\n**Log:** `painting.lua`\n\n"
+                      "**Title:** *The Last Light on the Flats*\n\nA dusk estuary.") == "The Last Light on the Flats"
+    assert S.title_of("**Saved painting:** `out/painting.png`\n\n**Handoff:**\n\nStill unresolved.") is None
+
+
+def test_brief_artist_can_have_a_period_qualifier_or_materials_instruction():
+    assert S._subject_of("Paint in the manner of later Claude Monet, at the easel.") == "Monet"
+    assert S._artist_of("Then explore George Inness's materials and paint handling in the studio\nnotes.") == "George Inness"
+    assert S._subject_of("Then explore George Inness’s materials and paint handling.") == "Inness"
+
+
+@pytest.mark.parametrize("via", ["live server", "static export"])
+def test_runner_discovery_includes_non_gallery_runs_and_digit_ending_lanes(home, server, monkeypatch, via):
+    tmp_path, studio, log = home
+    log.write_text(start(str(studio)) + say("**After Harvest, Storm Coming**"))
+    run = tmp_path / "src/a/stillwet-runs/oil-yolo-fixture/run"
+    rd = run / "OYO1"
+    rd.mkdir(parents=True)
+    (run / "studios.json").write_text(json.dumps({"OYO11": PAINTER}))
+    (rd / "p1.finished").write_text("render exported")
+    (rd / "p1_outcome.json").write_text(json.dumps({"status": "finished", "reason": "reviewed and stopped"}))
+    monkeypatch.setattr(S, "RUNS", str(tmp_path / "src/a/stillwet-runs/**/run/studios.json"))
+    monkeypatch.setattr(S, "_lanes", {"at": 0.0, "map": {}})
+    if via == "live server":
+        entries = json.loads(server("/api/sessions")[1])
+    else:
+        out = tmp_path / "out"
+        assert export(tmp_path, out).returncode == 0
+        entries = json.loads((out / "data/sessions.json").read_text())
+    p = next(s for s in entries if s.get("p") == PAINTER)
+    assert (p["lane"], p["n"], p["outcome"]) == ("OYO1", 1, {"status": "finished", "reason": "reviewed and stopped"})
+    if via == "static export":
+        assert p["completed_at"] == os.path.getmtime(rd / "p1_outcome.json")
+    import export_static as E
+    (rd / "p1_sittings.json").write_text('[{"status":"running"}]')
+    E.runner_states([p], {PAINTER}, p["mtime"])
+    assert not p["active"]
+    p["outcome"] = None
+    E.runner_states([p], {PAINTER}, p["mtime"])
+    assert p["active"]
+
+
+def test_sittings_exclude_startup_only_crashes_but_keep_painting_and_final_review(home, server):
+    tmp_path, studio, log = home
+    log.write_text(start(str(studio)) + call("c1", "canvas{}") + result("c1", "ok · chunk 1"))
+    crash = log.with_name("2026-09-29T11-00-00-000Z_crash.jsonl")
+    crash.write_text(start(str(studio)) + look("l1", png_of("blue")) +
+                     line({"type": "message", "message": {"role": "assistant", "content": [], "stopReason": "error"}}))
+    review = log.with_name("2026-09-29T12-00-00-000Z_review.jsonl")
+    review.write_text(start(str(studio)) + look("l2", png_of("blue")) + say("**The Blue Barn**\n\nI've reviewed it and stopped."))
+    p = next(s for s in json.loads(server("/api/sessions")[1]) if s.get("p") == PAINTER)
+    assert p["sittings"] == 2
+    assert json.loads(server(f"/api/events?p={PAINTER}")[1])["sittings"] == 2
+    out = tmp_path / "out"
+    assert export(tmp_path, out).returncode == 0
+    assert json.loads((out / "data" / PAINTER / "events.json").read_text())["sittings"] == 2
+    crash.write_text(crash.read_text() + call("c2", "wait(10)"))
+    p = next(s for s in json.loads(server("/api/sessions")[1]) if s.get("p") == PAINTER)
+    assert p["sittings"] == 3
+
+
+def test_muse_wonder_full_display_name_matches_viewer_and_export():
+    import export_static as E
+    assert E.MODEL_NAMES["muse-wonder-full-1.0"] == "Muse Wonder Full"
+    assert "'muse-wonder-full-1.0':'Muse Wonder Full'" in open(os.path.join(HERE, "index.html")).read()
 
 
 def test_a_palette_look_is_not_the_painting():
