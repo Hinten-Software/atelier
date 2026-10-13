@@ -68,6 +68,9 @@ def artist_env(config_dir: Path, root: Path | None = None) -> dict:
         # "The user hasn't heard from you in a while - say in a few words what you're doing": a nudge to narrate
         "CLAUDE_CODE_SILENT_TURN_REMINDER": "0",
         "MCP_TOOL_TIMEOUT": str(45 * 60 * 1000),  # the easel allows a chunk 40 minutes at 4800 px (10 at 2400)
+        # ... and Claude Code gives up on a tool that sends nothing for 30 minutes (its own limit, apart from the one
+        # above): a chunk of 30-40 minutes would end the sitting (2026-10-13: the long probe's chunk took 24-27)
+        "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT": str(45 * 60 * 1000),
         "MAX_MCP_OUTPUT_TOKENS": "40000",
     }
     if TOKEN.exists():
