@@ -13,6 +13,7 @@
 <style>
   html.studio-route-pending #who, html.studio-route-pending #badge, html.studio-route-pending #img { visibility:hidden }
   :root {
+    color-scheme:dark;
     --bg:#0b0b0d; --panel:#111114; --panel2:#16161b; --line:#1f1f26;
     --fg:#f0f0f2; --soft:#d4d4da; --dim:#aeaeb6; --faint:#85858e;
     --acc:#f2b865; --live:#e0564f; --blue:#7d9fd4; --ref:#7fd6c2;
@@ -22,6 +23,7 @@
   body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 -apple-system, system-ui, sans-serif; -webkit-font-smoothing:antialiased;
          display:grid; grid-template-rows: auto minmax(0,1fr) auto; grid-template-columns: minmax(0,1fr); width:100vw; overflow:hidden }
   header, main, footer { min-width:0 } #strip, #transport { min-width:0 }
+  * { scrollbar-color:#27272e transparent }
   ::-webkit-scrollbar { width:9px; height:9px } ::-webkit-scrollbar-thumb { background:#27272e; border-radius:5px } ::-webkit-scrollbar-track { background:transparent }
   button, select { font:inherit; font-size:13.5px; color:var(--soft); background:var(--panel2); border:1px solid var(--line); border-radius:7px; padding:4px 10px; cursor:pointer }
   button:hover, select:hover { color:var(--fg); border-color:#30303a }
@@ -88,6 +90,12 @@
   #code .new { background:rgba(214,162,90,.10); box-shadow:inset 3px 0 0 var(--acc) }
   .k { color:#c792d6 } .s { color:#a8c38a } .c { color:#9a9aa3; font-style:italic } .n { color:#e0a36b } .m { color:#7fb3d9 } .f { color:#e6d6a8 }
   #viewpane { background:#070708; position:relative }
+  #viewpane:has(#pip:not([hidden])) { display:grid; grid-template-columns:minmax(0,1fr) clamp(130px,17%,240px); grid-template-rows:auto minmax(0,1fr) auto }
+  #viewpane:has(#pip:not([hidden])) #lighting { grid-column:1 / -1 }
+  #viewpane:has(#pip:not([hidden])) #view { grid-column:1; grid-row:2 }
+  #lighting { display:flex; align-items:center; justify-content:center; gap:6px; padding:7px 12px 0; font-size:12px; color:var(--dim) }
+  #lighting button { padding:3px 9px; font-size:12px }
+  #lighting button[aria-pressed="true"] { color:var(--acc); border-color:var(--acc) }
   /* the painting (its newest whole look) and, when the painter is studying something else right now (a close-up,
      a squint, a check in grays), that look too: secondary here, as big as the painting in stream.css */
   #view { flex:1; min-height:0; display:grid; grid-template-rows:minmax(0,1fr); gap:10px; padding:12px 12px 8px }
@@ -96,16 +104,16 @@
   #view.two.pal { grid-template-columns:minmax(0,1fr) minmax(0,1fr); grid-template-areas:'w w' 'o p' } #view.pal #whole { grid-area:w } #view.pal #other { grid-area:o } #view.pal #pal { grid-area:p }
   #view.pal:not(.two) { grid-template-areas:'w' 'p' }
   #pal { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:12px; align-items:center } #pal[hidden] { display:none }
-  #pband { flex:none; display:grid; grid-auto-flow:column; grid-template-rows:repeat(2,52px); grid-auto-columns:88px; grid-template-columns:14px; align-items:center; gap:8px; padding:7px 12px 9px; overflow-x:auto; border-top:1px solid var(--line); scrollbar-width:thin }
+  #pband { flex:none; grid-column:1 / -1; display:grid; grid-template-columns:repeat(auto-fit,minmax(70px,1fr)); align-items:center; gap:8px; padding:7px 12px 9px; border-top:1px solid var(--line) }
   #pband[hidden] { display:none }
   .palette-toggle { display:none }
-  #pband .lbl { grid-row:span 2; writing-mode:vertical-rl; transform:rotate(180deg); font:600 10px -apple-system,sans-serif; color:#9fd0b4; text-transform:uppercase }
-  #pband .palette-chip { width:88px; height:52px; padding:0; border:0; background:none; display:flex; flex-direction:column; align-items:center; gap:4px }
-  #pband canvas:first-child { width:80px; height:30px; border-radius:4px; box-shadow:0 1px 3px #0009 }
-  #pband .palette-swatch { width:80px; height:30px; flex:none; border-radius:4px; overflow:hidden }
+  #pband .lbl { grid-column:1 / -1; font:600 10px -apple-system,sans-serif; color:#9fd0b4; text-transform:uppercase }
+  #pband .palette-chip { width:100%; min-width:0; height:52px; padding:0; border:0; background:none; display:flex; flex-direction:column; align-items:center; gap:4px }
+  #pband canvas:first-child { width:100%; max-width:80px; height:30px; border-radius:4px; box-shadow:0 1px 3px #0009 }
+  #pband .palette-swatch { width:100%; max-width:80px; height:30px; flex:none; border-radius:4px; overflow:hidden }
   #pband .palette-swatch div:first-child { height:60% }
   #pband .palette-swatch div:last-child { height:40% }
-  #pband .pile-name { height:16px; max-width:88px; image-rendering:pixelated }
+  #pband .pile-name { height:16px; max-width:100%; image-rendering:pixelated }
   #pband span.pile-name { height:18px; font:14px/18px ui-monospace,Menlo,monospace; color:var(--soft); overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
   @media(max-width:700px) { #pband { gap:6px; padding:5px 8px 6px } }
   #pal .box { height:100% } #pal img { object-position:right center }
@@ -117,9 +125,9 @@
   .pic img:not([src]) { visibility:hidden }
   /* the other canvas, small in the corner: the scratch canvas while the painter paints, the painting while it tries
      things on the scratch canvas */
-  #pip { position:absolute; right:14px; bottom:14px; width:17%; max-width:240px; margin:0; padding:5px; z-index:3; background:rgba(12,12,14,.92); border:1px solid var(--line); border-radius:5px; display:flex; flex-direction:column; gap:4px }
+  #pip { grid-column:2; grid-row:2; align-self:end; min-height:0; max-height:100%; margin:12px 14px 8px 0; padding:5px; background:rgba(12,12,14,.92); border:1px solid var(--line); border-radius:5px; display:flex; flex-direction:column; gap:4px }
   #pip[hidden] { display:none }
-  #pip img { display:block; width:100%; height:auto; cursor:zoom-in }
+  #pip img { display:block; min-height:0; width:100%; height:auto; object-fit:contain; cursor:zoom-in }
   #pip figcaption { font:600 13px/1.3 -apple-system,system-ui,sans-serif; color:#fff }
   #cap { position:relative; z-index:1; font:600 14.5px -apple-system,system-ui,sans-serif; color:#fff; text-align:center; white-space:normal; overflow-wrap:anywhere }
   #other { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:12px; align-items:center }
@@ -148,7 +156,7 @@
 
   /* bottom: looks + transport */
   footer { background:var(--panel); border-top:1px solid var(--line); padding:8px 14px 10px }
-  #strip { display:flex; gap:6px; overflow-x:auto; padding-bottom:8px; height:74px }
+  #strip { display:flex; gap:6px; overflow-x:auto; padding:3px 3px 8px; margin:0 -3px; height:74px }
   #strip img { height:58px; width:81px; object-fit:contain; background:var(--panel2); border-radius:3px; cursor:pointer; opacity:.6; transition:opacity .12s; flex:none }
   #strip img:hover { opacity:.8 } #strip img.on { opacity:1; outline:2px solid var(--acc); outline-offset:1px }
   /* a reference picture in the strip: marked, so it doesn't read as a state of the canvas */
@@ -174,10 +182,11 @@
   #zoom { position:fixed; inset:0; background:rgba(0,0,0,.94); display:none; align-items:center; justify-content:center; cursor:zoom-out; z-index:9 }
   #zoom img { max-width:98vw; max-height:98vh }
   @media (max-height:500px) { #codepane { top:8px; bottom:8px } }
+  @media (max-height:500px) and (pointer:coarse) { #whole img { max-height:55dvh; object-fit:contain } }
 
   /* phone: stacked panes, touch transport, home-indicator safe area. LAST in the sheet so it
      overrides the base rules above (equal specificity, later wins). The 1920px stream is untouched. */
-  @media (max-width: 720px) {
+  @media (max-width: 720px), (max-height:500px) and (pointer:coarse) {
     #codepane { top:46px; bottom:100px; left:6px; width:calc(100vw - 12px) }
     /* Narrow windows scroll as one column; the palette never steals canvas height. */
     main { display:block; overflow-y:auto }
@@ -187,12 +196,15 @@
     #whole .box:has(img:not([src])) { min-height:180px }
     #other .box { height:auto }
     #other img { position:relative; display:block; height:auto; max-height:180px }
-    #jbody { flex:none; max-height:60dvh; overflow:auto }
+    #jbody { flex:none; max-height:none; overflow:visible }
+    #viewpane:has(#pip:not([hidden])) { display:flex }
+    #pip { flex:none; align-self:stretch; display:grid; grid-template-columns:minmax(0,1fr) minmax(0,130px); align-items:center; max-height:none; margin:6px 8px 8px; gap:8px }
+    #pip img { max-height:120px }
     #pband { grid-auto-flow:row; grid-template-columns:repeat(auto-fit,minmax(70px,1fr)); grid-template-rows:none; grid-auto-columns:auto; gap:4px 6px; overflow:visible }
     #pband .lbl { grid-column:1 / -1; grid-row:auto; writing-mode:horizontal-tb; transform:none }
     #pband .palette-chip { width:100%; height:42px; min-width:0 }
     #pband canvas:first-child { width:100%; max-width:80px; height:20px }
-    #pband .pile-name { max-width:100% }
+    #pband span.pile-name { font-size:12px }
     #pband .palette-swatch { width:100%; max-width:80px; height:20px }
     #pband .lbl { display:flex; align-items:center; justify-content:space-between }
     .palette-toggle { display:block; padding:0 2px; border:0; background:none; font:13px/24px -apple-system,sans-serif; color:var(--soft); text-transform:none }
@@ -223,6 +235,23 @@
     #speed, #pos { display:none } #togglecode { font-size:10px; padding:2px 7px }
     footer { padding:4px 8px calc(4px + env(safe-area-inset-bottom)) }
   }
+  /* phone, portrait (not the stream): the painting stays pinned at the top while everything else (close-up,
+     scratch canvas, palette, journal) scrolls and follows beneath it. The view pane dissolves so the painting can
+     stick to main. While the painter works on scratch, the painting is in the corner picture, so that one moves first and is pinned. */
+  @media (max-width: 720px) and (min-height: 501px) and (orientation: portrait) {
+    body.pinpic main { position:relative; display:flex; flex-direction:column }
+    body.pinpic :is(#lighting, #whole, #other, #pal, #pip, #pband, #journal) { flex:none }
+    body.pinpic #lighting { order:-2 } body.pinpic #pip.painting { order:-1 }
+    body.pinpic #viewpane, body.pinpic #view, body.pinpic #viewpane:has(#pip:not([hidden])) { display:contents }
+    body.pinpic #whole { position:sticky; top:0; z-index:3; background:#070708; padding:4px 4px 3px; border-bottom:1px solid var(--line) }
+    body.pinpic #whole img { max-height:42dvh; object-fit:contain }
+    body.pinpic #lighting, body.pinpic #other, body.pinpic #pal, body.pinpic #pband { background:#070708 } body.pinpic #other, body.pinpic #pal { padding:4px }
+    body.pinpic #pip { margin:4px 8px 6px }
+    body.pinpic:has(#pip.painting:not([hidden])) #whole { position:relative; z-index:auto }
+    body.pinpic #pip.painting { position:sticky; top:0; z-index:3; margin:0; border:none; border-bottom:1px solid var(--line); border-radius:0; background:#070708; grid-template-columns:minmax(0,1fr); gap:3px; padding:4px 4px 3px }
+    body.pinpic #pip.painting img { width:100%; height:auto; max-height:42dvh; object-fit:contain }
+    body.pinpic #pip.painting figcaption { order:2; text-align:center; font-size:10.5px }
+  }
 </style></head>
 <body class="nocode">
 <header>
@@ -235,6 +264,7 @@
 <main>
   <section class="pane" id="codepane" role="dialog" aria-label="Painter code" aria-hidden="true" inert><h4>code <span id="file"></span><span id="codeformat"></span><button id="codeclose" type="button" aria-label="Close code">✕</button></h4><pre id="code"></pre></section>
   <section class="pane" id="viewpane">
+    <div id="lighting" role="group" aria-label="Painting display"></div>
     <div id="view">
       <figure class="pic" id="whole"><div class="box"><img id="img" alt="the painting"><div id="cropbox" hidden></div><p id="nopic" hidden>No picture yet: the painter hasn't looked at its canvas.<br>Its first look will show here.</p></div><figcaption id="cap"></figcaption></figure>
       <figure class="pic" id="other" hidden><figcaption id="cap2"><b></b><span></span></figcaption><div class="box"><img id="img2" alt=""><span id="reftag" hidden>Reference</span></div></figure>
@@ -285,27 +315,54 @@ const hhmm = ts => new Date(ts).toLocaleTimeString([], {hour:'numeric', minute:'
 const ago = s => s < 90 ? Math.round(s) + ' s ago' : s < 5400 ? Math.round(s/60) + ' min ago' : Math.round(s/3600) + ' h ago';
 // the static export (studio/export_static.py) sets STUDIO_STATIC: the same data, read from files, loaded once
 const STATIC = !!window.STUDIO_STATIC;
+const HOSTED = STATIC && !!window.STUDIO_LIVE;
+let liveFiles = {}, liveRevision = null;
+const dataURL = path => HOSTED ? liveFiles[path] || 'missing-live-file' : path;
+const dataPainter = () => HOSTED ? P() : encodeURIComponent(P());
 // ?stream=1: the livestream's layout. The page loads its own stream.css after its styles (so it overrides them)
 // and keeps the parameter in the address whatever else changes there
 const STREAM = (v => v !== null && v !== '0')(new URLSearchParams(location.search).get('stream'));
+document.body.classList.toggle('pinpic', !STREAM);  // phone portrait pins the painting (see the CSS)
 if (STREAM) { const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = 'stream.css'; document.head.appendChild(l); }
 const addr = q => '?' + q + (STREAM ? '&stream=1' : '');
 let IMGEXT = [], lastStatic = 0, staticV = null;  // static: when events.json was last read (it's re-read every minute)
 const P = () => Q && Q.startsWith('p=') ? decodeURIComponent(Q.slice(2)) : '';
-const imgURL = i => STATIC ? `data/${encodeURIComponent(P())}/img/${i}.${IMGEXT[i] || 'png'}` : `/img?${Q}&i=${i}`;
+const imgURL = i => STATIC ? dataURL(`data/${dataPainter()}/img/${i}.${IMGEXT[i] || 'png'}`) : `/img?${Q}&epoch=${epoch}&i=${i}`;
+const lightURL = (i, light) => STATIC ? dataURL(`data/${dataPainter()}/${light}/${i}.png`) : `/img?${Q}&epoch=${epoch}&i=${i}&${light}=1`;
+const DISPLAY_LIGHTS = { color:{ label:'Color' }, gallery:{ label:'Gallery light', image:i => lightURL(i, 'gallery') }, relief:{ label:'Relief', image:i => lightURL(i, 'relief') } };
+let displayLight = 'gallery';
+let explicitLight = null;
+if (!STREAM) try { const stored = localStorage.getItem('studio.lighting'), saved = stored === 'colour' ? 'color' : stored; if (Object.hasOwn(DISPLAY_LIGHTS, saved)) explicitLight = displayLight = saved; } catch (e) {}
+function lightingControls() { for (const id of Object.keys(DISPLAY_LIGHTS)) $(id).setAttribute('aria-pressed', String(displayLight === id)); }
+for (const [id, preset] of Object.entries(DISPLAY_LIGHTS)) {
+  const button = document.createElement('button'); button.id = id; button.type = 'button'; button.textContent = preset.label;
+  button.onclick = () => {
+    explicitLight = displayLight = id;
+    try { localStorage.setItem('studio.lighting', displayLight); } catch (e) {}
+    lightingControls(); $('zoom').style.display = 'none'; pictures();
+  };
+  $('lighting').appendChild(button);
+}
+lightingControls();
 // the static export's small JPEG copies of a look (t: the strip's thumbnail, v: the main view); the original is for the zoom
 let WEB = [];
-const webURL = (d, i) => STATIC && WEB[i] ? `data/${encodeURIComponent(P())}/${d}/${i}.jpg` : imgURL(i);
+const webURL = (d, i) => STATIC && WEB[i] ? dataURL(`data/${dataPainter()}/${d}/${i}.jpg`) : imgURL(i);
 const thumbURL = i => webURL('t', i), viewURL = i => webURL('v', i);
 let viewI = -1, viewI2 = -1;  // the looks in the main view: the painting, and what the painter is studying now
 let hasLooks = false;  // the painter uses the easel's look tool (round 19 on); before it, the main view is simply the last picture it saw
 // model ids as people say them
 const NAMES = {'claude-opus-5-5':'Claude Opus 5.5', 'claude-fable-5-1':'Claude Fable 5.1', 'claude-sonnet-5':'Claude Sonnet 5', 'claude-sonnet-5-5':'Claude Sonnet 5.5',
-  'gpt-6-astra':'GPT-6 Astra', 'gpt-6-luna':'GPT-6 Luna', 'gpt-6.1-sol':'GPT-6.1 Sol', 'gemini-3.8-flash':'Gemini 3.8 Flash', 'muse-spark-1.3':'Muse Spark 1.3',
+  'gpt-6-astra':'GPT-6 Astra', 'gpt-6-luna':'GPT-6 Luna', 'gpt-6.1-sol':'GPT-6.1 Sol', 'gemini-3.8-flash':'Gemini 3.8 Flash', 'muse-spark-1.3':'Muse Spark 1.3', 'muse-wonder-full-1.0':'Muse Wonder Full',
   'glm-5.3-flash':'GLM-5.3 Flash', 'mimo-v2.6-pro':'MiMo v2.6 Pro', 'deepseek-v4.1-flash':'DeepSeek V4.1 Flash', 'kimi-k3':'Kimi K3', 'space-bunny-free':'Space Bunny'};
 const modelName = m => NAMES[m] || m;
 const sitLabel = e => `sitting ${e.n} · ${hhmm(e.ts)}`;
 const qOf = s => s.p ? 'p=' + encodeURIComponent(s.p) : 's=' + encodeURIComponent(s.s);
+const isHopper = s => /(?:^|\s)Hopper$/i.test(s?.artist || '');
+const currentSession = () => allSessions.find(s => qOf(s) === Q || Q?.startsWith('s=') && s.files?.includes(decodeURIComponent(Q.slice(2))));
+function sessionLighting() {
+  displayLight = explicitLight || (isHopper(currentSession()) ? 'color' : 'gallery');
+  lightingControls();
+}
 
 let allSessions = [], sessionsLoaded = false;
 const when = t => new Date(t*1000).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
@@ -328,12 +385,12 @@ const ageOf = s => Date.now() / 1000 - s.mtime, isLive = s => !outcomeLabel(s) &
 const SUBJ = {Friedrich:'after Friedrich', free:'free subject', 'self-portrait':'self-portrait'};
 const subj = s => s.subject ? SUBJ[s.subject] || 'after ' + (s.artist || s.subject) : '';  // (the artist in full when the brief names one: 'after Kendric Tonn')
 const models = s => (s.model || '').split(' → ').map(modelName).join(' → ');
-const ownThumb = s => s.look == null ? null : STATIC ? `data/${encodeURIComponent(s.p)}/t/${s.look}.jpg` : `/api/glance?p=${encodeURIComponent(s.p)}&i=${s.look}`;
+const ownThumb = s => s.look == null ? null : STATIC ? dataURL(`data/${HOSTED ? s.p : encodeURIComponent(s.p)}/t/${s.look}.jpg`) : `/api/glance?p=${encodeURIComponent(s.p)}&i=${s.look}&epoch=${s.epoch || 0}&version=${s.thumb_version || ''}`;
 // what the picker and the header say about a painter: the gallery's title and picture if it has them, else its own
 function about(s) {
   const g = GALLERY && s.p ? GALLERY[s.p] : null, live = isLive(s);
   return { title: (g && typeof g.title === 'string' && g.title) || s.title || (live ? 'Untitled, in progress' : 'Untitled'),
-           thumb: siteURL(g && g.thumb) || ownThumb(s), own: ownThumb(s), url: siteURL(g && g.url), live, model: models(s) };
+           thumb: (isHopper(s) ? ownThumb(s) : siteURL(g && g.thumb)) || ownThumb(s), own: ownThumb(s), url: siteURL(g && g.url), live, model: models(s) };
 }
 const sessLabel = s => `${s.folder.replace(/^claude-paint-/, '')}${s.model ? ' · ' + s.model : ''} · ${when(s.mtime)}`;
 // an old ?s= link to one sitting of a painter: what to call it
@@ -388,29 +445,49 @@ function warmPicker() {
 function closePicker(refocus) { if ($('picker').hidden) return; $('picker').hidden = true; $('who').setAttribute('aria-expanded', 'false'); if (refocus) $('who').focus(); }
 function choose(q) {
   closePicker(true); if (q === Q) return;
-  reset(); Q = q; live = true; history.replaceState(null, '', addr(Q)); renderHeader(); glimpse(); poll();
+  reset(); Q = q; sessionLighting(); live = true; history.replaceState(null, '', addr(Q)); renderHeader(); glimpse(); poll();
 }
 // before a painter's events arrive: its newest whole look (sessions.json has it) in the painting's place, the
 // thumbnail at once (the picker has just shown it) and the view copy once it's in, so the place isn't black meanwhile
 function glimpse() {
   const s = allSessions.find(x => qOf(x) === Q), t = s && ownThumb(s); if (events.length || !t) return;
   const im = $('img'); if (!im.getAttribute('src')) im.src = t;
-  if (STATIC) setPic(im, [`data/${encodeURIComponent(s.p)}/v/${s.look}.jpg`, t]);
+  if (STATIC) setPic(im, [dataURL(`data/${HOSTED ? s.p : encodeURIComponent(s.p)}/v/${s.look}.jpg`), t]);
 }
 // a picture into one of the view's places. The one there stays until the new one has loaded, so a place never goes
 // empty while a picture is known; one that fails is tried again, then the next of urls (the original, the
 // thumbnail), and the first again a little later (a few times), for as long as it's the picture wanted there
-function setPic(im, urls) {
-  if (im.dataset.want === urls[0]) return; const want = im.dataset.want = urls[0]; let k = 0, tries = 0, rounds = 0;
-  const again = () => { if (++rounds < 6) { k = 0; tries = 0; setTimeout(go, 5000); } };
+function setPic(im, urls, loaded) {
+  im._picLoaded = loaded;
+  if (im.dataset.want === urls[0]) { if (loaded && im.dataset.loadedWant === urls[0]) loaded(im.dataset.loaded); return; }
+  if (im === $('img') && !im.getAttribute('src')) { $('nopic').textContent = 'Loading…'; $('nopic').hidden = false; }
+  const want = im.dataset.want = urls[0]; let k = 0, tries = 0, rounds = 0;
+  const again = () => { if (++rounds < 6 || HOSTED) { k = 0; tries = 0; setTimeout(go, 5000); } };
   const go = () => { if (im.dataset.want !== want) return; const p = new Image(), u = urls[k];
     if (im === $('img')) p.fetchPriority = 'high';
-    p.onload = () => { if (im.dataset.want !== want) return; if (!im.src.endsWith(u)) im.src = u; if (k) again(); };
+    p.onload = () => { if (im.dataset.want !== want) return; if (!im.src.endsWith(u)) im.src = u; im.dataset.loaded = u; im.dataset.loadedWant = want; if (im === $('img')) $('nopic').hidden = true; if (im._picLoaded) im._picLoaded(u); if (k) again(); };
     p.onerror = () => { if (++tries < 2) return setTimeout(go, 1000); tries = 0; if (++k < urls.length) go(); else again(); };
     p.src = u; };
   go();
 }
-function clearPic(im) { delete im.dataset.want; im.removeAttribute('src'); }
+function displayPic(im, e, caption, label) {
+  const lightName = displayLight, preset = DISPLAY_LIGHTS[lightName], url = preset.image && preset.image(e.img);
+  const modes = ((e.look || '').match(/mode (.*?)(?=, (?:crop|size|grid|light|compare|hold|at|palette|survey|scratch) |$)/) || [])[1] || '';
+  const eligible = !e.ref && !isPalette(e) && !/light|compare|hold/.test(e.look || '') && !modes.split(',').some(m => m.trim() && !['normal', 'color'].includes(m.trim()));
+  const lit = eligible && preset.image && e[lightName];
+  const urls = [viewURL(e.img), imgURL(e.img), thumbURL(e.img)];
+  if (lit) urls.unshift(url);
+  const describe = () => {
+    if (im === $('img') && im.getAttribute('src') && im.dataset.loadedWant !== urls[0]) return;
+    const actual = DISPLAY_LIGHTS[im.dataset.light || 'color'];
+    const light = actual.image ? actual.label : '';
+    caption.textContent = [label, light].filter(Boolean).join(' · ');
+  };
+  describe();
+  setPic(im, urls, u => { im.dataset.picture = e.img; im.dataset.light = u === url ? lightName : 'color'; im.dataset.zoom = u === url ? url : imgURL(e.img); describe(); });
+}
+const zoomURL = im => im.dataset.zoom || im.src;
+function clearPic(im) { delete im.dataset.want; delete im.dataset.loaded; delete im.dataset.loadedWant; delete im.dataset.picture; delete im.dataset.light; delete im.dataset.zoom; im._picLoaded = null; im.removeAttribute('src'); }
 $('who').onclick = () => $('picker').hidden ? openPicker() : closePicker(true);
 $('pkclose').onclick = () => closePicker(true);
 $('pklist').onclick = e => {
@@ -428,6 +505,7 @@ $('picker').onkeydown = e => {
 document.addEventListener('pointerdown', e => { if (!$('picker').hidden && !e.target.closest('#picker, #who')) closePicker(false); });
 $('picker').addEventListener('focusout', e => { if (e.relatedTarget && !e.relatedTarget.closest('#picker, #who')) closePicker(false); });
 async function loadSessions() {
+  if (HOSTED) { await poll(); return; }
   allSessions = await (await fetch(STATIC ? 'data/sessions.json' : '/api/sessions', STATIC ? {cache: 'no-cache'} : {})).json();
   sessionsLoaded = true;
   if (Q === null) {
@@ -442,24 +520,44 @@ async function loadSessions() {
     }
     Q = u.get('p') ? 'p=' + encodeURIComponent(u.get('p')) : s ? 's=' + encodeURIComponent(s) : first ? qOf(first) : null;
   }
+  const previousLight = displayLight; sessionLighting(); if (previousLight !== displayLight && events.length) pictures();
   renderHeader(); if (otherK >= 0 && events[otherK] && events[otherK].ref) second(otherK);  // (the reference's label names the artist once the list has it)
   if ($('picker').hidden) renderPicker();  // don't rebuild the list under the visitor's focus
 }
 $('all').onchange = () => { localStorage.setItem('studio.all', $('all').checked ? '1' : '0'); renderPicker(); };
 let gen = 0, busy = false;  // one poll at a time; a reset (new painter, rebuilt stream) makes in-flight polls stale
-function reset() { gen++; busy = false; staticV = null; stop(); events = []; nUpd = 0; epoch = null; cwd = ''; liveText = null; typed = -1; sitStarts = [0]; nSittings = 1; hasLooks = false; $('strip').innerHTML = ''; $('ticks').innerHTML = ''; clearCode(); noPicture(); }
+function reset() { gen++; busy = false; staticV = null; liveRevision = null; stop(); events = []; nUpd = 0; epoch = null; cwd = ''; liveText = null; typed = -1; sitStarts = [0]; nSittings = 1; hasLooks = false; $('strip').innerHTML = ''; $('ticks').innerHTML = ''; clearCode(); noPicture(); }
 const NOPIC = "No picture yet: the painter hasn't looked at its canvas.<br>Its first look will show here.";
 function noPainting() { $('nopic').innerHTML = NOPIC; $('nopic').hidden = !events.length; clearPic($('img')); $('cap').textContent = ''; viewI = -1; }  // the painting's place, empty
 function noPicture() { noPainting(); second(-1); palette(-1); $('zimg').removeAttribute('src'); $('zoom').style.display = 'none'; }
 async function poll() {
   // a static export is re-uploaded every minute or so while painters work: read it again at most once a minute
-  if (!Q || busy || (STATIC && epoch !== null && Date.now() - lastStatic < 60000)) return;
+  if ((!Q && !HOSTED) || busy || (STATIC && !HOSTED && epoch !== null && Date.now() - lastStatic < 60000)) return;
   const g = gen; busy = true; let r;
-  try { // (static: asked again of the server each time, so a file that hasn't changed comes from the browser's cache, and isn't read again)
+  try {
+        if (HOSTED) {
+          const get = async path => { const a = await fetch(path, {cache:'no-store'}); if (!a.ok) throw Error('live data unavailable'); return a.json(); };
+          const m = await get('manifest.json');
+          const objectPath = path => typeof path === 'string' && /^objects\/[a-f0-9]{64}(?:\.[a-z0-9]+)?$/.test(path);
+          if (m.version !== 1 || !/^[a-f0-9]{64}$/.test(m.revision) || !objectPath(m.snapshot)) throw Error('invalid live manifest');
+          if (m.revision === liveRevision) return;
+          const snapshot = await get(m.snapshot), files = snapshot.files;
+          if (!files || Object.values(files).some(path => !objectPath(path))) throw Error('invalid live snapshot');
+          const ss = await get(files['data/sessions.json']);
+          const q = Q || (ss[0] && qOf(ss[0]));
+          const p = q && q.startsWith('p=') ? decodeURIComponent(q.slice(2)) : '';
+          if (!p || !ss.some(s => s.p === p)) throw Error('painter unavailable');
+          r = await get(files[`data/${p}/events.json`]);
+          if (g !== gen) return;
+          Q = q; liveFiles = files; liveRevision = m.revision; allSessions = ss; sessionsLoaded = true;
+          sessionLighting();
+          renderHeader(); if ($('picker').hidden) renderPicker();
+        } else {
         const a = await fetch(STATIC ? `data/${encodeURIComponent(P())}/events.json` : `/api/events?${Q}&since=${events.length}${epoch === null ? '' : '&epoch=' + epoch + '&u=' + nUpd}`, STATIC ? {cache: 'no-cache'} : {});
         const v = STATIC && a.ok && [a.headers.get('etag'), a.headers.get('last-modified')].join();
         if (v && v !== ',' && v === staticV && g === gen && epoch !== null) { lastStatic = Date.now(); return; }
-        r = await a.json(); if (g === gen) staticV = v; }
+        r = await a.json(); if (g === gen) staticV = v;
+        } }
   catch (e) {  // no such painter (yet): a stream opened before its painter begins waits for it
     if (g === gen && !events.length) { $('nopic').innerHTML = "This painter hasn't started yet.<br>Its canvas will show here when it does."; $('nopic').hidden = false; $('clockbox').hidden = true;
       $('badge').textContent = ''; $('badge').className = ''; for (const x of $('doing').children) x.textContent = ''; }
@@ -470,7 +568,7 @@ async function poll() {
   // events we already have whose result came in since: the server lists them; the static file just has them as they are now
   let ups = r.updates || [];
   if (STATIC) { lastStatic = Date.now(); ups = [];
-    for (let i = 0; i < events.length && i < r.events.length; i++) if (r.events[i].out !== events[i].out || r.events[i].err !== events[i].err || r.events[i].scratch_reset !== events[i].scratch_reset) ups.push([i, r.events[i]]);
+    for (let i = 0; i < events.length && i < r.events.length; i++) if (HOSTED ? JSON.stringify(r.events[i]) !== JSON.stringify(events[i]) : r.events[i].out !== events[i].out || r.events[i].err !== events[i].err || r.events[i].scratch_reset !== events[i].scratch_reset) ups.push([i, r.events[i]]);
     r.events = r.events.slice(events.length); }  // the file holds every event: keep the new ones
   epoch = r.epoch; nSittings = r.sittings; if (r.imgext) IMGEXT = r.imgext; if (r.web) WEB = r.web; if (r.nupdates !== undefined) nUpd = r.nupdates;
   for (const [i, e] of ups) if (i < events.length) { events[i] = e; invalidateReplay(i); }
@@ -487,6 +585,7 @@ async function poll() {
     if (!base && sessionsLoaded && !allSessions.some(s => qOf(s) === Q)) loadSessions();  // a painter that has just begun: its name for the header
   }
   if (live) refreshLiveCode();
+  if (HOSTED) pictures();
   status(); warmSoon();
 }
 // a new sitting: a divider in the looks strip and a tick on the scrub bar
@@ -521,10 +620,11 @@ function paintedFor(i, t) {
 const sittingAt = i => sitStarts.filter(b => b <= i).length;
 function thumb(e, i, to) {
   const im = document.createElement('img'); im.loading = 'lazy'; im.src = thumbURL(e.img);
+  if (HOSTED) im.onerror = () => setTimeout(() => { if (im.isConnected) im.src = thumbURL(e.img); }, 5000);
   let t = im;  // (a reference picture: the thumbnail in a marked frame)
   if (e.ref) { t = document.createElement('span'); t.className = 'refthumb'; t.appendChild(im); const b = document.createElement('b'); b.textContent = 'REF'; t.appendChild(b); }
   t.dataset.i = i; t.title = hhmm(e.ts) + '  ' + (e.ref ? 'reference picture: ' : '') + fname(e.path);
-  t.onclick = () => { live = false; stop(); show(i); }; to.appendChild(t);
+  t.onclick = () => { live = false; stop(); show(i, true); }; to.appendChild(t);
 }
 function stripEnd() { const s = $('strip'); s.scrollLeft = s.scrollWidth; }
 
@@ -620,7 +720,7 @@ function status() {
   // LIVE only while the painter works; after that the same control just goes to the end
   const g = $('golive'); g.classList.toggle('on', atLive && active); g.classList.toggle('end', !active);
   g.textContent = active ? '● LIVE' : 'End ⇥'; g.title = active ? 'jump to live  l' : 'go to the end  l';
-  const t = atLive && active ? Date.now() : Date.parse(events[pos].ts), n = sitStarts.length;
+  const t = atLive && active ? Date.now() : Date.parse(events[pos].ts), n = atLive ? nSittings : sitStarts.length;
   $('clock').textContent = fmt(paintedFor(pos, t)); $('clockbox').hidden = false;
   $('clocklbl').textContent = (atLive ? (active ? 'painting for' : 'painted for') : 'at') + (n > 1 ? (atLive ? ` · ${n} sittings` : ` · sitting ${sittingAt(pos)} of ${n}`) : '');
   const ec = easelClockAt(pos), pc = $('pclock'); pc.hidden = false;
@@ -706,8 +806,8 @@ const codeShown = () => !document.body.classList.contains('nocode');
 async function refreshLiveCode() {
   const p = paintingFile(events.length - 1); if (!p || !cwd) return;
   const rel = p.startsWith(cwd + '/') ? p.slice(cwd.length + 1) : p;
-  const q = Q, g = gen, r = await fetch(STATIC ? `data/${encodeURIComponent(P())}/file/${rel.split('/').map(encodeURIComponent).join('/')}?t=${Date.now()}` : `/api/file?${q}&f=${encodeURIComponent(rel)}`); if (!r.ok || q !== Q || g !== gen) return;
-  const t = await r.text(); if (q !== Q || g !== gen) return; if (t !== liveText) { const old = liveText; liveText = t; if (live && pos === events.length - 1) renderCode(p, t, diffLines(old, t), old); }
+  const q = Q, g = gen, revision = liveRevision, r = await fetch(STATIC ? HOSTED ? dataURL(`data/${P()}/file/${rel}`) : `data/${encodeURIComponent(P())}/file/${rel.split('/').map(encodeURIComponent).join('/')}?t=${Date.now()}` : `/api/file?${q}&f=${encodeURIComponent(rel)}`); if (!r.ok || q !== Q || g !== gen || HOSTED && revision !== liveRevision) return;
+  const t = await r.text(); if (q !== Q || g !== gen || HOSTED && revision !== liveRevision) return; if (t !== liveText) { const old = liveText; liveText = t; if (live && pos === events.length - 1) renderCode(p, t, diffLines(old, t), old); }
 }
 const { diffLines, lineHTML } = CodeDisplay;
 let codeWorker = null, codeRequest = 0, codeCache = null, codeBatch = null, codeSelection = null;
@@ -717,15 +817,18 @@ codeChannel.port1.onmessage = () => codeBatch?.();
 function queueCodeBatch(batch) { codeBatch = batch; codeChannel.port2.postMessage(null); }
 function clearCode() {
   ++codeRequest; codeCache = null; codeSelection = null;
+  if (codeWorker) codeWorker.postMessage({ cancel:true });
   codeBatch = null; $('code').replaceChildren(); $('file').textContent = ''; $('codeformat').textContent = '';
   $('togglecode').disabled = true; $('togglecode').title = 'preparing code';
 }
-function renderCode(path, text, newLines, before = null) {
+const codeFormatAllowed = stepping => !playing && (codeShown() || stepping);
+function renderCode(path, text, newLines, before = null, stepping = false) {
   const previous = newLines.size ? before : null, changedKey = [...newLines].join(',');
-  if (codeCache?.path === path && codeCache.input === text && codeCache.previous === previous && codeCache.changedKey === changedKey) return;
+  const format = codeFormatAllowed(stepping);
+  if (codeCache?.path === path && codeCache.input === text && codeCache.previous === previous && codeCache.changedKey === changedKey && codeCache.format === format) return;
   const id = ++codeRequest, lua = /\.lua$/.test(path);
   codeBatch = null;
-  codeCache = { path, input:text, previous, changedKey };
+  codeCache = { path, input:text, previous, changedKey, format };
   const draw = (display, changed, formatted, chunks = null) => {
     if (id !== codeRequest) return;
     codeBatch = null;
@@ -761,7 +864,7 @@ function renderCode(path, text, newLines, before = null) {
     queueCodeBatch(batch);
   };
   const raw = () => draw(text, newLines, false);
-  if (!lua || !text || codeWorker === false) { raw(); return; }
+  if (!lua || !text || !format || codeWorker === false) { if (codeWorker) codeWorker.postMessage({ cancel:true }); raw(); return; }
   try {
     if (!codeWorker) codeWorker = new Worker('code-format.js', { type:'module' });
     codeWorker.onerror = () => { codeWorker.terminate(); codeWorker = false; raw(); };
@@ -772,28 +875,34 @@ function renderCode(path, text, newLines, before = null) {
     codeWorker.postMessage({ id, input:text, previous, changed:[...newLines] });
   } catch (e) { if (codeWorker) codeWorker.terminate(); codeWorker = false; raw(); }
 }
-function codeAt(i) {
+function codeAt(i, stepping = false) {
   const p = paintingFile(i); if (!p) return renderCode('', '', new Set());
   const atLive = live && i === events.length - 1;
-  if (atLive && liveText != null) return renderCode(p, liveText, new Set());
+  if (atLive && liveText != null) return renderCode(p, liveText, new Set(), null, stepping);
   const s = source(p, i);
-  if (codeSelection?.path === p && codeSelection.source === s && codeSelection.fallback === liveText && codeSelection.request === codeRequest) return;
+  if (codeSelection?.path === p && codeSelection.source === s && codeSelection.fallback === liveText && codeSelection.request === codeRequest && codeSelection.format === codeFormatAllowed(stepping)) return;
   const { text, before, changed, known } = s;
   const nl = new Set(); if (known) { let off = 0; text.split('\n').forEach((l, k) => { const a = off, b = off + l.length; off = b + 1; if (changed.some(([x, y]) => x <= b && y >= a)) nl.add(k); }); }
-  renderCode(p, known ? text : (liveText || ''), nl, before);
-  codeSelection = { path:p, source:s, fallback:liveText, request:codeRequest };
+  renderCode(p, known ? text : (liveText || ''), nl, before, stepping);
+  codeSelection = { path:p, source:s, fallback:liveText, request:codeRequest, format:codeFormatAllowed(stepping) };
 }
 
 // ---- journal: thoughts as prose, actions condensed into chips
 let typed = -1, typer = null, jgen = 0, journalView = null, journalItems = new Map(), journalNodes = new Map(), typingThought = null;
 // (a look's chip shows that look)
-$('jbody').onclick = e => { const el = e.target.closest('.chip.look[data-i]'); if (el) { live = false; stop(); show(+el.dataset.i); } };
-function journal(i) {
+$('jbody').onclick = e => { const el = e.target.closest('.chip.look[data-i]'); if (el) { live = false; stop(); show(+el.dataset.i, true); } };
+function journalScroll() {
+  const jb = $('jbody'), el = getComputedStyle(jb).overflowY === 'visible' ? jb.closest('main') : jb;
+  return { el, following:el === jb || el.scrollHeight - el.clientHeight - el.scrollTop <= 24 };
+}
+function journal(i, scroll) {
   const jb = $('jbody');
+  if (journalView?.i === i && journalView.live === live && journalView.length === events.length && journalView.revision === replayRevision && journalView.gen === gen && journalView.events === events) return;
+  const initiallyFollowing = scroll.following || !journalView || journalView.events !== events || journalView.gen !== gen ||
+    !live && journalView.i !== i || live && !journalView.live;
   if (journalView?.events !== events || journalView?.gen !== gen) {
     clearInterval(typer); typingThought = null; journalItems.clear(); journalNodes.clear(); jb.replaceChildren();
   }
-  if (journalView?.i === i && journalView.live === live && journalView.length === events.length && journalView.revision === replayRevision && journalView.gen === gen && journalView.events === events) return;
   journalView = { i, live, length:events.length, revision:replayRevision, gen, events };
   const from = Math.max(0, i - 250); let blocks = [], chips = [], firstChip = -1, lastTm = 0, lastThink = -1;
   for (let k = i; k >= from; k--) if (events[k].kind === 'think') { lastThink = k; break; }
@@ -832,9 +941,11 @@ function journal(i) {
   const keys = new Set(blocks.map(b => b.key));
   for (const [key, entry] of journalNodes) if (!keys.has(key)) { entry.el.remove(); journalNodes.delete(key); }
   // Newest content first; only new or changed blocks are parsed. Older work yields as before.
-  const g = ++jgen, generation = gen; let at = blocks.length, anchor = null;
+  const g = ++jgen, generation = gen; let at = blocks.length, anchor = null, firstPiece = true;
   const piece = () => {
     if (g !== jgen || generation !== gen) return;
+    const state = firstPiece ? scroll : journalScroll(), following = firstPiece ? initiallyFollowing : state.following;
+    firstPiece = false;
     const h = jb.scrollHeight; let size = 0;
     while (at > 0 && size < 12000) {
       const b = blocks[--at]; let entry = journalNodes.get(b.key);
@@ -848,10 +959,11 @@ function journal(i) {
       if (el.parentNode !== jb || el.nextSibling !== anchor) jb.insertBefore(el, anchor);
       anchor = el;
     }
-    jb.scrollTop += jb.scrollHeight - h;
+    if (state.el === jb) jb.scrollTop += jb.scrollHeight - h;
+    else if (following) state.el.scrollTop = 1e9;
     if (at) setTimeout(piece, 0);
   };
-  piece(); jb.scrollTop = 1e9;
+  piece(); if (scroll.el === jb) jb.scrollTop = 1e9;
   if (startTyping) {
     typed = lastThink;
     const el = journalNodes.get('think:' + lastThink).el, txt = events[lastThink].text.trim();
@@ -860,6 +972,7 @@ function journal(i) {
     let n = 0, offset = 0;
     const timer = setInterval(() => {
       if (generation !== gen || typingThought !== thought || !el.isConnected) { clearInterval(timer); return; }
+      const state = journalScroll();
       n = Math.min(txt.length, n + Math.max(3, txt.length / 120 | 0));
       let end;
       while ((end = txt.indexOf('\n', offset)) >= 0 && end < n) { markdownLine(parser, txt.slice(offset, end)); offset = end + 1; }
@@ -875,7 +988,7 @@ function journal(i) {
         cursor.remove(); clearInterval(timer); typingThought = null;
         journalNodes.get('think:' + lastThink).html = html.join('');
       }
-      jb.scrollTop = 1e9;
+      if (state.following) state.el.scrollTop = 1e9;
     }, 30);
     typer = timer;
   }
@@ -920,7 +1033,7 @@ const plain = s => s.replace(/^\s*(#{1,6}\s+|[-*+•]\s+|\d{1,3}[.)]\s+|>\s*)/, 
 
 // ---- looks: the whole painting, and what the painter is studying
 // an image is a whole look if the look that made it asked for no crop, no mode, no light, and not the palette, a survey or a comparison (studio.py's is_whole)
-const isWhole = e => e.look !== undefined && !/crop|mode|light|compare|hold|(?:palette|survey|scratch) (?!False)/.test(e.look);
+const isWhole = e => e.look !== undefined && !/crop|mode|light|compare|hold|(?:palette|survey|scratch) (?!False)/.test(e.look.replace(/mode (?:normal|color)(?:\s*,\s*(?:normal|color))*(?=, [a-z]+ |$)/g, ''));
 // the scratch canvas beside the painting: a look at it, or a chunk painted on it
 const isScratch = e => e.kind === 'paint' ? !!e.scratch : /scratch (?!False)/.test(e.look || e.text || '');
 const unscratched = look => (look || '').replace(/(?:, )?scratch True/, '').replace(/^, /, '');
@@ -1125,17 +1238,22 @@ function refWords() {
   const cur = allSessions.find(s => qOf(s) === Q), by = cur && cur.reference_artist;
   return ['Reference', by ? `A painting by ${by} that the painter is studying: not the painter's own picture.` : "A reference picture the painter is studying: not the painter's own picture."];
 }
-let crop = null, otherK = -1;  // the second look's window, outlined on the painting; the second picture's event
+let crop = null, cropUnits = 1000, otherK = -1;  // the second look's window, outlined on the painting; the second picture's event
 function second(k, w = -1) {
   const on = k >= 0; $('other').hidden = !on; $('view').classList.toggle('two', on); viewI2 = on ? events[k].img : -1; otherK = k;
   crop = null; $('other').classList.toggle('ref', on && !!events[k].ref);
-  if (on) { const e = events[k], [t, why] = e.ref ? refWords() : lookWords(e.look), u = viewURL(e.img);
-    setPic($('img2'), [u, imgURL(e.img), thumbURL(e.img)]);
+  if (on) { const e = events[k], [t, why] = e.ref ? refWords() : lookWords(e.look);
     $('cap2').querySelector('b').textContent = e.ref ? t : lookWords(unscratched(e.look))[0].split(',')[0];
     const detail = e.ref ? null : cropOf(e.look);
     crop = detail && w >= k && wholePicture(events[w]) ? detail : null;
+    cropUnits = 1000;
+    if (crop) for (let j = w; j >= 0; j--) { const earlier = events[j];
+      if (earlier.kind !== 'paint' || !!earlier.scratch !== isScratch(events[w])) continue;
+      const cells = (earlier.out || '').match(/Lab GPU: (\d+)x(\d+) cells/);
+      if (cells) { cropUnits = +cells[1]; break; }
+    }
     const age = e.ref ? '' : snapshotAge(k, isScratch(e));
-    $('cap2').querySelector('span').textContent = ' · ' + [hhmm(e.ts), age].filter(Boolean).join(' · ');
+    displayPic($('img2'), e, $('cap2').querySelector('span'), ' · ' + [hhmm(e.ts), age].filter(Boolean).join(' · '));
     $('cap2').title = e.ref ? why : `Recorded look at ${hhmm(e.ts)}${age ? ': ' + age : ''}${why ? '. ' + why : ''}${crop ? '. Outlined on the painting.' : detail ? '. No outline: the whole look is older or unavailable.' : '.'}`;
     $('img2').alt = e.ref ? 'a reference picture' : t; }
   else clearPic($('img2'));
@@ -1157,8 +1275,9 @@ function placeTag() {
 function placeCrop() {
   const im = $('img'), cb = $('cropbox');
   if (!crop || !im.naturalWidth || !im.src) { cb.hidden = true; return; }
-  const [left, top, w] = shownAt(im), u = w / 1000, H = 1000 * im.naturalHeight / im.naturalWidth, cl = (v, hi) => Math.max(0, Math.min(hi, v));
-  const [x0, y0, x1, y1] = [cl(crop[0], 1000), cl(crop[1], H), cl(crop[2], 1000), cl(crop[3], H)];
+  const W = cropUnits;
+  const [left, top, w] = shownAt(im), u = w / W, H = W * im.naturalHeight / im.naturalWidth, cl = (v, hi) => Math.max(0, Math.min(hi, v));
+  const [x0, y0, x1, y1] = [cl(crop[0], W), cl(crop[1], H), cl(crop[2], W), cl(crop[3], H)];
   if (x1 <= x0 || y1 <= y0) { cb.hidden = true; return; }
   Object.assign(cb.style, {left: left + x0 * u + 'px', top: top + y0 * u + 'px', width: (x1 - x0) * u + 'px', height: (y1 - y0) * u + 'px'});
   cb.hidden = false;
@@ -1170,7 +1289,7 @@ function shape() {
   if (im.naturalWidth) $('view').classList.toggle('tall', im.naturalWidth < im.naturalHeight * 1.15);
   placeCrop(); placeTag();
 }
-$('img').addEventListener('load', shape); $('img').addEventListener('load', warmSoon); $('img2').addEventListener('load', shape);
+$('img').addEventListener('load', shape); $('img').addEventListener('load', warmSoon); $('img').addEventListener('load', () => { if (events.length) pictures(); }); $('img2').addEventListener('load', shape);
 { const ro = new ResizeObserver(() => { placeCrop(); placeTag(); }); ro.observe($('whole')); ro.observe($('other')); }
 
 // ---- show event i everywhere
@@ -1178,12 +1297,21 @@ let rested = false;  // the view as last drawn was resting
 function pictures() {
   rested = resting();
   // at the scratch canvas (and a picture of it seen): it is the big picture and the painting the small one
-  let sc = scratchingAt(pos) && !rested;
-  const [w, o] = picturesAt(pos, rested, sc);
+  const atLiveEnd = live && pos === events.length - 1;
+  const boundary = atLiveEnd && scratchingAt(pos) ? events.slice(0, pos + 1).findLast(scratchBoundary) : null;
+  const pendingScratch = boundary && scratchReset(boundary) && !boundary.err && picturesAt(pos, true, true)[0] < 0;
+  let sc = scratchingAt(pos) && (!rested || pendingScratch);
+  let [w, o] = picturesAt(pos, rested, sc), previousScratch = false, awaitingScratch = false;
+  if (sc && pendingScratch) {
+    for (let k = pos; k >= 0; k--) { const e = events[k];
+      if (e.kind === 'image' && isScratch(e) && !e.ref && !isPalette(e)) { w = k; o = -1; previousScratch = true; break; }
+    }
+    if (!previousScratch) { [w, o] = picturesAt(pos, true, false); sc = false; awaitingScratch = true; }
+  }
   pip(picturesAt(pos, true, !sc)[0], sc);
-  if (w >= 0) { const img = events[w]; viewI = img.img; $('nopic').hidden = true; setPic($('img'), [viewURL(img.img), imgURL(img.img), thumbURL(img.img)]);
-    $('cap').textContent = pictureCaption(w, sc);
-    $('img').alt = sc ? 'the scratch canvas' : 'the painting';
+  if (w >= 0) { const img = events[w]; viewI = img.img;
+    displayPic($('img'), img, $('cap'), previousScratch ? `PREVIOUS scratch snapshot · awaiting fresh look · ${hhmm(img.ts)}` : awaitingScratch ? 'The painting · awaiting first scratch look' : pictureCaption(w, sc));
+    $('img').alt = previousScratch ? 'a previous scratch snapshot, awaiting a fresh look' : sc ? 'the scratch canvas' : 'the painting';
     second(o, w); }
   else if (o >= 0) { noPainting(); second(o); shape(); }  // only a reference picture so far: it shows beside the painting's empty place
   else { noPicture(); if (sc) { $('nopic').textContent = 'No current scratch look'; $('cap').textContent = 'Scratch canvas'; } }
@@ -1199,25 +1327,30 @@ function pictures() {
 // the other canvas in the corner (k: its picture's event, -1 none); sc: the big picture is the scratch canvas
 let pipI = -1;
 function pip(k, sc) {
-  const on = k >= 0 && (sc || events[k] && isScratch(events[k])); $('pip').hidden = !on; pipI = on ? events[k].img : -1;
+  const on = k >= 0 && (sc || events[k] && isScratch(events[k])) && !(sc && $('img').dataset.picture === String(events[k].img)); $('pip').hidden = !on; pipI = on ? events[k].img : -1;
+  $('pip').classList.toggle('painting', on && !!sc);
   if (!on) { clearPic($('pipimg')); return; }
-  setPic($('pipimg'), [thumbURL(pipI), viewURL(pipI), imgURL(pipI)]);
-  $('pipcap').textContent = pictureCaption(k, !sc);
+  displayPic($('pipimg'), events[k], $('pipcap'), pictureCaption(k, !sc));
   $('pipimg').alt = sc ? 'the painting' : 'the scratch canvas';
 }
-$('pipimg').onclick = () => { if (pipI >= 0) { $('zimg').src = imgURL(pipI); $('zoom').style.display = 'flex'; } };
-function show(i) {
+$('pipimg').onclick = () => { if (pipI >= 0) { $('zimg').src = zoomURL($('pipimg')); $('zoom').style.display = 'flex'; } };
+function show(i, stepping = false) {
   if (!events.length) return; pos = Math.max(0, Math.min(i, events.length - 1)); $('scrub').value = pos;
-  pictures(); codeAt(pos); journal(pos); status();
+  const scroll = journalScroll();
+  pictures(); codeAt(pos, stepping); journal(pos, scroll); status();
   $('pos').textContent = `${pos + 1}/${events.length}`;
 }
 function looks() { const r = []; events.forEach((e, k) => e.kind === 'image' && r.push(k)); return r; }
 // replay steps through the painting: each whole look in turn (before the look tool, each picture), with the thinking that led to it
-const steps = () => looks().filter(k => !events[k].ref && (!hasLooks ? events[k].whole !== false : isWhole(events[k])));
+const steps = () => {
+  const L = looks().filter(k => !events[k].ref && !isPalette(events[k]));
+  const W = L.filter(k => !hasLooks ? events[k].whole !== false : isWhole(events[k]));
+  return W.length ? W : L.filter(k => isScratch(events[k]));
+};
 function stop() { if (playing) { clearTimeout(playing); playing = null; } $('play').textContent = '▶ Replay'; $('play').title = 'watch the painting grow, one look at a time  space'; }
 function goLive() { stop(); live = true; show(events.length - 1); stripEnd(); refreshLiveCode(); }
 $('play').onclick = () => {
-  if (playing) { stop(); status(); return; }
+  if (playing) { stop(); codeAt(pos, true); status(); return; }
   const W = steps(); if (!W.length) return;
   live = false; let j = W.findIndex(k => k > pos);
   if (j < 0 || pos >= W[W.length - 1]) j = 0;  // from the end (or past the last look): from the first
@@ -1226,14 +1359,14 @@ $('play').onclick = () => {
   const step = () => { if (j >= W.length) { playing = null; goLive(); return; } show(W[j++]); playing = setTimeout(step, 1000 / +$('speed').value); };
   playing = true; step();
 };
-$('prevlook').onclick = () => { stop(); live = false; const L = looks().filter(k => k < pos); if (L.length) show(L[L.length - 1]); };
-$('nextlook').onclick = () => { stop(); const L = looks().filter(k => k > pos); if (L.length) { live = false; show(L[0]); } else goLive(); };
+$('prevlook').onclick = () => { stop(); live = false; const L = looks().filter(k => k < pos); if (L.length) show(L[L.length - 1], true); };
+$('nextlook').onclick = () => { stop(); const L = looks().filter(k => k > pos); if (L.length) { live = false; show(L[0], true); } else goLive(); };
 $('golive').onclick = goLive;
-$('scrub').oninput = e => { stop(); live = +e.target.value >= events.length - 1; show(+e.target.value); };
-$('togglecode').onclick = () => { document.body.classList.toggle('nocode'); const shown = codeShown(); $('togglecode').setAttribute('aria-expanded', String(shown)); $('codepane').setAttribute('aria-hidden', String(!shown)); $('codepane').inert = !shown; };
+$('scrub').oninput = e => { stop(); live = +e.target.value >= events.length - 1; show(+e.target.value, true); };
+$('togglecode').onclick = () => { document.body.classList.toggle('nocode'); const shown = codeShown(); $('togglecode').setAttribute('aria-expanded', String(shown)); $('codepane').setAttribute('aria-hidden', String(!shown)); $('codepane').inert = !shown; codeAt(pos); };
 $('codeclose').onclick = () => { if (codeShown()) $('togglecode').click(); $('togglecode').focus(); };
-$('img').onclick = () => { $('zimg').src = viewI >= 0 ? imgURL(viewI) : $('img').src; $('zoom').style.display = 'flex'; };
-$('img2').onclick = () => { $('zimg').src = viewI2 >= 0 ? imgURL(viewI2) : $('img2').src; $('zoom').style.display = 'flex'; };
+$('img').onclick = () => { $('zimg').src = zoomURL($('img')); $('zoom').style.display = 'flex'; };
+$('img2').onclick = () => { $('zimg').src = zoomURL($('img2')); $('zoom').style.display = 'flex'; };
 $('img3').onclick = () => { $('zimg').src = viewI3 >= 0 ? imgURL(viewI3) : $('img3').src; $('zoom').style.display = 'flex'; };
 $('zoom').onclick = () => { $('zoom').style.display = 'none'; };
 document.onkeydown = e => {
@@ -1241,19 +1374,18 @@ document.onkeydown = e => {
   if (t.closest && t.closest('#picker') || /^(INPUT|SELECT|TEXTAREA)$/.test(t.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
   if (t.tagName === 'BUTTON' && t.id !== 'play' && (k === ' ' || k === 'Enter')) return;  // the focused button's own action
   // (the right arrow reaching the end is at the end, as the scrub bar is: live again, or at rest)
-  if (k === 'ArrowRight') { if (pos + 1 >= events.length - 1) goLive(); else { stop(); live = false; show(pos + 1); } } else if (k === 'ArrowLeft') { stop(); live = false; show(pos - 1); }
+  if (k === 'ArrowRight') { if (pos + 1 >= events.length - 1) goLive(); else { stop(); live = false; show(pos + 1, true); } } else if (k === 'ArrowLeft') { stop(); live = false; show(pos - 1, true); }
   else if (k === '[') $('prevlook').click(); else if (k === ']') $('nextlook').click(); else if (k === 'l') goLive(); else if (k === 'c') $('togglecode').click();
   else if (k === 'Escape') { if (codeShown()) $('codeclose').click(); $('zoom').style.display = 'none'; } else if (k === ' ') { e.preventDefault(); $('play').click(); } };
-// Load and compile StyLua while the initial session and pictures are arriving.
-try { codeWorker = new Worker('code-format.js', { type:'module' }); codeWorker.onerror = () => { codeWorker.terminate(); codeWorker = false; }; } catch (e) { codeWorker = false; }
 $('all').checked = localStorage.getItem('studio.all') === '1';
 const initial = STATIC && window.STUDIO_INITIAL, query = new URLSearchParams(location.search);
 Q = query.get('p') ? 'p=' + encodeURIComponent(query.get('p')) : !query.get('s') && initial ? qOf(initial) : null;
 if (initial && qOf(initial) === Q) allSessions = [initial];
 else if (initial) { noPicture(); $('view').classList.remove('tall'); $('badge').textContent = ''; $('badge').className = ''; }
+sessionLighting();
 renderHeader();
 document.documentElement.classList.remove('studio-route-pending');
-if (Q) { glimpse(); poll(); }
+if (Q && initial) { glimpse(); poll(); }
 // Gallery metadata can improve titles and links later; it never holds up the selected canvas or events.
 loadGallery().then(() => { renderHeader(); if (sessionsLoaded && $('picker').hidden) renderPicker();
   if (otherK >= 0 && events[otherK]?.ref) second(otherK); });

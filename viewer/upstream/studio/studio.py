@@ -18,16 +18,23 @@ timeline to scrub. Read-only: it never touches the painter.
 import argparse
 import base64
 import glob
+import hashlib
 import http.server
+import io
 import json
 import os
 import re
 import threading
 import urllib.parse
+from collections import OrderedDict
 from datetime import datetime
+from PIL import Image
 from palette_board import palette_board
 
 SESSIONS = os.path.expanduser("~/.pi/agent/sessions")
+EXCLUDE_SESSIONS = set()
+STREAM_EPOCH = 0
+DISPLAY_LIGHTS = ("gallery", "relief")
 # --public: painters only, nothing that names this machine's owner (for a link shown to others)
 PUBLIC = False
 HOME = os.path.expanduser("~")
@@ -50,6 +57,10 @@ _cache = {}  # path -> {"offset", "events", "images", "calls"}: one session file
 _streams = {}  # key -> a stitched stream of session files (see stream())
 _locks = {}
 _locks_lock = threading.Lock()
+_image_cache = OrderedDict()
+_image_cache_bytes = 0
+IMAGE_CACHE_BYTES = 64 * 1024 * 1024
+_image_cache_lock = threading.Lock()
 
 
 def _lock(key):
@@ -116,8 +127,20 @@ def session_thinking(path):
 
 
 # the runners' studio lists: ~/tmp/gallery-*/r<round>/run/studios.json, {"<lane><n>": "paint-studio-..."}
-RUNS = os.path.expanduser("~/tmp/gallery-*/r*/run/studios.json")
+RUNS = os.path.expanduser("~/src/a/stillwet-runs/**/run/studios.json")
 _lanes = {"at": 0.0, "map": {}}
+
+
+def runner_paths():
+    return sorted(set(glob.glob(os.path.expanduser("~/tmp/gallery-*/r*/run/studios.json")) +
+                      glob.glob(RUNS, recursive=True)))
+
+
+def runner_key(path, key):
+    for cut in range(len(key) - 1, 0, -1):
+        if key[cut:].isdigit() and os.path.isdir(os.path.join(os.path.dirname(path), key[:cut])):
+            return key[:cut], key[cut:]
+    return re.match(r"^(.*?)(\d*)$", key).groups()
 
 
 def lanes():
@@ -126,13 +149,13 @@ def lanes():
     import time
     if time.time() - _lanes["at"] > 30:
         m = {}
-        for f in glob.glob(RUNS):
+        for f in runner_paths():
             rnd = os.path.basename(os.path.dirname(os.path.dirname(f)))  # r17, r18g, r19, ...
             try:
                 names = json.load(open(f))
             except (OSError, ValueError):
                 continue
-            keys = {k: re.match(r"^(.*?)(\d*)$", k).groups() for k in names}
+            keys = {k: runner_key(f, k) for k in names}
             for k, studio in names.items():
                 lane, n = keys[k]
                 size = sum(1 for l, _ in keys.values() if l == lane)
@@ -168,7 +191,10 @@ _subjects = {}  # studio -> (BRIEF.md mtime, what its brief says: see about_brie
 
 def _artist_of(brief):
     """The artist a brief names, in full ("in the manner of Kendric Tonn" -> "Kendric Tonn"), or ""."""
-    m = re.search(r"in\s+the\s+manner\s+of\s+((?:[A-Z][\w.'-]*\s+)*[A-Z][\w.'-]*)", brief)
+    m = re.search(r"in\s+the\s+manner\s+of\s+(?:(?:early|later|late)\s+)?"
+                  r"((?:[A-Z][\w.'-]*\s+)*[A-Z][\w.'-]*)", brief)
+    if not m:
+        m = re.search(r"explore\s+((?:[A-Z][\w.-]*\s+)*[A-Z][\w.-]*)['’]s\s+materials", brief)
     return " ".join(m.group(1).split()) if m else ""
 
 
@@ -246,6 +272,8 @@ def list_sessions():
     everything else, one per session file ({"s": path}); newest activity first."""
     files = {}
     for f in glob.glob(os.path.join(SESSIONS, "*paint*", "*.jsonl")):
+        if not session_allowed(f):
+            continue
         files.setdefault(os.path.basename(os.path.dirname(f)), []).append(f)
     out = []
     for d, fs in files.items():
@@ -267,7 +295,8 @@ def list_sessions():
                 if i["model"] and i["model"] not in models:
                     models.append(i["model"])
             rnd, lane, n, size, outcome = lanes().get(name, ("", "", 0, 0, None))
-            out.append({"p": name, "folder": name, "painter": True, "model": " → ".join(models), "sittings": len(fs),
+            out.append({"p": name, "folder": name, "painter": True, "model": " → ".join(models),
+                        "sittings": sum(_glance_file(f)["worked"] for f in fs),
                         "thinking": session_thinking(fs[-1]), **about_brief(name),
                         "round": rnd, "lane": lane, "n": n, "chain": size if size > 1 else 0,
                         "outcome": outcome,
@@ -278,16 +307,20 @@ def list_sessions():
     return out
 
 
+def session_allowed(path):
+    return os.path.basename(os.path.realpath(path)) not in EXCLUDE_SESSIONS
+
+
 def painter_files(name):
     """The session files of a painter folder (given by its short name), in start order."""
     if not name or "/" in name or name.startswith("."):
         return []
     for folder, ps in SPLIT.items():
         if name in ps:
-            return sorted(glob.glob(os.path.join(SESSIONS, "*-src-a-" + folder + "--", ps[name] + "*.jsonl")))
+            return sorted(f for f in glob.glob(os.path.join(SESSIONS, "*-src-a-" + folder + "--", ps[name] + "*.jsonl")) if session_allowed(f))
     for d in glob.glob(os.path.join(SESSIONS, "*" + name + "*")):
         if short(os.path.basename(d)) == name:
-            return sorted(glob.glob(os.path.join(d, "*.jsonl")), key=os.path.basename)
+            return sorted((f for f in glob.glob(os.path.join(d, "*.jsonl")) if session_allowed(f)), key=os.path.basename)
     return []
 
 
@@ -305,18 +338,16 @@ def parse(path):
 
 def _parse(path):
     # changed: indices of events whose result came in after them, in arrival order (see stream())
-    c = _cache.setdefault(path, {"offset": 0, "events": [], "images": [], "calls": {}, "changed": [], "cwd": ""})
-    size = os.path.getsize(path)
-    if size < c["offset"]:  # rewritten
-        c.update(offset=0, events=[], images=[], calls={}, changed=[], cwd="")
-    with open(path, "rb") as fh:
-        fh.seek(c["offset"])
-        chunk = fh.read()
-    last_nl = chunk.rfind(b"\n")
-    if last_nl < 0:
-        return c["events"], c["images"]
-    c["offset"] += last_nl + 1
-    for line in chunk[: last_nl + 1].splitlines():
+    c = _cache.setdefault(path, {"offset": 0, "events": [], "images": [], "lights": {light: {} for light in DISPLAY_LIGHTS}, "calls": {}, "changed": [], "cwd": ""})
+    stat = os.stat(path)
+    size = stat.st_size
+    stamp = (stat.st_dev, stat.st_ino, stat.st_mtime_ns)
+    if size < c["offset"] or c.get("stamp") and (stamp[:2] != c["stamp"][:2] or size <= c.get("size", 0) and stamp != c["stamp"]):
+        c.update(offset=0, events=[], images=[], lights={light: {} for light in DISPLAY_LIGHTS}, calls={}, changed=[], cwd="")
+        c["generation"] = c.get("generation", 0) + 1
+        c.pop("sig", None)
+    c.update(stamp=stamp, size=size)
+    for at, line in session_lines(path, c):
         try:
             d = json.loads(line)
         except ValueError:
@@ -386,14 +417,27 @@ def _parse(path):
                 if m.get("isError"):
                     ev["err"] = True
                 c["changed"].append(parent)
+            picture_paths = re.findall(r"^(.+\.png)(?: \(.*)?$", txt, re.MULTILINE)
+            picture_n = 0
             for x in content:
                 if x.get("type") == "image" and x.get("data"):
                     idx = len(c["images"])
-                    c["images"].append((x.get("mimeType", "image/jpeg"), x["data"]))
+                    c["images"].append((path, at, picture_n))
                     src = c["events"][parent].get("path", "") if parent is not None else ""
                     ev = {"ts": ts, "kind": "image", "img": idx, "path": src}
+                    display_path = ""
                     if parent is not None and c["events"][parent]["kind"] == "look":
                         ev["look"] = c["events"][parent]["text"]  # what the painter asked to see (see is_whole)
+                        if picture_n < len(picture_paths):
+                            display_path = picture_paths[picture_n]
+                    elif parent is not None and c["events"][parent]["kind"] == "read" and not c["events"][parent].get("ref"):
+                        display_path = src
+                    for light in DISPLAY_LIGHTS:
+                        lit = display_companion_path(c["cwd"], display_path, light) if display_path else None
+                        if lit:
+                            c["lights"][light][idx] = (lit, None, None)
+                            ev[light] = True
+                    picture_n += 1
                     if re.search(r"palette (?!False)", ev.get("look", "")):
                         chips = palette_board(base64.b64decode(x["data"]))
                         if chips:
@@ -412,6 +456,41 @@ def _parse(path):
     if not any(e["kind"] == "look" for e in c["events"]):
         mark_whole(c, path)
     return c["events"], c["images"]
+
+
+def session_lines(path, c):
+    with open(path, "rb") as fh:
+        fh.seek(c["offset"])
+        while True:
+            at = fh.tell()
+            line = fh.readline()
+            if not line.endswith(b"\n"):
+                return
+            c["offset"] = fh.tell()
+            yield at, line
+
+
+def display_companion_path(cwd, path, light):
+    if not cwd or light not in DISPLAY_LIGHTS:
+        return None
+    original = os.path.realpath(os.path.join(cwd, path))
+    companion = os.path.realpath(os.path.join(os.path.dirname(original), "." + light, os.path.basename(original)))
+    if not companion.startswith(os.path.realpath(cwd) + os.sep):
+        return None
+    try:
+        with open(companion, "rb") as fh:
+            header = fh.read(8)
+        return companion if header == b"\x89PNG\r\n\x1a\n" else None
+    except OSError:
+        return None
+
+
+def display_companion(cwd, path, light):
+    companion = display_companion_path(cwd, path, light)
+    if companion:
+        with open(companion, "rb") as fh:
+            return fh.read()
+    return None
 
 
 def _signature(data):
@@ -466,7 +545,7 @@ def mark_whole(c, path):
     the last picture opened, as without this. Where the easel command that wrote a picture can be read (_look_said),
     it decides instead."""
     ims = [e for e in c["events"] if e["kind"] == "image" and not e.get("ref")]
-    key = f"v4:{path}:{os.path.getsize(path)}:{len(ims)}"
+    key = f"v5:{path}:{c['stamp']}:{os.path.getsize(path)}:{len(ims)}"
     done = _whole_cache().get(key)
     if done is not None and len(done) == len(ims):
         for e, w in zip(ims, done):
@@ -475,7 +554,8 @@ def mark_whole(c, path):
     sig = c.setdefault("sig", {})
     for e in ims:
         if e["img"] not in sig:
-            sig[e["img"]] = _signature(c["images"][e["img"]][1])
+            im = read_image(c["images"][e["img"]])
+            sig[e["img"]] = _signature(base64.b64encode(im[1])) if im else None
     shapes = [round(sig[e["img"]][0], 2) for e in ims if sig[e["img"]]]
     if not shapes:
         return
@@ -562,7 +642,10 @@ def look_text(args):
 def is_whole(look):
     """A look request that shows the whole canvas as it is: no crop, no mode (value, squint, mirror), no light,
     not the palette, not a survey's tile, not a comparison, not a held knife and not the scratch canvas."""
-    return look is not None and not re.search(r"crop|mode|light|compare|hold|(?:palette|survey|scratch) (?!False)", look)
+    if look is None:
+        return False
+    look = re.sub(r"mode (?:normal|color)(?:\s*,\s*(?:normal|color))*(?=, [a-z]+ |$)", "", look)
+    return not re.search(r"crop|mode|light|compare|hold|(?:palette|survey|scratch) (?!False)", look)
 
 
 # a closing reply that begins with the painting's title: "**The Silent Shore**", "### *Hünengrab im Abendlicht* (...)",
@@ -576,6 +659,8 @@ TITLE_LINE = re.compile(r"[ \t]*(?:#{1,6}[ \t]*)?(\*\*?|__?)([^*_\n]{2,100}?)\1[
 # **Nymphéas, reflet du soir** (...)", "I'm leaving **Luncheonette, Four O'Clock** finished as it is."
 NAMED = re.compile(r"[^\n*_]{0,40}?\b(?:call(?:ed|ing)?|title[ds]?|name[ds]?|finish(?:ed|ing)?|left|leav(?:e|ing)"
                    r"|complet(?:ed|e|ing))(?:\s+(?:it|this|(?:the|this|my)\s+(?:painting|picture|canvas)))?\s+(\*\*?|__?)([^*_\n]{2,100}?)\1(?![*_\w])")
+LABELED_TITLE = re.compile(r"^[ \t]*(?:#{1,6}[ \t]*)?(?:\*\*|__)?Title:[ \t]*"
+                           r"(?:\*\*|__)?[ \t]*(?:\*\*?|__?)?([^*_\n]{2,100}?)(?:\*\*?|__?){0,2}[ \t]*$", re.M | re.I)
 
 
 def clean_title(t):
@@ -586,13 +671,20 @@ def clean_title(t):
 def title_of(say):
     """The painting's title from the painter's last words, if they begin with one or have one alone on a line among
     their first three paragraphs; else None."""
+    m = LABELED_TITLE.search(say or "")
+    if m:
+        return clean_title(m.group(1))
     m = TITLE.match(say or "") or NAMED.match(say or "")
     if m:
-        return clean_title(m.group(2))
+        title = clean_title(m.group(2))
+        if title and not title.endswith(":"):
+            return title
     for para in [p for p in re.split(r"\n\s*\n", say or "") if p.strip()][1:3]:
         m = TITLE_LINE.fullmatch(para.strip("\n"))
         if m:
-            return clean_title(m.group(2))
+            title = clean_title(m.group(2))
+            if title and not title.endswith(":"):
+                return title
     return None
 
 
@@ -604,6 +696,10 @@ def title_of_closings(says):
 REFERENCE = object()  # in a glance's calls: a read of a reference picture
 _warm = None  # the server's first scan of every painter for the picker: set when done (None: scan on request)
 _glances = {}  # path -> what the picker needs from one session file, read incrementally without keeping images
+_thumbnails = OrderedDict()
+_thumbnails_lock = threading.Lock()
+GLANCE_SIZE = 360
+GLANCE_CACHE_SIZE = 256
 
 
 def _glance_file(path):
@@ -615,7 +711,7 @@ def _glance_file(path):
         g = _glances.get(path)
         size = os.path.getsize(path)
         if not g or size < g["offset"]:
-            g = _glances[path] = {"offset": 0, "calls": {}, "n": 0, "whole": None, "last": None, "say": "", "cwd": ""}
+            g = _glances[path] = {"offset": 0, "calls": {}, "n": 0, "whole": None, "last": None, "whole_version": None, "last_version": None, "say": "", "cwd": "", "worked": False}
         with open(path, "rb") as fh:
             fh.seek(g["offset"])
             while True:
@@ -637,7 +733,10 @@ def _glance_file(path):
                     for x in content:
                         if x.get("type") == "text" and x.get("text", "").strip():
                             g["say"] = x["text"]
+                            g["worked"] = True
                         elif x.get("type") == "toolCall":  # a look's request; REFERENCE for a read from reference/
+                            if x.get("name") and x["name"] not in ("look", "read", "status", "log"):
+                                g["worked"] = True
                             a = x.get("arguments") or {}
                             g["calls"][x.get("id")] = (look_text(a) if x.get("name") == "look" else REFERENCE
                                                        if x.get("name") == "read" and in_reference(a.get("path", ""), g["cwd"])
@@ -648,8 +747,10 @@ def _glance_file(path):
                         if x.get("type") == "image" and x.get("data"):
                             if look is None:
                                 g["last"] = (g["n"], at, k)
+                                g["last_version"] = hashlib.sha256(x["data"].encode()).hexdigest()
                             elif look is not REFERENCE and is_whole(look):
                                 g["whole"] = (g["n"], at, k)
+                                g["whole_version"] = hashlib.sha256(x["data"].encode()).hexdigest()
                             g["n"] += 1
                             k += 1
         return g
@@ -660,16 +761,20 @@ def glance(files):
     last picture it saw; never a reference picture; None if it has seen none of its own) as a stream image index,
     "title": from its last words or None}, and where that look's bytes are, for /api/glance."""
     gs, base, look, src, last, lsrc = [_glance_file(f) for f in files], 0, None, None, None, None
+    version, last_version = None, None
     for f, g in zip(files, gs):
         if g["whole"]:
             look, src = base + g["whole"][0], (f,) + g["whole"][1:]
+            version = g["whole_version"]
         if g["last"]:
             last, lsrc = base + g["last"][0], (f,) + g["last"][1:]
+            last_version = g["last_version"]
         base += g["n"]
     title = title_of_closings([g["say"] for g in gs if g["say"]])
     if look is None:
         look, src = last, lsrc
-    return {"look": look, "title": title, "src": src}
+        version = last_version
+    return {"look": look, "title": title, "src": src, "version": version}
 
 
 def glance_image(src):
@@ -680,6 +785,25 @@ def glance_image(src):
         d = json.loads(fh.readline())
     imgs = [x for x in d["message"]["content"] if x.get("type") == "image" and x.get("data")]
     return (imgs[k].get("mimeType", "image/jpeg"), base64.b64decode(imgs[k]["data"])) if k < len(imgs) else None
+
+
+def glance_thumbnail(g):
+    """A memoized JPEG of the picker's look, leaving the original image untouched."""
+    im = glance_image(g["src"])
+    if not im:
+        return None
+    key = hashlib.sha256(im[1]).digest()
+    with _thumbnails_lock:
+        if key not in _thumbnails:
+            with Image.open(io.BytesIO(im[1])) as picture:
+                picture.thumbnail((GLANCE_SIZE, GLANCE_SIZE), Image.Resampling.LANCZOS)
+                buf = io.BytesIO()
+                picture.convert("RGB").save(buf, "JPEG", quality=80)
+            _thumbnails[key] = ("image/jpeg", buf.getvalue())
+            if len(_thumbnails) > GLANCE_CACHE_SIZE:
+                _thumbnails.popitem(last=False)
+        _thumbnails.move_to_end(key)
+        return _thumbnails[key]
 
 
 def _hhmm(ts):
@@ -702,15 +826,16 @@ def stream(key, files):
         st = _streams.get(key)
         parsed = [parse(f) for f in files]
         parts = [(f, len(ev), len(im)) for f, (ev, im) in zip(files, parsed)]
+        generations = [_cache[f].get("generation", 0) for f in files]
         if st:
             old = st["parts"]
             same = (len(old) <= len(parts) and all(o[0] == n[0] for o, n in zip(old, parts))
                     and all(o == n for o, n in zip(old[:-1], parts))
                     and (not old or parts[len(old) - 1][1] >= old[-1][1] and parts[len(old) - 1][2] >= old[-1][2]))
-            if not same:
+            if not same or st.get("generations", []) != generations[:len(old)]:
                 st = {"epoch": st["epoch"] + 1, "parts": [], "events": [], "base": [], "chg": [], "updates": []}
         else:
-            st = {"epoch": 0, "parts": [], "events": [], "base": [], "chg": [], "updates": []}
+            st = {"epoch": STREAM_EPOCH, "parts": [], "events": [], "base": [], "chg": [], "updates": []}
         _streams[key] = st
         old, ioff = st["parts"], 0
         for k, (f, n, ni) in enumerate(parts):
@@ -732,6 +857,7 @@ def stream(key, files):
                 st["events"].append(dict(e, img=e["img"] + ioff) if e["kind"] == "image" else e)
             ioff += ni
         st["parts"] = parts
+        st["generations"] = generations
         return st
 
 
@@ -763,27 +889,69 @@ def painting_sources(events):
     return cwd, {r for r in rels if ok.fullmatch(r) and ".." not in r.split("/")}
 
 
-def image(st, i):
-    """Image i of a stitched stream: (mime, base64 data), or None."""
+def read_image(src):
+    global _image_cache_bytes
+    if not src:
+        return None
+    path, at, k = src
+    try:
+        stat = os.stat(path)
+        key = (src, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        with _image_cache_lock:
+            if key in _image_cache:
+                _image_cache.move_to_end(key)
+                return _image_cache[key]
+            if at is None:
+                with open(path, "rb") as fh:
+                    im = ("image/png", fh.read())
+            else:
+                im = glance_image((path, at, k))
+            if not im:
+                return None
+            n = len(im[1])
+            if n <= IMAGE_CACHE_BYTES:
+                while _image_cache and _image_cache_bytes + n > IMAGE_CACHE_BYTES:
+                    _image_cache_bytes -= len(_image_cache.popitem(last=False)[1][1])
+                _image_cache[key] = im
+                _image_cache_bytes += n
+            return im
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def image_bytes(st, i, light=None):
+    """Image i of a stitched stream: (mime, bytes), or None."""
+    if i < 0:
+        return None
     for f, _, ni in st["parts"]:
         if i < ni:
+            if light:
+                return read_image(_cache[f]["lights"].get(light, {}).get(i))
             imgs = _cache[f]["images"]
-            return imgs[i] if 0 <= i < len(imgs) else None
+            return read_image(imgs[i]) if i < len(imgs) else None
         i -= ni
     return None
+
+
+def image(st, i, light=None):
+    """Compatibility view of image i: (mime, base64 data), or None."""
+    im = image_bytes(st, i, light)
+    return (im[0], base64.b64encode(im[1]).decode()) if im else None
 
 
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _send(self, code, body, ctype):
+    def _send(self, code, body, ctype, cache_control=None, etag=None):
         if PUBLIC and not ctype.startswith("image/") and ctype != "application/wasm":
             body = scrub(body)
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         # a look never changes: the browser keeps it (and asks again for everything else)
-        self.send_header("Cache-Control", "private, max-age=86400, immutable" if ctype.startswith("image/") else "no-store")
+        self.send_header("Cache-Control", cache_control or ("private, max-age=86400, immutable" if ctype.startswith("image/") else "no-store"))
+        if etag:
+            self.send_header("ETag", etag)
         if PUBLIC:
             self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; "
                              "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:")
@@ -812,20 +980,26 @@ class H(http.server.BaseHTTPRequestHandler):
         if u.path == "/api/sessions":
             ss = list_sessions()
             for s in ss:
+                s["epoch"] = STREAM_EPOCH
                 if s.get("painter") and (_warm is None or _warm.is_set()):  # (until the first scan is done, without)  # the picker's picture and title (the static export has them in sessions.json)
                     g = glance(s["files"])
-                    s.update(look=g["look"], title=g["title"])
+                    s.update(look=g["look"], title=g["title"], thumb_version=g["version"])
             if PUBLIC:
                 ss = [{k: v for k, v in s.items() if k != "files"} for s in ss if s.get("painter")]
             return self._send(200, json.dumps(ss).encode(), "application/json")
         if u.path == "/api/glance":  # a painter's picture in the picker, read alone (not the painter's whole log)
             files = painter_files(painter)
             g = glance(files) if files else None
-            im = glance_image(g["src"]) if g and g["src"] else None
-            return self._send(200, im[1], im[0]) if im else self._send(404, b"not found", "text/plain")
+            im = glance_thumbnail(g) if g and g["src"] else None
+            if not im:
+                return self._send(404, b"not found", "text/plain")
+            etag = '"' + hashlib.sha256(im[1]).hexdigest() + '"'
+            tags = [tag.strip().removeprefix("W/") for tag in self.headers.get("If-None-Match", "").split(",")]
+            code = 304 if etag in tags or "*" in tags else 200
+            return self._send(code, b"" if code == 304 else im[1], im[0], "private, max-age=300", etag)
         if u.path not in ("/api/events", "/api/file", "/img"):
             return self._send(404, b"not found", "text/plain")
-        files = painter_files(painter) if painter else [path] if path and os.path.isfile(path) else []
+        files = painter_files(painter) if painter else [path] if path and session_allowed(path) and os.path.isfile(path) else []
         if not files:
             return self._send(404, b"no such session", "text/plain")
         st = stream(("p:" + painter) if painter else ("s:" + path), files)
@@ -837,7 +1011,7 @@ class H(http.server.BaseHTTPRequestHandler):
             u = int(q.get("u", ["0"])[0]) if q.get("epoch", [""])[0] == str(st["epoch"]) else 0
             ups = [[i, ev[i]] for i in st["updates"][u:] if i < since]
             return self._send(200, json.dumps({"events": ev[since:], "total": len(ev), "epoch": st["epoch"],
-                                               "sittings": len(files), "updates": ups,
+                                               "sittings": sum(_glance_file(f)["worked"] for f in files), "updates": ups,
                                                "nupdates": len(st["updates"])}).encode(), "application/json")
         if u.path == "/api/file":  # the painting's current source, from the painter's folder
             cwd, rels = painting_sources(st["events"])
@@ -848,21 +1022,25 @@ class H(http.server.BaseHTTPRequestHandler):
                     return self._send(200, fh.read(), "text/plain; charset=utf-8")
             return self._send(404, b"", "text/plain")
         if u.path == "/img":
-            im = image(st, int(q.get("i", ["0"])[0]))
+            light = next((light for light in DISPLAY_LIGHTS if q.get(light) == ["1"]), None)
+            im = image_bytes(st, int(q.get("i", ["0"])[0]), light=light)
             if im:
-                return self._send(200, base64.b64decode(im[1]), im[0])
+                return self._send(200, im[1], im[0])
         self._send(404, b"not found", "text/plain")
 
 
 def main():
-    global SESSIONS
+    global SESSIONS, STREAM_EPOCH
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--host", default="127.0.0.1", help="e.g. this machine's Tailscale IP to watch from another of your devices")
     ap.add_argument("--sessions", default=SESSIONS, help="where pi keeps its session logs")
+    ap.add_argument("--exclude-session", action="append", default=[], metavar="BASENAME", help="omit this session log from the picker and API (repeatable)")
     ap.add_argument("--public", action="store_true", help="painters only, home path and account name scrubbed (a link for others)")
     a = ap.parse_args()
     SESSIONS = os.path.abspath(os.path.expanduser(a.sessions))
+    STREAM_EPOCH = int(datetime.now().timestamp() * 1_000_000)
+    EXCLUDE_SESSIONS.update(a.exclude_session)
     global PUBLIC
     PUBLIC = a.public
     global _warm

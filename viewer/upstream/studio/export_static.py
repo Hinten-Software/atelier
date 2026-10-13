@@ -22,7 +22,7 @@ deletes only the listed files it didn't write again. It won't write into a folde
 except an export from before the list (index.html with the static switch, data/sessions.json, nothing else
 at the top), which it adopts, owning all of data/ as the old exporter did.
 """
-import argparse, base64, glob, hashlib, html, io, json, os, re, shutil, subprocess, sys, time
+import argparse, glob, hashlib, html, io, json, os, re, shutil, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import studio as S
@@ -45,7 +45,7 @@ MODEL_NAMES = {
     "claude-opus-5-5": "Claude Opus 5.5", "claude-fable-5-1": "Claude Fable 5.1",
     "claude-sonnet-5": "Claude Sonnet 5", "claude-sonnet-5-5": "Claude Sonnet 5.5",
     "gpt-6-astra": "GPT-6 Astra", "gpt-6-luna": "GPT-6 Luna", "gpt-6.1-sol": "GPT-6.1 Sol",
-    "gemini-3.8-flash": "Gemini 3.8 Flash", "muse-spark-1.3": "Muse Spark 1.3",
+    "gemini-3.8-flash": "Gemini 3.8 Flash", "muse-spark-1.3": "Muse Spark 1.3", "muse-wonder-full-1.0": "Muse Wonder Full",
     "glm-5.3-flash": "GLM-5.3 Flash", "mimo-v2.6-pro": "MiMo v2.6 Pro",
     "deepseek-v4.1-flash": "DeepSeek V4.1 Flash", "kimi-k3": "Kimi K3", "space-bunny-free": "Space Bunny",
 }
@@ -71,12 +71,12 @@ def runner_states(sessions, working, now):
     """Require a running sitting, a live Pi in that studio and recent session activity. Completion
     comes only from the runner outcome, never a title, quiet session or exported render."""
     records = {}
-    for path in glob.glob(S.RUNS):
+    for path in S.runner_paths():
         try:
             with open(path) as fh:
                 names = json.load(fh)
             for key, painter in names.items():
-                lane, number = re.match(r"^(.*?)(\d*)$", key).groups()
+                lane, number = S.runner_key(path, key)
                 rd = os.path.join(os.path.dirname(path), lane)
                 stem = os.path.join(rd, "p" + (number or "0"))
                 running = False
@@ -297,21 +297,24 @@ def write(path, data):
 
 def text(path, data):
     body = S.scrub(data if isinstance(data, bytes) else data.encode())
-    if S.HOME.encode() in body or re.search(re.escape(S.USER.encode()), body, re.I):
+    if S.HOME.encode() in body or (S.USER != "user" and re.search(re.escape(S.USER.encode()), body, re.I)):
         sys.exit(f"export: {path} still names the home folder or account after scrubbing")
     write(path, body)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("out")
-    ap.add_argument("--skip", nargs="*", default=[], help="painter folders to leave out (test runs)")
-    a = ap.parse_args()
+def export(out, skip=(), only=None, live=False):
     S.PUBLIC = True
-    out = os.path.abspath(a.out)
+    WRITTEN.clear()
+    out = os.path.abspath(out)
     before = owned(out)
-    ss = [{k: v for k, v in s.items() if k != "files"} for s in S.list_sessions() if s.get("painter") and s["p"] not in a.skip]
+    ss = [{k: v for k, v in s.items() if k != "files"} for s in S.list_sessions()
+          if s.get("painter") and s["p"] not in skip and (only is None or s["p"] == only)]
+    if only is not None and len(ss) != 1:
+        raise ValueError("the selected painter has no viewer session yet")
     runner_states(ss, working_studios(), time.time())
+    if live:
+        for s in ss:
+            s["active"] = not s.get("outcome") and 0 <= time.time() - s["mtime"] < 1800
     n_img = n_web = 0
     pool = ThreadPoolExecutor(os.cpu_count() or 4) if Image else None
     for s in ss:
@@ -324,19 +327,23 @@ def main():
             for e in ev:
                 names.update(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", e.get("code", "")))
                 if e["kind"] == "image" and re.search(r"palette (?!False)", e.get("look", "")):
-                    im = S.image(st, e["img"])
-                    chips = palette_chips(base64.b64decode(im[1]), names) if im else None
+                    im = S.image_bytes(st, e["img"])
+                    chips = palette_chips(im[1], names) if im else None
                     if chips:
                         e["palette"] = chips
         n = sum(len(im) for _, _, im in [(f, 0, S._cache[f]["images"]) for f in files])
         exts, web, jobs = [], [0] * n, {}
         for i in range(n):
-            im = S.image(st, i)
+            im = S.image_bytes(st, i)
             ext = EXT.get(im[0], "bin") if im else "bin"
             exts.append(ext)
             if im:
-                data = base64.b64decode(im[1])
+                data = im[1]
                 changed = write(os.path.join(out, "data", p, "img", f"{i}.{ext}"), data)
+                for light in S.DISPLAY_LIGHTS:
+                    lit = S.image_bytes(st, i, light=light)
+                    if lit:
+                        write(os.path.join(out, "data", p, light, f"{i}.png"), lit[1])
                 if Image:
                     t, v = (os.path.join(out, "data", p, d, f"{i}.jpg") for d in ("t", "v"))
                     if changed or not (os.path.isfile(t) and os.path.isfile(v)):
@@ -378,7 +385,7 @@ def main():
             with Image.open(io.BytesIO(data)) as im:
                 s["og_image"] = {"url": SITE + "/studio/" + rel, "width": im.width, "height": im.height}
         text(os.path.join(out, "data", p, "events.json"),
-             json.dumps({"events": ev, "total": len(ev), "epoch": st["epoch"], "sittings": len(files), "imgext": exts, "web": web}))
+             json.dumps({"events": ev, "total": len(ev), "epoch": st["epoch"], "sittings": s["sittings"], "imgext": exts, "web": web}))
         # the painting's source, as the live server's /api/file gives it
         cwd, rels = S.painting_sources(ev)
         for rel in sorted(rels):
@@ -394,9 +401,13 @@ def main():
     assert b"STUDIO_STATIC = true" in page, "index.html changed: the static switch didn't go in"
     # the gallery's page-view counter (Plausible, served from stillwet.art/v/), on the public copy only
     page = page.replace(b"</head>", PLAUSIBLE + b"</head>", 1)
-    text(os.path.join(out, "index.html"), card_page(page, featured(ss), homepage=True))
-    for s in ss:
-        text(inside(out, "share", s["p"] + ".html"), card_page(page, s))
+    if live:
+        page = page.replace(b"window.STUDIO_STATIC = true;", b"window.STUDIO_STATIC = true;window.STUDIO_LIVE = true;")
+        text(os.path.join(out, "index.html"), page)
+    else:
+        text(os.path.join(out, "index.html"), card_page(page, featured(ss), homepage=True))
+        for s in ss:
+            text(inside(out, "share", s["p"] + ".html"), card_page(page, s))
     for asset in S.VIEWER_ASSETS:
         with open(os.path.join(S.HERE, asset), "rb") as fh:
             write(os.path.join(out, asset), fh.read())
@@ -414,6 +425,14 @@ def main():
     with open(os.path.join(out, MARKER), "w") as fh:
         fh.write("".join(r + "\n" for r in now))
     print(f"exported {len(ss)} painters, {n_img} images ({n_web} new web copies) to {out} ({stale} stale files removed)")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("out")
+    ap.add_argument("--skip", nargs="*", default=[], help="painter folders to leave out (test runs)")
+    a = ap.parse_args()
+    export(a.out, skip=a.skip)
 
 
 if __name__ == "__main__":

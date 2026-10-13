@@ -51,13 +51,14 @@
 # box from the log.
 set -euo pipefail
 
-usage() { echo "usage: $0 friedrich|blank|sargent|inness|alma-tadema|tonn|hopper|giverny|impressionist|seurat|every <dest>" >&2; exit 2; }
+usage() { echo "usage: $0 friedrich|blank|sargent|inness|alma-tadema|tonn|hopper|giverny|impressionist|seurat|cezanne|every|watercolor <dest>" >&2; exit 2; }
 [ $# -eq 2 ] || usage
 profile=$1
 dest=$2
 # each profile's box (none: the default tube box), materials note and the
 # painter's names the studio may hold (its own artist's)
 case "$profile" in
+  watercolor) box=watercolor; materials=; own=() ;;
   blank) box=; materials=; own=() ;;
   friedrich) box=friedrich; materials=friedrich_materials.md; own=(Friedrich) ;;
   sargent) box=sargent; materials=sargent_materials.md; own=(Sargent) ;;
@@ -67,6 +68,7 @@ case "$profile" in
   hopper) box=hopper; materials=hopper_materials.md; own=(Hopper) ;;
   giverny) box=giverny; materials=giverny_materials.md; own=(Monet) ;;
   seurat) box=seurat; materials=seurat_materials.md; own=(Seurat) ;;
+  cezanne) box=cezanne; materials=cezanne_materials.md; own=(Cézanne) ;;
   every) box=every; materials=every_materials.md; own=() ;;
   impressionist) box=impressionist; materials=impressionist_materials.md; own=(Monet Renoir Pissarro Sisley Morisot Degas Cézanne Seurat) ;;
   *) usage ;;
@@ -77,6 +79,7 @@ unset EASEL_BOX
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
 branch=${R16_BRANCH:-round-16}
+[ "$profile" != watercolor ] || branch=${R16_BRANCH:-HEAD}
 git -C "$repo" rev-parse --verify -q "$branch^{commit}" >/dev/null || { echo "no branch or tag $branch in $repo" >&2; exit 1; }
 # the commit, also for a tag (whose own hash would name another build of the same code)
 sha=$(git -C "$repo" rev-parse --short "$branch^{commit}")
@@ -100,6 +103,34 @@ unlock() { exec 9>&-; }
 # build the painter's easel from the committed source, with the profile's
 # box (a box-* feature) and no other; each variant is kept in built/<box>
 builds=${STUDIO_BUILDS:-$repo/target/studio-build}
+if [ "$profile" = watercolor ]; then
+  code=$(git -C "$repo" rev-parse "$branch:experiments/watercolor")
+  src="$builds/watercolor-$code"
+  built="$src/target/release/watercolor-studio"
+  mkdir -p "$builds"
+  lock "$builds/watercolor-$code.lock"
+  if [ ! -x "$built" ]; then
+    mkdir -p "$src"
+    git -C "$repo" archive --format=tar "$branch" -- experiments/watercolor | tar -x -C "$src"
+    CARGO_TARGET_DIR="$src/target" cargo build --locked --release --manifest-path "$src/experiments/watercolor/Cargo.toml" --bin watercolor-studio
+  fi
+  unlock
+  mkdir -p "$dest/bin/mcp" "$dest/notes" "$dest/paintings/lua"
+  cp "$built" "$dest/bin/watercolor-studio"
+  git -C "$repo" show "$branch:experiments/watercolor/THIRD_PARTY_NOTICES.md" > "$dest/bin/THIRD_PARTY_NOTICES.md"
+  git -C "$repo" show "$branch:notes/watercolor_easel_guide.md" > "$dest/notes/watercolor_easel_guide.md"
+  cp "$dest/notes/watercolor_easel_guide.md" "$dest/notes/easel_guide.md"
+  git -C "$repo" archive --format=tar "$branch" -- notes/watercolor_techniques.md notes/research/watercolor_physics.md | tar -x -C "$dest"
+  "$repo/scripts/strip_sources" "$dest/notes/research/watercolor_physics.md" < /dev/null || { echo "can't strip the sources from the watercolor physics note" >&2; exit 1; }
+  for file in server.py tools.json remote.py http_server.py; do
+    git -C "$repo" show "$branch:harness/easel_mcp/$file" > "$dest/bin/mcp/$file"
+  done
+  : > "$dest/notes/journal.md"
+  echo watercolor > "$dest/bin/box"
+  "$dest/bin/watercolor-studio" --box watercolor init "$dest"
+  echo "exported the watercolor studio from $branch ($sha) to $dest"
+  exit 0
+fi
 # the build is named by the code it compiles (the trees of crates/ and .cargo and the Cargo files at
 # $branch), not by the commit: commits that change only notes or scripts reuse the same build
 code=$(for p in crates .cargo Cargo.toml Cargo.lock; do
@@ -151,6 +182,11 @@ notes=(notes/easel_guide.md notes/research/oil_paint_physics.md)
 ! git -C "$repo" cat-file -e "$branch:notes/techniques.md" 2>/dev/null || notes+=(notes/techniques.md)
 [ -z "$materials" ] || notes+=("notes/research/$materials")
 git -C "$repo" archive --format=tar "$branch" -- "${notes[@]}" | tar -x -C "$dest"
+if [ "$profile" = cezanne ]; then
+  git -C "$repo" archive --format=tar "$branch" -- notes/cezanne_techniques.md notes/research/cezanne_oil_paint_physics.md | tar -x -C "$dest"
+  mv "$dest/notes/cezanne_techniques.md" "$dest/notes/techniques.md"
+  mv "$dest/notes/research/cezanne_oil_paint_physics.md" "$dest/notes/research/oil_paint_physics.md"
+fi
 git -C "$repo" archive --format=tar "$branch" -- THIRD_PARTY_NOTICES.md | tar -x -C "$dest/bin"
 [ -s "$dest/bin/THIRD_PARTY_NOTICES.md" ] || { echo "no bin/THIRD_PARTY_NOTICES.md in $dest" >&2; exit 1; }
 : > "$dest/notes/journal.md"
