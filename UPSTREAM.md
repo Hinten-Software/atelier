@@ -17,6 +17,9 @@ as an option (`--@ width`, her default 2400). If she does, "The atelier's change
 2026-10-12, a follow-up there: measured with `runner/startprobe.py`, her `scratch` description stopped 32 of 60 starts,
 ours 1 of 60; a small PR with the wording offered. If her description changes, ours goes (server.ts and below) and
 the probe runs again on the merged tools.
+2026-10-13: https://github.com/aliceisjustplaying/claude-paint/pull/66, the width as an option (`EASEL_WIDTH=4800`, the
+`--@ width` head line, the chunk limit and crop scale), from the owner's fork. If she merges it, our ATELIER/NEW_WIDTH,
+WIDTH_MARK and LOOK_SCALE changes go, and the painters' easel is started with EASEL_WIDTH=4800 instead.
 
 ## Taking a newer claude-paint
 
