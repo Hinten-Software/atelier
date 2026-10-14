@@ -67,10 +67,13 @@ def artist_env(config_dir: Path, root: Path | None = None) -> dict:
         "DISABLE_AUTO_COMPACT": "1",
         # "The user hasn't heard from you in a while - say in a few words what you're doing": a nudge to narrate
         "CLAUDE_CODE_SILENT_TURN_REMINDER": "0",
-        "MCP_TOOL_TIMEOUT": str(45 * 60 * 1000),  # the easel allows a chunk 40 minutes at 4800 px (10 at 2400)
-        # ... and Claude Code gives up on a tool that sends nothing for 30 minutes (its own limit, apart from the one
-        # above): a chunk of 30-40 minutes would end the sitting (2026-10-13: the long probe's chunk took 24-27)
-        "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT": str(45 * 60 * 1000),
+        # how long Claude Code waits for a tool: as long as the easel client may (easel-client.ts WAIT_MS: a chunk
+        # 48 minutes, the easel's 40 at 4800 px and a fifth more; a painting's rebuild at a sitting's start up to 120
+        # minutes without progress), and a little more. Claude Code also gives up on a tool that sends nothing for
+        # 30 minutes, apart from the total: that too (2026-10-13: the long probe's chunk took 24-27; 2026-10-14: a
+        # review found the 45 minutes set then shorter than a chunk's limit and the client's waits)
+        "MCP_TOOL_TIMEOUT": str(125 * 60 * 1000),
+        "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT": str(125 * 60 * 1000),
         "MAX_MCP_OUTPUT_TOKENS": "40000",
     }
     if TOKEN.exists():

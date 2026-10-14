@@ -551,12 +551,16 @@ fn open(args: &[String]) -> Result<(), String> {
     }
     // Replaying a real painting can take tens of minutes. Follow the server's
     // startup log so `open` shows that work instead of looking dead, and only
-    // time out when the replay itself has made no progress for 30 minutes.
+    // time out when the replay itself has made no progress for longer than a chunk may run.
     // The server is started only by the `open` that takes the session's lock; any
     // other waits for it (or, if it has gone, takes the lock in turn).
     let mut started = false;
     let mut shown = 0usize;
     let mut last_progress = Instant::now();
+    // a chunk may take its whole limit to replay (session::chunk_limit_for, by the width its log
+    // names): no progress for that long, and ten minutes more, is a stall
+    let width = std::fs::read_to_string(log_path(&name)).ok().and_then(|t| session::logged_width(&t).ok()).unwrap_or(LIVE_WIDTH);
+    let stall = session::chunk_limit_for(width) + Duration::from_secs(600);
     loop {
         if let Some(lock) = try_lock(&name)? {
             if started {
@@ -608,8 +612,8 @@ fn open(args: &[String]) -> Result<(), String> {
             }
             return Err(log);
         }
-        if last_progress.elapsed() > Duration::from_secs(1800) {
-            return Err(format!("session made no replay progress for 30 minutes; see {}", dir.join("server.log").display()));
+        if last_progress.elapsed() > stall {
+            return Err(format!("session made no replay progress for {} minutes; see {}", stall.as_secs() / 60, dir.join("server.log").display()));
         }
     }
 }
@@ -966,11 +970,16 @@ fn hold_look(s: &Session, name: &str, at: (f32, f32), v: &look::View) -> Result<
     board.knife(&mut knife, &[(10.0, cy), (50.0 + len, cy)], (0.15, 0.1), None, true, 0.25);
     let (_, _, bpng) = look::render(&board, &seen_as([30.0, cy - wide / 2.0, 30.0 + len, cy + wide / 2.0]))?;
     let blade_img = image::load_from_memory(&bpng).map_err(|e| e.to_string())?.to_rgb8();
-    // held over the passage: the blade's end at the point, its length to the right
-    let x0 = ((crop[0] * f.scale).round().max(0.0) as usize).clamp(f.x0, f.x0 + f.w) as i64;
-    let y0 = ((crop[1] * f.scale).round().max(0.0) as usize).clamp(f.y0, f.y0 + f.h) as i64;
-    let x = (at.0 * f.scale).round() as i64 - x0;
-    let y = (at.1 * f.scale).round() as i64 - y0 - blade_img.height() as i64 / 2;
+    // held over the passage: the blade's end at the point, its length to the right. The
+    // passage may be shown smaller than the canvas's own pixels (a crop of a painting wider
+    // than 2400 px, look.rs LOOK_SCALE; the blade is shown so too): the point is placed in
+    // the passage as shown
+    let px = |u: f32, lo: usize, hi: usize| ((u * f.scale).round().max(0.0) as usize).clamp(lo, hi) as i64;
+    let (x0, x1) = (px(crop[0], f.x0, f.x0 + f.w), px(crop[2], f.x0, f.x0 + f.w));
+    let (y0, y1) = (px(crop[1], f.y0, f.y0 + f.h), px(crop[3], f.y0, f.y0 + f.h));
+    let (kx, ky) = (passage.width() as f32 / (x1 - x0) as f32, passage.height() as f32 / (y1 - y0) as f32);
+    let x = (((at.0 * f.scale).round() as i64 - x0) as f32 * kx).round() as i64;
+    let y = (((at.1 * f.scale).round() as i64 - y0) as f32 * ky).round() as i64 - blade_img.height() as i64 / 2;
     image::imageops::overlay(&mut passage, &blade_img, x, y);
     let (w, h) = (passage.width(), passage.height());
     let mut out = Vec::new();
@@ -1244,7 +1253,7 @@ impl Server {
         Ok(reply)
     }
 
-    /// The whole canvas at full detail (1:1), in tiles of at most 500 units a side,
+    /// The whole canvas at full detail (2.4 px a unit, as a crop), in tiles of at most 500 units a side,
     /// in reading order; the view's modes (gallery, value...) apply to each.
     fn survey(&mut self, args: &[String]) -> Result<String, String> {
         if args.iter().any(|a| a == "--crop" || a == "--size") {
@@ -1258,7 +1267,7 @@ impl Server {
             None => c.seen(),
         };
         let (wu, hu) = (c.width(), c.height());
-        // (a tile is at most 500 units: 1200 px of a live canvas, the most a crop takes)
+        // (a tile is at most 500 units: 1200 px as a crop is shown, the most a crop takes)
         let cols = (wu / 500.0).ceil().max(1.0) as usize;
         let rows = (hu / 500.0).ceil().max(1.0) as usize;
         let (tw, th) = (wu / cols as f32, hu / rows as f32);
@@ -2106,6 +2115,28 @@ mod tests {
     }
 
     const PALETTE_CANVAS: &str = r#"canvas{size=300, aspect=1.25, seed=3, linen=15, ground={{pile={{"lead white", 4}, {"red earth", 1}}, um=80, apply="knife"}}}"#;
+
+    /// On a painting wider than 2400 px a passage is shown smaller than its own pixels
+    /// (look.rs LOOK_SCALE): the blade is still held at the point, the passage's middle,
+    /// not where the canvas's own pixels would put it (outside the passage).
+    #[cfg(feature = "replay")]
+    #[test]
+    fn a_held_knife_is_at_the_point_on_a_wide_painting() {
+        let mut s = Session::new(3000).unwrap();
+        s.run(PALETTE_CANVAS).unwrap();
+        s.run(r#"dk = pile{{"raw umber", 2}, {"bone black", 1}}; k = knife{width=40}; k:load(dk, 0.8)"#).unwrap();
+        let at = (400.0, 320.0);
+        let rgb = |png: &[u8]| image::load_from_memory(png).unwrap().to_rgb8();
+        let crop = [at.0 - HOLD_HALF, at.1 - HOLD_HALF, at.0 + HOLD_HALF, at.1 + HOLD_HALF];
+        let (w, h, png) = hold_look(&s, "k", at, &look::View::default()).unwrap();
+        let bare = rgb(&look::render(&s.canvas().unwrap(), &look::View { crop: Some(crop), ..look::View::default() }).unwrap().2);
+        assert_eq!((w as u32, h as u32), bare.dimensions(), "the passage is shown as a crop of it is");
+        let held = rgb(&png);
+        let (side, mid) = (w.min(h) as u32, (w.min(h) / 2) as u32);
+        assert!((0..mid - 1).all(|x| (0..side).all(|y| held.get_pixel(x, y) == bare.get_pixel(x, y))), "left of the point untouched");
+        let covered = (mid..side).filter(|&x| held.get_pixel(x, mid) != bare.get_pixel(x, mid)).count();
+        assert!(covered as u32 > (side - mid) / 2, "the blade runs right from the point: {covered} of {} pixels", side - mid);
+    }
 
     /// The held knife (speculative) only reads, as the palette look: the state digest, the
     /// log, the globals and the clock are as they were. It shows the passage with a knife

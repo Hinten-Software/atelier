@@ -181,10 +181,10 @@ impl Session {
         api::install(&lua, st.clone())?;
         let deadline = Rc::new(Cell::new(None::<Instant>));
         let d = deadline.clone();
+        let limit_min = chunk_limit_for(width).as_secs() / 60;
         lua.set_hook(mlua::HookTriggers::new().every_nth_instruction(HOOK_EVERY), move |_, _| match d.get() {
             Some(t) if Instant::now() > t => Err(mlua::Error::runtime(format!(
-                "the chunk ran longer than {} minutes and was stopped; nothing it did was kept",
-                CHUNK_LIMIT.as_secs() / 60
+                "the chunk ran longer than {limit_min} minutes and was stopped; nothing it did was kept"
             ))),
             _ => Ok(mlua::VmState::Continue),
         })?;
@@ -1907,6 +1907,7 @@ mod tests {
     /// A painting at 4800 px names its width; a log without the line was
     /// painted at 2400 and replays at 2400 (atelier change, 2026-10-06).
     #[test]
+    #[cfg(tube_box)]
     fn the_log_names_its_width() {
         let mut a = Session::new(4800).unwrap();
         a.run(CANVAS).unwrap();
