@@ -7,3 +7,7 @@ node_modules/
 
 # the easel tests include the guide at upstream's path: a symlink to materials/, made locally for tests only
 engine/notes/easel_guide.md
+
+# Python's compiled cache, made on every run
+__pycache__/
+*.pyc
