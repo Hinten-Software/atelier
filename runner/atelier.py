@@ -271,22 +271,25 @@ def tonights_studio(t: datetime | None = None) -> str | None:
     return next((a for a, d in NIGHTS.items() if d == evening), None)
 
 
-def started_lately(id: str) -> bool:
-    """Whether the studio's newest work began in the last 5 days and wasn't set aside: one work a week, and its night
-    free again for another start if the first was set aside."""
+def last_start(id: str) -> datetime | None:
+    """When the studio's newest work began, unless it was set aside (withdrawn): that leaves the night free."""
     works = Artist(id).works()
     if not works:
-        return False
+        return None
     w = works[-1]
     man = json.loads((w / "manifest.json").read_text()) if (w / "manifest.json").exists() else {}
     if str(man.get("why") or "").startswith("withdrawn"):
-        return False
+        return None
     st = RUN / w.name / "state.json"
     start = man.get("start") or (json.loads(st.read_text()).get("created") if st.exists() else None)
-    if not start:
-        return False
-    began = datetime.fromisoformat(start.replace("Z", "+00:00"))
-    return datetime.now(began.tzinfo) - began < timedelta(days=5)
+    return datetime.fromisoformat(start.replace("Z", "+00:00")) if start else None
+
+
+def started_lately(id: str, at: datetime | None = None) -> bool:
+    """Whether the studio's newest work began in the 5 days before `at` (now) and wasn't set aside: one work a
+    week, and its night free again for another start if the first was set aside."""
+    began = last_start(id)
+    return began is not None and (at or datetime.now(began.tzinfo)) - began < timedelta(days=5)
 
 
 RESTARTS = 2  # fresh starts for a work whose first reply Claude's classifier stopped, before it is set aside
@@ -346,18 +349,21 @@ def cmd_boxes(a):
 
 
 def cmd_next(a):
-    """Each studio's next night (NIGHTS), soonest first."""
+    """Each studio's next night (NIGHTS): its weekday, and not within 5 days of its last start (started_lately)."""
     reg = registry()
     if not reg:
         raise SystemExit("no artists yet")
     t = datetime.now()
-    tonight = (t - timedelta(hours=12)) if t.hour < 12 else t
-    days = "Monday Tuesday Wednesday Thursday Friday Saturday Sunday".split()
-    for id in sorted(reg, key=lambda x: (NIGHTS.get(x, 9) - tonight.weekday()) % 7):
-        if id in NIGHTS:
-            ahead = (NIGHTS[id] - tonight.weekday()) % 7
-            when = "tonight" if ahead == 0 else f"{days[NIGHTS[id]]} night, {(tonight + timedelta(days=ahead)):%-d %B}"
-            print(f"{Artist(id).name}: {when} ({len(Artist(id).works())} works so far)")
+    tonight = ((t - timedelta(hours=12)) if t.hour < 12 else t).date()
+    nights = []
+    for id in (x for x in reg if x in NIGHTS):
+        night = datetime.combine(tonight + timedelta(days=(NIGHTS[id] - tonight.weekday()) % 7), datetime.min.time()).replace(hour=23).astimezone()
+        while started_lately(id, night):  # painted this week: its night next week
+            night += timedelta(days=7)
+        nights.append((night, id))
+    for night, id in sorted(nights):
+        when = "tonight" if night.date() == tonight else f"{night:%A} night, {night:%-d %B}"
+        print(f"{Artist(id).name}: {when} ({len(Artist(id).works())} works so far)")
 
 
 def main():
