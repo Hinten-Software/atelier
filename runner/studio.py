@@ -182,7 +182,14 @@ def prepare(artist: Artist, theme: str | None, box: str = DEFAULT_BOX) -> dict:
     s = artist.studio
     for d in ("bin", "paintings/lua", "walls"):
         (s / d).mkdir(parents=True, exist_ok=True)
-    shutil.copy2(painter_easel(box), s / "bin" / "easel")
+    easel = s / "bin" / "easel"
+    if easel.exists():  # a work that ended outside finish() (its ceiling, a killed runner) left its easel serving
+        subprocess.run([str(easel), "close"], cwd=s, capture_output=True, timeout=120,
+                       env={"PATH": "/usr/bin:/bin", "HOME": str(artist.root)})
+    # a new file, not the old one written over: macOS kills every exec of a binary changed in place while it runs
+    tmp = easel.with_name("easel.new")
+    shutil.copy2(painter_easel(box), tmp)
+    os.replace(tmp, easel)
     for src, dst in NOTES.items():
         (s / dst).write_text(guide_for(box) if src == "easel_guide.md" else strip_comments((MATERIALS / src).read_text()))
     (s / JOURNAL).write_text("")

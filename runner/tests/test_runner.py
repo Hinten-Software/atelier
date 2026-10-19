@@ -209,10 +209,8 @@ def main():
 
         # 10. the replay easel overwritten during a work (a cargo test, finish_painting): the check replays with the
         # copy archived at the work's start, which its manifest names (i-010, 2026-10-18)
-        # i-008 and i-009 ended outside finish(), their easel still serving, and prepare() copied the easel over the
-        # running binary: macOS kills it on every exec since. A new file, and no server left from them
-        subprocess.run(["/usr/bin/pkill", "-f", f"{root}/studio/bin/easel serve"])
-        (root / "studio/bin/easel").unlink()
+        # i-008 and i-009 ended outside finish(), their easel still serving: prepare() closes it and puts the new
+        # easel in as a new file (written over in place while it ran, macOS killed every exec of it after)
         (DATA / "run/current").unlink(missing_ok=True)
         modes(root, "voluntary")
         atelier("paint", "i", "--by", "operator", env={"ATELIER_WINDOW": closed_window})
