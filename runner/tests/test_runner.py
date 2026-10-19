@@ -109,6 +109,8 @@ def main():
         s = wait("i-002")
         check("cleared work ends, contaminated, not hung", s["state"] == "not-finished", s["state"])
         check("contaminated work not on the walls", not any(walls.glob("2*")))
+        m2 = json.loads((DATA / "works/i-002/manifest.json").read_text())
+        check("and says why, for the morning report", "contaminated" in s.get("why", "") and m2.get("why") == s["why"], (s.get("why"), m2.get("why")))
         hist = (DATA / "history.md").read_text()
         check("history logs start, audit stop and clearing", "stopped by the white-room audit" in hist and "cleared" in hist)
 
@@ -216,6 +218,10 @@ def main():
         check("'resets 9am' read at 13:55 is tomorrow", 18 * 3600 < works.reset_time("resets 9am", ref) - ref.timestamp() < 20 * 3600)
         check("'resets Mon 9am' is Monday", 1.7 * 86400 < works.reset_time("resets Mon 9am", ref) - ref.timestamp() < 1.9 * 86400)
         check("a 429 is not a usage limit", not works.is_limit("429 rate_limit_error"))
+        # 9. a work whose replay check fails says so as its reason (i-010's report read "not finished: ,")
+        differs = "check: DIFFERS from the live canvas: the replay DIFFERS from the live canvas saved at close"
+        check("a failed check is the reason", works.unfinished_why({"verified": False, "verdict": differs}, True) == differs)
+        check("no voluntary end is a reason", "own accord" in works.unfinished_why({"verified": True, "verdict": "check: ok"}, False))
     finally:
         if os.environ.get("KEEP"):
             print(f"kept {DATA} and {roots}")

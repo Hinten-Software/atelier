@@ -17,7 +17,7 @@ export RUSTFLAGS="$remap"
 export ATELIER_BUILD=1
 # byte-identical builds: the painter's easel paints, the replay easel (another build) must paint the same bytes from the
 # log (REC-4). claude-paint's release profile is incremental since 2026-10-05 and accepts "bounded" drift between
-# builds; ours is not
+# builds; ours is not (engine/Cargo.toml says so too since 2026-10-19, for builds made without this script)
 export CARGO_PROFILE_RELEASE_INCREMENTAL=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
 # engine/.cargo/config.toml sets CFLAGS for Lua's fixed hash seed; set here, it must carry that define too
 export CFLAGS="-Dluai_makeseed()=0x5eedu -ffile-prefix-map=$cargo_home=/cargo -ffile-prefix-map=$HOME=/home"

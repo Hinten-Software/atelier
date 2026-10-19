@@ -9,9 +9,14 @@ codegen-units = 256
 [profile.release]
 opt-level = 3
 debug = false
-# Favor runtime optimization for exports; cross-build pixel drift is bounded
+# (claude-paint:) Favor runtime optimization for exports; cross-build pixel drift is bounded
 # by the comparison policy in notes/workflow.md, not forbidden by hash.
-incremental = true
+# Atelier, which forbids it: not incremental. A painting must replay byte-exact with the replay
+# easel (REC-4), and anything may rebuild that with a plain `cargo build
+# --release` (scripts/replay_easel): an incremental build of the same source
+# paints differently from the painter's easel (work i-010, 2026-10-18).
+# scripts/tests/release_profile.sh; tools/build-engine.sh sets it too.
+incremental = false
 codegen-units = 1
 
 # Tests run optimized (the physics tests took ~10 min unoptimized), with

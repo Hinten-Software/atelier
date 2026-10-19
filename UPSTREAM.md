@@ -30,7 +30,8 @@ She develops actively; this is routine. In a worktree of its own (the runner pai
    each change listed under "The atelier's changes" (and taking hers everywhere else).
 3. `bash tools/build-engine.sh` - the replay easel and a painter's easel per box (new boxes come by themselves).
 4. Tests: `cd engine && cargo test --release --no-fail-fast -p paint -p easel` (her tests run on her behaviour:
-   our changes are on only in our build); `python3 runner/tests/test_*.py`; in a test studio,
+   our changes are on only in our build); `TMPDIR=<scratch> engine/scripts/tests/release_profile.sh` (her release
+   profile is incremental: keep ours not); `python3 runner/tests/test_*.py`; in a test studio,
    `node easel-mcp/test/tools.ts <studio>` and `node easel-mcp/test/upstream.ts <studio>`.
 5. Her painter tools: compare `easel-mcp/src/upstream/easel-tools.ts` (her current version) with what
    `easel-mcp/src/server.ts` serves, and port what is new (its header says what was last ported).
@@ -53,6 +54,9 @@ She develops actively; this is routine. In a worktree of its own (the runner pai
 - `engine/scripts/check_painting`: `EASEL_NO_BUILD=1` uses the replay easel already built.
 - `tools/build-engine.sh`: no local paths in the binaries (ENG-7); byte-identical builds (her release profile is
   incremental since 2026-10-05 and accepts drift between builds: ours is not); a painter's easel per box.
+- `engine/Cargo.toml`: `[profile.release] incremental = false`, so a plain `cargo build --release` (scripts/replay_easel,
+  the scripts' tests) makes a replay easel that paints as the painter's does, not only build-engine.sh's. An
+  incremental one left work i-010 unverified (2026-10-18). Test `engine/scripts/tests/release_profile.sh`.
 - `materials/easel_guide.md`: the tube table is the every box's (`easel tubes --markdown`; each studio's copy has its
   own box's, runner/studio.py); "close up" for crops; the journal and the log without file paths; two lines
   reworded for the white room ("as dirty as a working palette gets", "as many tiles as one reply holds").

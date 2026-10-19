@@ -374,6 +374,7 @@ class Work:
         title = viewer.title_of(reply)
         voluntary = any(r["how"] == "voluntary" for r in self.state["sittings"])
         finished = self.state.get("verified", False) and voluntary and not self.state.get("contaminated")
+        why = None if finished else unfinished_why(self.state, voluntary)
         if finished and "hung" not in done:
             hang(a, next_wall_number(a), pkg / "final.png", title, reply)
             done.append("hung")
@@ -391,13 +392,30 @@ class Work:
             "final_sha256": sha256(pkg / "final.png") if (pkg / "final.png").exists() else None,
             "finished": finished,  # written last: only once it hangs (QA Q8)
         }
+        if why:
+            manifest["why"] = why  # the morning report's reason (report.py)
         tmp = pkg / "manifest.json.tmp"
         tmp.write_text(json.dumps(manifest, indent=1))
         tmp.replace(pkg / "manifest.json")
         CURRENT.unlink(missing_ok=True)
         export_now()  # the finished work on the site at once; tools/push.sh takes it to the NAS (OPS-2, OPS-9)
         event(f"work {self.id} {'finished' if finished else 'ended unfinished'}: {title or 'untitled'} ({self.state.get('verdict')})")
-        self.set("finished" if finished else "not-finished")
+        if finished:
+            self.set("finished")
+        else:
+            self.set("not-finished", why=why)
+
+
+def unfinished_why(state: dict, voluntary: bool) -> str:
+    """Why a work that went through finish() isn't hung: the first that holds of contamination, the replay
+    check's verdict, and no sitting that ended of the painter's own accord."""
+    if state.get("contaminated"):
+        return "contaminated: the white-room audit stopped a sitting"
+    if not state.get("verified", False):
+        return state.get("verdict") or "check: no verdict"
+    if not voluntary:
+        return "no sitting ended of the painter's own accord"
+    return "not finished"
 
 
 def write_timeline(pkg: Path, transcripts: list[Path]):
