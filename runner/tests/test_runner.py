@@ -5,6 +5,7 @@
 
 Uses a throwaway private store and throwaway artist roots under /Users/Shared, removed afterwards.
 """
+import fcntl
 import json
 import os
 import shutil
@@ -253,8 +254,29 @@ def main():
         if os.environ.get("KEEP"):
             print(f"kept {DATA} and {roots}")
             return
+        # every work's runner and sitting first: one still going would open the easel again after its close
+        for run in (DATA / "run").glob("*/state.json"):
+            pidf = run.parent / "runner.pid"
+            groups = [json.loads(pidf.read_text())["pid"]] if pidf.exists() else []
+            groups += [s["pgid"] for s in json.loads(run.read_text()).get("sittings", []) if s.get("pgid")]
+            for g in groups:
+                try:
+                    os.killpg(g, 9)
+                except (ProcessLookupError, PermissionError):
+                    pass
         for r in roots:
             subprocess.run(["/bin/sh", "-c", f"cd {r}/studio && PATH=/usr/bin:/bin bin/easel close"], capture_output=True)
+            # a server `close` didn't stop (it runs in its own process group): the pid in the lock it holds
+            lock = r / "studio/out/easel/painting/lock"
+            if lock.exists():
+                with open(lock, "r+") as f:
+                    try:
+                        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        try:
+                            os.kill(int(f.read().strip()), 9)
+                        except (ValueError, ProcessLookupError):  # no pid written yet, or it has just gone
+                            pass
             shutil.rmtree(r, ignore_errors=True)
         shutil.rmtree(DATA, ignore_errors=True)
     print("all passed" if not failed else f"{failed} failed")
