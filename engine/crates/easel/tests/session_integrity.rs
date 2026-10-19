@@ -18,6 +18,7 @@ fn ok(args: &[&str]) -> String {
 }
 #[test]
 fn live_resolution_is_fixed() {
+    let _reaper = Reaper("s");
     let o = cmd(&["open", "s", "--width", "80"]);
     assert!(!o.status.success(), "live width override accepted");
     assert!(ok(&["open", "s"]).contains("2400px"));
@@ -26,6 +27,7 @@ fn live_resolution_is_fixed() {
 
 #[test]
 fn edited_or_truncated_logs_cannot_reopen() {
+    let _reaper = Reaper("reopen");
     ok(&["open", "reopen"]);
     ok(&["-s", "reopen", "do", "x = 1"]);
     ok(&["-s", "reopen", "close"]);
@@ -48,6 +50,7 @@ fn edited_or_truncated_logs_cannot_reopen() {
 #[test]
 fn replay_failure_is_fatal() {
     let name = "bad-replay";
+    let _reaper = Reaper(name);
     let dir = root().join("out/easel").join(name);
     std::fs::create_dir_all(&dir).unwrap();
     let logs = root().join("paintings/lua");
@@ -67,6 +70,7 @@ fn replay_failure_is_fatal() {
 // says both, so the chunk isn't sent again.
 #[test]
 fn a_failed_look_after_a_chunk_still_reports_the_chunk() {
+    let _reaper = Reaper("looked");
     ok(&["open", "looked"]);
     let out = ok(&["-s", "looked", "do", "x = 1", "--look"]);
     ok(&["-s", "looked", "close"]);
@@ -103,6 +107,7 @@ fn an_implicit_scratch_reset_survives_a_failed_chunk() {
 
 #[test]
 fn journal_uses_the_selected_painting_clock() {
+    let _reaper = Reaper("journal");
     ok(&["open", "journal"]);
     let result = cmd(&["-s", "journal", "note", "painting clock"]);
     ok(&["-s", "journal", "close"]);
@@ -117,6 +122,8 @@ fn journal_uses_the_selected_painting_clock() {
 #[test]
 fn a_running_session_refuses_every_request_while_its_log_is_edited() {
     let s = ["-s", "gate"];
+    // `close` is refused while the log is edited: only a kill stops it then
+    let _reaper = Reaper("gate");
     let with = |a: &[&'static str]| [&s[..], a].concat();
     ok(&["open", "gate"]);
     ok(&with(&["do", "x = 1"]));
@@ -277,7 +284,8 @@ fn servers(name: &str) -> Vec<u32> {
     String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| l.trim().parse().ok()).collect()
 }
 
-// Kills what a failed assertion would leave running.
+// Kills what a failed assertion would leave running: `open` starts the server in its own
+// process group, so nothing else stops it when the test binary exits.
 struct Reaper(&'static str);
 impl Drop for Reaper {
     fn drop(&mut self) {
