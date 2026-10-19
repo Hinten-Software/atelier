@@ -103,6 +103,25 @@ def archive_engines(box: str = DEFAULT_BOX) -> dict:
     return out
 
 
+def replay_env(h: str | None, target: Path) -> tuple[dict, str | None]:
+    """What check_painting needs to replay with the replay easel archived at the work's start (hash h), and the hash
+    of the one at REPLAY_EASEL now when that isn't h ("missing" if there's none). A cargo test, finish_painting or a
+    plain build in the checkout overwrites that file during a work; the work's manifest names h, so h is the one that
+    checks (ENG-3). It goes in through CARGO_TARGET_DIR, which scripts/replay_easel names the easel from: the engine
+    is hers."""
+    now_h = sha256(REPLAY_EASEL) if REPLAY_EASEL.exists() else "missing"
+    if not h or now_h == h:
+        return {}, None
+    archived = DATA / "archive" / "engines" / h / "replay"
+    if not archived.exists() or sha256(archived) != h:
+        # no copy to check with: the check below uses the checkout's, and its verdict must not pass for h's
+        raise RuntimeError(f"the replay easel is {now_h}, not {h} as at the work's start, and {archived} is not {h}")
+    shutil.rmtree(target, ignore_errors=True)
+    (target / "release").mkdir(parents=True)
+    shutil.copy2(archived, target / "release" / "easel")  # a copy, not a link: the easel canonicalizes its own path
+    return {"CARGO_TARGET_DIR": str(target)}, now_h
+
+
 class Work:
     def __init__(self, id: str):
         self.id = id
@@ -337,10 +356,16 @@ class Work:
                            env={"PATH": "/usr/bin:/bin", "HOME": str(a.root)})
             check = self.run / "check"
             shutil.rmtree(check, ignore_errors=True)
+            h = self.state["hashes"].get("replay_easel")
+            env, swapped = replay_env(h, self.run / "replay-target")
             r = subprocess.run([str(CHECK_PAINTING), str(s), str(check)], capture_output=True, text=True,
-                               env=os.environ | {"EASEL_NO_BUILD": "1", "PATH": f"/opt/homebrew/opt/rustup/bin:{os.environ.get('PATH', '')}"})
+                               env=os.environ | {"EASEL_NO_BUILD": "1", "PATH": f"/opt/homebrew/opt/rustup/bin:{os.environ.get('PATH', '')}"} | env)
+            shutil.rmtree(self.run / "replay-target", ignore_errors=True)
             verdict = next((l for l in reversed(r.stdout.splitlines()) if l.startswith("check:")), "check: no verdict")
-            (self.run / "check.txt").write_text(r.stdout + r.stderr)
+            note = f"replay easel: {REPLAY_EASEL} is {swapped}, not {h} as at the work's start; checked with the archived {h}\n"
+            (self.run / "check.txt").write_text((note if swapped else "") + r.stdout + r.stderr)
+            if swapped:
+                self.state["replay_easel_swapped"] = swapped
             self.state.update(verdict=verdict, verified=verdict.startswith("check: ok"))
             if (check / "replayed.png").exists():
                 shutil.copy2(check / "replayed.png", pkg / "final.png")
@@ -392,6 +417,8 @@ class Work:
             "final_sha256": sha256(pkg / "final.png") if (pkg / "final.png").exists() else None,
             "finished": finished,  # written last: only once it hangs (QA Q8)
         }
+        if "replay_easel_swapped" in self.state:  # checked with hashes.replay_easel, the archived copy (replay_env)
+            manifest["replay_easel_at_finish"] = self.state["replay_easel_swapped"]
         if why:
             manifest["why"] = why  # the morning report's reason (report.py)
         tmp = pkg / "manifest.json.tmp"

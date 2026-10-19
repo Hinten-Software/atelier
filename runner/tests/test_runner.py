@@ -15,6 +15,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 RUNNER = HERE.parent / "atelier.py"
+REPLAY_EASEL = HERE.parents[1] / "engine/target/release/easel"  # config.REPLAY_EASEL
 DATA = Path(f"/Users/Shared/atelier/t{os.getpid() % 10000}")  # one folder per run: runs can't break each other (QA Q25)
 ENV = os.environ | {"ATELIER_DATA": str(DATA), "ATELIER_CLAUDE": str(HERE / "fake_claude.py"), "ATELIER_WAIT_SCALE": "0.005",
                     "ATELIER_WINDOW": "always", "ATELIER_SECRETS": str(DATA / "secrets")}  # never the owner's token
@@ -205,6 +206,34 @@ def main():
         atelier("paint", "i", "--by", "operator", env={"ATELIER_WORK_USD": "0.02"})
         s = wait("i-009", timeout=120)
         check("the work ceiling ends the work", s["state"] == "not-finished" and "ceiling" in s.get("why", ""), s.get("why"))
+
+        # 10. the replay easel overwritten during a work (a cargo test, finish_painting): the check replays with the
+        # copy archived at the work's start, which its manifest names (i-010, 2026-10-18)
+        # i-008 and i-009 ended outside finish(), their easel still serving, and prepare() copied the easel over the
+        # running binary: macOS kills it on every exec since. A new file, and no server left from them
+        subprocess.run(["/usr/bin/pkill", "-f", f"{root}/studio/bin/easel serve"])
+        (root / "studio/bin/easel").unlink()
+        (DATA / "run/current").unlink(missing_ok=True)
+        modes(root, "voluntary")
+        atelier("paint", "i", "--by", "operator", env={"ATELIER_WINDOW": closed_window})
+        s = wait("i-010", until=("closed",), timeout=60)
+        os.kill(json.loads((DATA / "run/i-010/runner.pid").read_text())["pid"], 9)
+        aside = REPLAY_EASEL.with_name("easel.test-aside")  # this checkout's: don't run the tests where a studio paints
+        if aside.exists():  # a run killed mid-swap: REPLAY_EASEL may be the stand-in, aside the real one
+            raise SystemExit(f"{aside} is there: put it back as {REPLAY_EASEL} if that is a stand-in")
+        REPLAY_EASEL.rename(aside)
+        try:
+            REPLAY_EASEL.write_text("#!/bin/sh\necho 'not the archived easel' >&2\nexit 3\n")
+            REPLAY_EASEL.chmod(0o755)
+            atelier("resume")
+            s = wait("i-010")
+        finally:
+            aside.replace(REPLAY_EASEL)
+        check("a swapped replay easel: the archived one checks", s["state"] == "finished" and s["verified"], s.get("verdict"))
+        m = json.loads((DATA / "works/i-010/manifest.json").read_text())
+        check("and the manifest names the one found at the end", m.get("replay_easel_at_finish")
+              and m["replay_easel_at_finish"] != m["hashes"]["replay_easel"], m.get("replay_easel_at_finish"))
+        check("check.txt says so", "checked with the archived" in (DATA / "run/i-010/check.txt").read_text())
 
         # 8. limit reset times (QA Q10)
         sys.path.insert(0, str(HERE.parent))
