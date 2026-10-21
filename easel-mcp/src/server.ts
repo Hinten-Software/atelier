@@ -100,7 +100,17 @@ function surveyed(said: string, paths: string[], images: Content[]) {
 		chars += im.data.length;
 		n++;
 	}
-	const rest = n < images.length ? `\nThis shows tiles 1–${n} of ${images.length}. Read the others, each on its own, to see the whole:\n${paths.slice(n).join("\n")}\n` : "";
+	// the tiles not shown, each as the crop that shows it: the easel names a tile "<path> (WxH): row r column c (x0,y0,x1,y1)",
+	// and its path is under out/, which `read` doesn't open (the owner, 2026-10-21: painters were sent to read files they can't)
+	const crops = paths.slice(n).map((path) => {
+		const m = said.split("\n").find((l) => l.startsWith(`${path} `))?.match(/: (row \d+ column \d+) \(([-\d.]+),([-\d.]+),([-\d.]+),([-\d.]+)\)$/);
+		return m ? `${m[1]}: crop "${[m[2], m[3], m[4], m[5]].map((v) => Math.round(Number(v))).join(",")}"` : undefined;
+	});
+	const rest = n < images.length
+		? `\nThis shows tiles 1–${n} of ${images.length}. ` + (crops.every(Boolean)
+			? `To see the others, look at each with its crop:\n${crops.join("\n")}\n`
+			: "To see the others, look at the parts not shown with `crop`.\n")
+		: "";
 	return { content: [{ type: "text", text: said + rest }, ...images.slice(0, n)] as Content[] };
 }
 // the painting's box is the atelier's to know: a box's name may be a painter's (seurat, hopper), and nothing in the
@@ -144,7 +154,7 @@ server.registerTool("look", {
 		"mode: \"value\" (the picture in grays, its lightness alone, in the gallery light), \"squint\", \"mirror\", \"relief\" (a raking light on the paint's ridges and furrows), \"gallery\" (the light the picture hangs in) or several, comma-separated. " +
 		"light: \"azimuth,elevation\" in degrees for the relief light (default \"135,25\", from the upper left). size: the long side in pixels. " +
 		"grid: true, or a spacing in canvas units. " +
-		"survey: true surveys the whole canvas at full detail, as several tiles (with mode, not crop or size); a partial reply lists remaining tiles to read in separate turns. " +
+		"survey: true surveys the whole canvas at full detail, as several tiles (with mode, not crop or size); a partial reply gives the crop of each tile it doesn't show, to look at in separate turns. " +
 		"compare: the path of an image in this studio, usually an earlier look, resized to the current view's height and shown left of it; to compare an earlier look, supply matching crop, mode and light options explicitly. " +
 		"hold: the name of a knife (what is on it) or a pile (a fresh load), with at: \"x,y\" (canvas units): the loaded knife held up to the canvas there, its paint thick on the blade (crop sets the passage). Supports mode value, squint, relief or gallery, light and mask; size, grid and mirror are unavailable with hold. It shows the paint on the knife, not how it would look laid. " +
 		"palette: true shows the palette board instead: each pile knifed out thick and smeared thin across a black stripe.",

@@ -757,8 +757,8 @@ other option, and nothing on the canvas or the clock changes.
 | `hold: "<a knife's or a pile's name>"`, `at: "x,y"` | (speculative) the loaded knife held up to the canvas: the passage around the point (240 units square, clipped at the canvas's edges, or your `crop`) with the blade's end at it, the paint thick on the steel, seen in the same light and mode as the passage (`mode` value, squint, relief or gallery, `light` and `mask`; not mirror, `grid`, `size`, `palette`, `survey` or `compare`). A knife shows what is on it, as full as it is up to a full load; a pile, a fresh full load. It shows the paint on the knife, not how it would look laid |
 
 A survey can arrive in parts, as many tiles as one reply holds.
-The reply lists the remaining tile paths; read them one at a time to inspect
-the rest of the canvas.
+The reply gives the crop of each tile it doesn't show; look at them with `crop`, one at a time,
+to inspect the rest of the canvas.
 
 A whole view defaults to 1000 pixels on its long side (`size` up to 1600),
 about 21% of a 4800-pixel canvas's width: small marks, beads of paint and
