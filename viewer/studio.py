@@ -178,12 +178,6 @@ def about_brief(folder):
     return _subjects[folder][1]
 
 
-def subject(folder):
-    """The artist the studio's brief names (e.g. "Friedrich", "Hopper"), "self-portrait", else "free" ("" without
-    a brief)."""
-    return about_brief(folder)["subject"]
-
-
 def in_reference(path, cwd):
     """A file the painter read is in its studio's reference/ folder: a picture given to it to study, not its canvas.
     path as the read tool got it (relative to the studio, absolute or with ~), cwd the studio's folder."""

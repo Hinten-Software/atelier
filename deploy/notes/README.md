@@ -150,8 +150,7 @@ installing globally.
    npx wrangler deploy
    ```
 
-   This uploads `worker.js`, attaches the route `notart.fyi/api/notes*` and the
-   daily cron. Check with `curl -s https://notart.fyi/api/notes`.
+   This uploads `worker.js` and attaches the route `notart.fyi/api/notes*`. Check with `curl -s https://notart.fyi/api/notes`.
 
 The Worker route takes precedence over the tunnel for `/api/notes*` only; the
 rest of the site keeps coming from the NAS. Workers logs are left off in
@@ -165,7 +164,7 @@ Token) with:
 
 | Scope | Permission | Needed for |
 | --- | --- | --- |
-| Account | Workers Scripts — Edit | upload the Worker, secrets, cron trigger |
+| Account | Workers Scripts — Edit | upload the Worker, secrets |
 | Account | D1 — Edit | create the database, apply schema, `hide.sh` / `unhide.sh` |
 | Zone (notart.fyi) | Workers Routes — Edit | attach `notart.fyi/api/notes*` |
 | Account | Account Settings — Read | wrangler looks up the account |

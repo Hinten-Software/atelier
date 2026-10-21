@@ -53,7 +53,6 @@ class StartProbe(Probe):
     """A throwaway copy of a studio as a new work finds it."""
     def __init__(self, artist: Artist):
         super().__init__(None)
-        self.home = self.root / ".home"
         for f in (NOTEBOOK, TOOLKIT):
             if (artist.studio / f).exists():
                 shutil.copy2(artist.studio / f, self.studio / f)

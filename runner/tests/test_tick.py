@@ -52,7 +52,6 @@ def main():
     check("Sunday night is Studio I's, also after midnight", night("2026-10-18 23:30") == "i" and night("2026-10-19 03:00") == "i")
     check("Tuesday night is II's, Thursday night III's", night("2026-10-20 23:30") == "ii" and night("2026-10-22 23:10") == "iii")
     check("Monday night is no one's", night("2026-10-19 23:30") is None and night("2026-10-20 06:00") is None)
-    real_night, real_lately = atelier.tonights_studio, atelier.started_lately
     atelier.tonights_studio = lambda: None
     check("no studio's night: nothing starts", tick() == [])
     atelier.tonights_studio = lambda: "i"

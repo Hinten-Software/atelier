@@ -4,7 +4,7 @@
 # ///
 """Export the studio viewer as static files, painters only and scrubbed as --public is.
 
-    uv run studio/export_static.py <out-dir> [--skip paint-studio-xxxxxx ...]
+    uv run studio/export_static.py <out-dir>
 
 Writes <out>/index.html (the viewer, reading files instead of the live API), <out>/stream.css (its livestream
 layout, loaded with ?stream=1), <out>/data/sessions.json and,
@@ -31,8 +31,6 @@ except ImportError:  # the web copies are an optimization: without Pillow the vi
     Image = None
 
 EXT = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}
-PLAUSIBLE = (b'<script async src="/v/app.js"></script><script>window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)},'
-             b'plausible.init=plausible.init||function(i){plausible.o=i||{}};plausible.init({endpoint:"/v/e"})</script>')
 THUMB = (168, 120)  # the look-strip shows 81x58: twice that, for sharp screens
 VIEW = 1600         # the main view's copy, long side
 
@@ -126,7 +124,6 @@ def text(path, data):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out")
-    ap.add_argument("--skip", nargs="*", default=[], help="painter folders to leave out (test runs)")
     ap.add_argument("--sessions", help="where the session logs are (the atelier: its session farm, runner/export.py)")
     ap.add_argument("--private-words", help="a file of words (regexes) no exported file may contain (the atelier, REC-7)")
     a = ap.parse_args()
@@ -138,7 +135,7 @@ def main():
     S.PUBLIC = True
     out = os.path.abspath(a.out)
     before = owned(out)
-    ss = [{k: v for k, v in s.items() if k != "files"} for s in S.list_sessions() if s.get("painter") and s["p"] not in a.skip]
+    ss = [{k: v for k, v in s.items() if k != "files"} for s in S.list_sessions() if s.get("painter")]
     n_img = n_web = 0
     pool = ThreadPoolExecutor(os.cpu_count() or 4) if Image else None
     for s in ss:

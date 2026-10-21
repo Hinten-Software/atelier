@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- The morning report (runner/report.py): at 07:30, what the night did and what needs a person, as a notification
-     and DATA/run/reports/<date>.md. Install as atelier.tick.plist is (HOME_DIR replaced by the user's home). -->
+     and DATA/run/reports/<date>.md. Install as atelier.push.plist is (sed replaces HOME_DIR with the user's home). -->
 <plist version="1.0">
 <dict>
   <key>Label</key><string>atelier.report</string>

@@ -22,7 +22,6 @@ published. The essays live here, outside every studio: no painter ever reads the
 owner's words too).
 """
 import html
-import json
 import re
 import sys
 import webbrowser

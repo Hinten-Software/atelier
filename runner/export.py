@@ -185,10 +185,9 @@ def main() -> int:
                         "--sessions", str(FARM), "--private-words", str(PRIVATE_WORDS)], capture_output=True, text=True)
     if r.returncode:  # the exporter stops on a private word: nothing of this run is published
         return blocked([l for l in (r.stdout + r.stderr).splitlines() if l.strip()][-3:])
-    SITE_ = STAGE
-    externalize_scripts(SITE_ / "studio" / "index.html")
+    externalize_scripts(STAGE / "studio" / "index.html")
     for w in works:
-        data = SITE_ / "studio" / "data" / f"w-{w.name}"
+        data = STAGE / "studio" / "data" / f"w-{w.name}"
         if not data.exists():
             continue
         log = w / "painting.lua"  # a finished work's painting is its package's log, not the studio's current one
@@ -201,11 +200,11 @@ def main() -> int:
         ev = data / "events.json"  # the studio's path names its root on this machine: published as "studio"
         ev.write_text(re.sub(r"/Users/Shared/[a-z0-9]+/studio", "studio", ev.read_text()))
     keep = {f"w-{w.name}" for w in works}
-    for stale in (SITE_ / "studio" / "data").glob("w-*"):
+    for stale in (STAGE / "studio" / "data").glob("w-*"):
         if stale.name not in keep:
             shutil.rmtree(stale)
     for born in sorted((DATA / "artists").glob("*/walls-at-birth")):  # paintings hung before a studio's first work
-        dst = SITE_ / "studio" / "data" / f"walls-{born.parent.name}"
+        dst = STAGE / "studio" / "data" / f"walls-{born.parent.name}"
         dst.mkdir(parents=True, exist_ok=True)
         for png in born.glob("*.png"):
             out = dst / f"{png.stem}.jpg"
@@ -216,7 +215,7 @@ def main() -> int:
     shown = essays.published()  # the owner's essays: the page and its data only once one is published
     for f in PAGES.rglob("*"):  # the atelier's own pages, scanned and allowlisted like everything else
         if f.is_file() and not hidden(f.relative_to(PAGES)) and (shown or f.relative_to(PAGES).parts[0] != "essays"):
-            dst = SITE_ / f.relative_to(PAGES)
+            dst = STAGE / f.relative_to(PAGES)
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(f, dst)
             if f.suffix == ".html":  # assets by content version: an update never shows next to a cached old script
@@ -229,16 +228,16 @@ def main() -> int:
                 key = json.loads(NOTES_SETTINGS.read_text()).get("sitekey", "")
                 if re.fullmatch(r"[0-9A-Za-z_-]{10,64}", key):
                     dst.write_text(dst.read_text().replace("TURNSTILE_SITE_KEY", key))
-    (SITE_ / "data").mkdir(exist_ok=True)
-    (SITE_ / "data" / "works.json").write_text(json.dumps(works_json(works), indent=1))
+    (STAGE / "data").mkdir(exist_ok=True)
+    (STAGE / "data" / "works.json").write_text(json.dumps(works_json(works), indent=1))
     # always there (empty until one is published), so no page asks for it in vain
-    (SITE_ / "data" / "essays.json").write_text(json.dumps({"essays": shown}, indent=1))
+    (STAGE / "data" / "essays.json").write_text(json.dumps({"essays": shown}, indent=1))
     if not shown:  # the stage is reused: a page from an earlier export goes when no essay is published
-        shutil.rmtree(SITE_ / "essays", ignore_errors=True)
-    hits = scan(SITE_)
-    for f in SITE_.rglob("*"):  # REC-8: nothing outside the allowlist (the exporter's own list file stays behind)
-        rel = str(f.relative_to(SITE_))
-        if f.is_file() and not ALLOWED.match(rel) and not hidden(f.relative_to(SITE_)):
+        shutil.rmtree(STAGE / "essays", ignore_errors=True)
+    hits = scan(STAGE)
+    for f in STAGE.rglob("*"):  # REC-8: nothing outside the allowlist (the exporter's own list file stays behind)
+        rel = str(f.relative_to(STAGE))
+        if f.is_file() and not ALLOWED.match(rel) and not hidden(f.relative_to(STAGE)):
             hits.append(f"{rel}: not on the export allowlist")
     if hits:
         return blocked(hits)

@@ -1,14 +1,13 @@
 /* The atelier's pages: a quiet room. The viewer (studio/) keeps its own styles. */
 :root {
-  --bg: #f3f0e9; --fg: #26241f; --muted: #77726a; --line: #d9d3c7; --card: #ebe6dc; --accent: #8a6a3b;
+  --bg: #f3f0e9; --fg: #26241f; --muted: #77726a; --line: #d9d3c7; --card: #ebe6dc;
   --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
   --sans: -apple-system, "Segoe UI", system-ui, sans-serif;
   color-scheme: light dark;
 }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) { --bg: #161513; --fg: #e9e5dc; --muted: #8f897e; --line: #2f2c27; --card: #1f1d1a; --accent: #c49a5c; }
+  :root { --bg: #161513; --fg: #e9e5dc; --muted: #8f897e; --line: #2f2c27; --card: #1f1d1a; }
 }
-:root[data-theme="dark"] { --bg: #161513; --fg: #e9e5dc; --muted: #8f897e; --line: #2f2c27; --card: #1f1d1a; --accent: #c49a5c; }
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 17px/1.65 var(--serif); min-height: 100vh; display: flex; flex-direction: column; }

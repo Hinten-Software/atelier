@@ -10,7 +10,6 @@ Nothing here reaches an artist: a budget or window stop ends a sitting like the 
 import json
 import os
 from datetime import datetime, timedelta
-from pathlib import Path
 
 from config import DATA
 

@@ -21,8 +21,6 @@ database_id = "00000000-0000-0000-0000-000000000000"
 
 # No daily cron: a cron needs a workers.dev subdomain on the account, and old rate rows are already
 # deleted on every successful post (worker.js). Add `[triggers] crons = ["17 3 * * *"]` if one is wanted.
-# [triggers]
-# crons = ["17 3 * * *"]
 
 # Keep request logs off: they would record visitor IPs and headers.
 [observability]

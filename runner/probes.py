@@ -5,14 +5,15 @@
 
 Each probe runs the production setup (pinned Claude Code, the atelier's flags, settings, environment and login)
 in a throwaway studio under /Users/Shared, then audits the transcript with NFR-10's checks. A pass is recorded
-as DATA/run/probe-ok-<claude version>.json, which `atelier birth` requires.
+as DATA/run/probe-ok-<harness fingerprint>.json, which `atelier birth` requires.
 
   context    the model is asked to report everything it was given; transcript and reply must be clean
   tools      exactly the eight easel tools; paint, status, look, read of a folder, write of the notebook
-  long       a chunk that runs about 15 minutes at 4800 px (the tool timeouts must not cut it)
+  long       a chunk that runs about 25 minutes at 4800 px (the tool timeouts must not cut it)
 A usage limit can't be forced; its handling is covered by runner/tests (fake Claude Code) and is watched for in
 the first real limit (RUN-6).
 """
+import hashlib
 import json
 import secrets
 import shutil
@@ -24,11 +25,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import audit  # noqa: E402
-from config import CLAUDE, CLAUDE_VERSION, DATA, EFFORT, MODEL, ROOTS, TOOLS, artist_env  # noqa: E402
+from config import CLAUDE, CLAUDE_VERSION, DATA, EASEL_MCP, MODEL, PAINTER_EASEL, REPO, ROOTS, TEXTS, TOOLS, artist_env  # noqa: E402
 from studio import Artist, prepare  # noqa: E402
 from works import claude_cmd, last_result, messages, slug, strip_profile  # noqa: E402
-import hashlib  # noqa: E402
-from config import EASEL_MCP, PAINTER_EASEL, REPO, TEXTS  # noqa: E402
 
 
 def harness_fingerprint() -> str:
@@ -50,7 +49,7 @@ PROBES = {
     "tools": (f"Use the tools in this order, one call per turn: paint with this chunk exactly: {CANVAS} ; then status; "
               "then look; then read with path \".\"; then read with path \"walls\"; then read with path \"easel guide\" (the first part is enough); then write notebook with the text "
               "\"probe\"; then reply with the word done.", "low"),
-    # a real painting pass that takes about five minutes (a bare counting loop tripped a safety classifier)
+    # a real painting pass that takes about 25 minutes (a bare counting loop tripped a safety classifier)
     "long": (f"Call paint with this chunk exactly: {CANVAS.replace('size=300', 'size=600')} ; then call paint with this "
              "chunk exactly: p = pile{{\"raw umber\", 1}, {\"lead white\", 2}} work(everywhere(), {hand=\"detail\", "
              "pile=p, coverage=28}) ; then reply with the word done.", "low"),
@@ -72,9 +71,6 @@ class Probe(Artist):
             d.mkdir(parents=True, exist_ok=True)
         for f in ("notebook", "toolkit"):
             (self.studio / f).touch()
-
-    def works(self):
-        return []
 
 
 def run(name: str, config: Path | None) -> list[str]:
@@ -120,8 +116,6 @@ def run(name: str, config: Path | None) -> list[str]:
                     problems.append(f"{t} was not used: {used}")
             if (p.studio / "notebook").read_text().strip() != "probe":
                 problems.append("the notebook was not written")
-            if any("[image" not in json.dumps(e).lower() and False for e in events):
-                pass
         if name == "long":
             took = time.time() - t0
             if took < 200:

@@ -11,6 +11,9 @@
     atelier withdraw --why TEXT                end the open work stopped by the audit as not finished, private (logged)
     atelier tick                               (launchd, every 10 minutes) the owner's standing go: resume or start
     atelier export                             export the site now (the runner does every 2 minutes during a work)
+    atelier boxes                              the tube boxes a work can be given (--box)
+    atelier sync                               the site to the NAS now (tools/push.sh does it every 2 minutes)
+    atelier backup                             the site and the backup to the NAS now
     atelier serve [--host H] [--port P]        serve the export on the LAN
     atelier run <work>                         (internal) the runner itself
 """
@@ -23,7 +26,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import CLAUDE, DATA, REPO, TOKEN  # noqa: E402
+from config import CLAUDE, DATA, REPO  # noqa: E402
 from studio import Artist, birth, registry  # noqa: E402
 from works import CURRENT, EXPORT_FAILED, RUN, STANDING, STARTS_LEFT, TERMINAL, Work, event, export_now, log  # noqa: E402
 
@@ -165,7 +168,6 @@ def cmd_serve(a):
 
 
 def cmd_export(a):
-    from works import export_now
     export_now()
 
 
@@ -182,11 +184,10 @@ def cmd_backup(a):
 
 
 def cmd_tick(a):
-    """The owner's standing go (2026-10-07: all three studios, in turn, at night, within the budget, until the time in
-    DATA/run/until). Run every 10 minutes by launchd (deploy/mac/): resumes a work a reboot cut off, else starts the
+    """The owner's standing go (2026-10-07; since 2026-10-13 one studio a night, NIGHTS: within the budget, until the
+    time in DATA/run/until). Run every 10 minutes by launchd (deploy/mac/): resumes a work a reboot cut off, else starts the
     next studio's work when the window is open and today's budget allows. An audit stop is never cleared: in the
     window it is set aside (withdrawn) so the night goes on, else it waits for a person. A failed export is tried again."""
-    from datetime import datetime
     import budget
     if EXPORT_FAILED.exists() and not ((w := open_work()) and runner_alive(w)):  # a running work exports on its own
         export_now()

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Build both easels with no account name or local path inside them (requirements ENG-7):
+# Build the replay easel and a painter's easel per box, with no account name or local path inside them (requirements ENG-7):
 # rustc's panic locations and the Lua C sources' __FILE__ name the build machine's paths otherwise.
 #   tools/build-engine.sh        -> engine/target/release/easel (the replay build: every box, the operator's)
 #                                   engine/target/painter/boxes/<box>/easel and tubes.md, one painter's easel per box
 # A painter's easel holds its studio's box only (upstream's rule: nothing in a studio names another box); the runner
-# gives a studio the easel of its work's box, "every" unless the owner names another (runner/config.py BOXES).
+# gives a studio the easel of its work's box, "every" unless the owner names another (runner/config.py PAINTER_BOXES, DEFAULT_BOX).
 # The boxes are the easel's own (its all-boxes feature), so a box upstream adds is built here without a change.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)

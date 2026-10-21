@@ -1,7 +1,8 @@
 """The white room, checked (requirements 3.2, NFR-9, NFR-10).
 
 NFR-9: before a work starts, everything we put in front of the artist (the prepared studio's notes, the brief,
-the messages, the tool descriptions) is scanned with tools/whiteroom.py's word list; the artist's own files
+the messages, the system prompt) is scanned with tools/whiteroom.py's word list (the tool descriptions by
+`uv run tools/whiteroom.py`, on every change to them); the artist's own files
 (notebook, toolkit, wall cards) only for private words, since the artist may write any word it likes.
 
 NFR-10: during a sitting, every transcript line Claude Code writes is checked against the accepted signals
@@ -127,7 +128,7 @@ def _tool_result(x: dict, config_dir: Path, replies: Replies | None) -> list[str
     if isinstance(parts, str):
         texts = [parts]
     else:
-        texts, hits = [], []
+        texts = []
         for p in parts or []:
             if p.get("type") == "text":
                 text = p.get("text", "")

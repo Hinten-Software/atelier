@@ -55,7 +55,6 @@ assert set(d) >= {"a", "t", "s"} and re.fullmatch(r"[0-9a-f]{32}", d["a"]) and r
   fi
 fi
 umask 077
-mkdir -p "$(dirname "$f")"
 if [ -n "$pre" ]; then printf '%s%s\n' "$pre" "$t"; else printf '%s' "$t"; fi > "$f.tmp"
 mv "$f.tmp" "$f"
 chmod 600 "$f"
