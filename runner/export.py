@@ -26,7 +26,7 @@ BLOCKED = WORK / "run" / "export-blocked.txt"
 FARM = WORK / "run" / "farm"
 # what may be published (REC-8): the viewer, its data per work (events, looks and their web copies, the painting's
 # log), the final renders, works.json
-ALLOWED = re.compile(r"^(studio/(index\.html|stream\.css|data/sessions\.json|data/w-[a-z]+-\d{3}/(events\.json|"
+ALLOWED = re.compile(r"^(studio/(index\.html|data/sessions\.json|data/w-[a-z]+-\d{3}/(events\.json|"
                      r"(img|t|v)/\d+\.(png|jpg|webp)|file/paintings/lua/painting\.lua|final\.png|final(-t|-f)?\.jpg)|viewer-\d+\.js|data/walls-[a-z]+/\d+\.jpg))$|^data/(works|essays)\.json$"
                      # the atelier's own pages (site/ in the repository)
                      r"|^(index\.html|robots\.txt|favicon\.(png|ico)|apple-touch-icon\.png|(about|walls|work|notes|essays)/index\.html|assets/atelier\.(css|js))$")

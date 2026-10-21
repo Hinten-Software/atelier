@@ -4,16 +4,13 @@
 # ///
 """The studio: watch a painter paint, live or replayed.
 
-Reads a painter's pi session logs (~/.pi/agent/sessions/<folder>/*.jsonl, one
-per sitting, stitched into one timeline):
-every program write and edit, every command, every image the painter
-looked at (the log holds the image bytes it saw) and its words. Serves a
-page with the code on the left, the latest look on the right and a
-timeline to scrub. Read-only: it never touches the painter.
+Reads a painter's Claude Code transcripts (<sessions>/<folder>/*.jsonl, one per sitting, stitched into
+one timeline): every chunk it painted, every look (the transcript holds the image bytes it saw), its notes
+and its words. Serves a page with the painting, its thinking and a timeline to scrub. Read-only: it never
+touches the painter. The public site is its static export (export_static.py, run by runner/export.py).
 
-    uv run studio/studio.py            # then open http://localhost:8765
-    uv run studio/studio.py --port 9000
-    uv run studio/studio.py --host "$(tailscale ip -4)"   # from your other devices
+    python3 viewer/studio.py --sessions ~/.atelier/claude/projects   # then open http://localhost:8765
+    python3 viewer/studio.py --sessions ... --host "$(tailscale ip -4)"   # from your other devices
 """
 import argparse
 import base64
@@ -26,7 +23,7 @@ import threading
 import urllib.parse
 from datetime import datetime
 
-SESSIONS = os.path.expanduser("~/.pi/agent/sessions")
+SESSIONS = os.path.expanduser("~/.atelier/claude/projects")
 # --public: painters only, nothing that names this machine's owner (for a link shown to others)
 PUBLIC = False
 # the home folder whose path and account name are scrubbed: this machine's, or the painter's when the export runs
@@ -54,8 +51,7 @@ _models = {}  # path -> the painter's model (it doesn't change within a session)
 
 
 def session_model(path):
-    """The model a session ran on: its first model_change entry (or the first
-    assistant message's model), read from the top of the log once."""
+    """The model a session ran on: the first assistant message's model, read from the top of the log once."""
     if path not in _models:
         m = ""
         try:
@@ -65,9 +61,6 @@ def session_model(path):
                         d = json.loads(line)
                     except ValueError:
                         continue
-                    if d.get("type") == "model_change" and d.get("modelId"):
-                        m = d["modelId"]
-                        break
                     msg = d.get("message") or {}
                     if msg.get("role") == "assistant" and msg.get("model"):
                         m = msg["model"]
@@ -80,151 +73,36 @@ def session_model(path):
     return _models[path]
 
 
-# Painters' sessions, by folder: round 16+ studios, the round 14-15 chain painters and the
-# earlier rounds' painter worktrees. Everything else (judges, tests, work on the project)
-# shows only with "all".
-_thinking = {}  # path -> the session's thinking level
-
-
-def session_thinking(path):
-    """The thinking level a session ran at: its first thinking_level_change entry."""
-    if path not in _thinking:
-        t = ""
-        try:
-            with open(path, "rb") as fh:
-                for _, line in zip(range(50), fh):
-                    try:
-                        d = json.loads(line)
-                    except ValueError:
-                        continue
-                    if d.get("type") == "thinking_level_change":
-                        t = d.get("thinkingLevel", "")
-                        break
-        except OSError:
-            pass
-        if not t:
-            return ""
-        _thinking[path] = t
-    return _thinking[path]
-
-
-# the runners' studio lists: ~/tmp/gallery-*/r<round>/run/studios.json, {"<lane><n>": "paint-studio-..."}
-RUNS = os.path.expanduser("~/tmp/gallery-*/r*/run/studios.json")
-_lanes = {"at": 0.0, "map": {}}
-
-
-def lanes():
-    """paint-studio-... -> (round, lane, painter number, painters in the lane), from the runners'
-    studio lists (reread every 30 s)."""
-    import time
-    if time.time() - _lanes["at"] > 30:
-        m = {}
-        for f in glob.glob(RUNS):
-            rnd = os.path.basename(os.path.dirname(os.path.dirname(f)))  # r17, r18g, r19, ...
-            try:
-                names = json.load(open(f))
-            except (OSError, ValueError):
-                continue
-            keys = {k: re.match(r"^(.*?)(\d*)$", k).groups() for k in names}
-            for k, studio in names.items():
-                lane, n = keys[k]
-                size = sum(1 for l, _ in keys.values() if l == lane)
-                m[studio] = (rnd, lane, int(n) if n else 0, size)
-        _lanes.update(at=time.time(), map=m)
-    return _lanes["map"]
-
-
-_subjects = {}  # studio -> (BRIEF.md mtime, what its brief says: see about_brief)
-
-
-def _artist_of(brief):
-    """The artist a brief names, in full ("in the manner of Kendric Tonn" -> "Kendric Tonn"), or ""."""
-    m = re.search(r"in\s+the\s+manner\s+of\s+((?:[A-Z][\w.'-]*\s+)*[A-Z][\w.'-]*)", brief)
-    return " ".join(m.group(1).split()) if m else ""
-
-
-def _subject_of(brief):
-    """The artist a brief names ("in the manner of Edward Hopper" -> "Hopper"; a surname like "Alma-Tadema"
-    whole), "self-portrait" for one, else "free"."""
-    artist = _artist_of(brief)
-    if artist:
-        return artist.split()[-1]
-    if "self-portrait" in brief.lower():
-        return "self-portrait"
-    return "free"
-
-
-def _reference_artist(brief):
-    """The artist whose paintings the studio's reference/ folder holds, when the brief says so ("Pictures of his
-    paintings are in reference/", "A picture of one of his paintings is in reference/"), else ""."""
-    said = re.search(r"\b(?:his|her|their)\s+paintings?\b[^.]*?\breference/", brief)
-    return _artist_of(brief) if said else ""
-
-
-def about_brief(folder):
-    """What the studio's brief says: {"subject": the artist's surname (e.g. "Friedrich", "Hopper"), "self-portrait"
-    or "free", "artist": the artist's full name or "", "reference_artist": the artist whose paintings are in
-    reference/ or ""}; all "" without a brief."""
-    f = os.path.join(os.path.expanduser("~/src/a"), folder, "BRIEF.md")
-    try:
-        mt = os.path.getmtime(f)
-    except OSError:
-        return {"subject": "", "artist": "", "reference_artist": ""}
-    if folder not in _subjects or _subjects[folder][0] != mt:
-        with open(f, errors="replace") as fh:
-            brief = fh.read(4000)
-        _subjects[folder] = (mt, {"subject": _subject_of(brief), "artist": _artist_of(brief),
-                                  "reference_artist": _reference_artist(brief)})
-    return _subjects[folder][1]
-
-
-def in_reference(path, cwd):
-    """A file the painter read is in its studio's reference/ folder: a picture given to it to study, not its canvas.
-    path as the read tool got it (relative to the studio, absolute or with ~), cwd the studio's folder."""
-    if not path:
-        return False
-    p = os.path.normpath(os.path.expanduser(path))
-    if os.path.isabs(p):
-        if not cwd:
-            return False
-        p = os.path.relpath(p, os.path.normpath(cwd))
-    parts = p.split(os.sep)
-    return len(parts) > 1 and parts[0].lower() == "reference"
-
-
-PAINTER = re.compile(r"^(w-[a-z]+-\d{3}|studio-[0-9a-f]+|paint-studio-[0-9a-f]+|paint-r\d+-p\d+|claude-paint-r\d+-(arm\d|tree\d|astra|fable|flash|p\d))$")
+# painters' session folders: the export's farm (w-<work>) and the dev viewer's studios (studio-<hex>); the rest
+# (work on the project, tests) the viewer doesn't list
+PAINTER = re.compile(r"^(w-[a-z]+-\d{3}|studio-[0-9a-f]+)$")
 
 
 def short(d):
-    """A session folder's short name: --Users-<you>-src-a-paint-studio-cfa19c-- -> paint-studio-cfa19c."""
+    """A session folder's short name: w-i-001 as it is; -Users-Shared-atelier-...-studio-cfa19c -> studio-cfa19c."""
     d = d.strip("-")
     m = re.search(r"-atelier-(?:[a-z]+-)*?(studio-[0-9a-f]+)$", d)  # the atelier's studios: /Users/Shared/atelier/.../studio-<hex>
-    return m.group(1) if m else d.split("-src-a-")[-1]
+    return m.group(1) if m else d
 
 
 def list_sessions():
-    """One entry per painter folder (its sittings stitched: {"p": short name}) and, for
-    everything else, one per session file ({"s": path}); newest activity first."""
+    """One entry per painter folder (its sittings stitched: {"p": short name}); newest activity first."""
     files = {}
     for f in glob.glob(os.path.join(SESSIONS, "*", "*.jsonl")):
         files.setdefault(os.path.basename(os.path.dirname(f)), []).append(f)
     out = []
     for d, fs in files.items():
         name = short(d)
+        if not PAINTER.match(name):
+            continue
         fs.sort(key=os.path.basename)  # session file names begin with the start time
         info = [{"path": f, "model": session_model(f), "mtime": os.path.getmtime(f), "size": os.path.getsize(f)} for f in fs]
-        if PAINTER.match(name):
-            models = []
-            for i in info:
-                if i["model"] and i["model"] not in models:
-                    models.append(i["model"])
-            rnd, lane, n, size = lanes().get(name, ("", "", 0, 0))
-            out.append({"p": name, "folder": name, "painter": True, "model": " → ".join(models), "sittings": len(fs),
-                        "thinking": session_thinking(fs[-1]), **about_brief(name),
-                        "round": rnd, "lane": lane, "n": n, "chain": size if size > 1 else 0,
-                        "files": fs, "mtime": max(i["mtime"] for i in info), "size": sum(i["size"] for i in info)})
-        else:
-            out += [dict(i, s=i["path"], folder=name, painter=False) for i in info]
+        models = []
+        for i in info:
+            if i["model"] and i["model"] not in models:
+                models.append(i["model"])
+        out.append({"p": name, "folder": name, "painter": True, "model": " → ".join(models), "sittings": len(fs),
+                    "files": fs, "mtime": max(i["mtime"] for i in info), "size": sum(i["size"] for i in info)})
     out.sort(key=lambda s: -s["mtime"])
     return out
 
@@ -270,75 +148,8 @@ def _parse(path):
         except ValueError:
             continue
         ts = d.get("timestamp", "")
-        if d.get("type") in ("assistant", "user") and "sessionId" in d:
-            _parse_claude_code(c, d, ts)  # a Claude Code transcript (the atelier's artists)
-            continue
-        if d.get("type") == "session":
-            c["cwd"] = d.get("cwd", "")
-            c["events"].append({"ts": ts, "kind": "start", "cwd": c["cwd"]})
-            continue
-        if d.get("type") == "model_change":
-            c["events"].append({"ts": ts, "kind": "note", "text": "model " + d.get("modelId", "")})
-            continue
-        if d.get("type") != "message":
-            continue
-        m = d.get("message", {})
-        role, content = m.get("role"), m.get("content")
-        if role == "assistant" and isinstance(content, list):
-            for x in content:
-                t = x.get("type")
-                if t == "text" and x.get("text", "").strip():
-                    c["events"].append({"ts": ts, "kind": "say", "text": x["text"]})
-                elif t == "thinking" and x.get("thinking", "").strip():
-                    c["events"].append({"ts": ts, "kind": "think", "text": x["thinking"]})
-                elif t == "toolCall":
-                    name, a = x.get("name"), x.get("arguments", {}) or {}
-                    ev = {"ts": ts, "kind": "tool", "name": name, "id": x.get("id")}
-                    if name == "write":
-                        ev.update(kind="write", path=a.get("path", ""), content=a.get("content", ""))
-                    elif name == "edit":
-                        edits = a.get("edits") or [{"oldText": a.get("oldText", ""), "newText": a.get("newText", "")}]
-                        ev.update(kind="edit", path=a.get("path", ""), edits=edits)
-                    elif name in ("bash", "bg_start"):
-                        ev.update(kind="cmd", text=a.get("command", ""))
-                    elif name == "read":
-                        ev.update(kind="read", path=a.get("path", ""))
-                        if in_reference(ev["path"], c["cwd"]):
-                            ev["ref"] = True  # it reads from reference/ (see in_reference)
-                    elif name == "paint":  # the painter harness's easel tools (round 19 on)
-                        ev.update(kind="paint", code=a.get("lua", ""))
-                    elif name == "look":
-                        ev.update(kind="look", text=look_text(a))
-                    elif name == "note":
-                        ev.update(kind="jnote", text=a.get("text", ""))
-                    else:
-                        ev.update(text=json.dumps(a)[:300])
-                    c["calls"][x.get("id")] = len(c["events"])
-                    c["events"].append(ev)
-        elif role == "toolResult" and isinstance(content, list):
-            parent = c["calls"].get(m.get("toolCallId"))
-            txt = _text(content)
-            if parent is not None and (txt or m.get("isError")):
-                if txt:
-                    c["events"][parent]["out"] = txt[-1500:]
-                if m.get("isError"):
-                    c["events"][parent]["err"] = True
-                c["changed"].append(parent)
-            for x in content:
-                if x.get("type") == "image" and x.get("data"):
-                    idx = len(c["images"])
-                    c["images"].append((x.get("mimeType", "image/jpeg"), x["data"]))
-                    src = c["events"][parent].get("path", "") if parent is not None else ""
-                    ev = {"ts": ts, "kind": "image", "img": idx, "path": src}
-                    if parent is not None and c["events"][parent]["kind"] == "look":
-                        ev["look"] = c["events"][parent]["text"]  # what the painter asked to see (see is_whole)
-                    if parent is not None and c["events"][parent].get("ref"):
-                        ev["ref"] = True  # a reference picture: never the painting
-                    c["events"].append(ev)
-        elif role == "user":
-            t = _text(content)
-            if t.strip():
-                c["events"].append({"ts": ts, "kind": "user", "text": t[:2000]})
+        if d.get("type") in ("assistant", "user") and "sessionId" in d:  # (other lines: attachments, summaries)
+            _parse_claude_code(c, d, ts)
     return c["events"], c["images"]
 
 
@@ -356,9 +167,9 @@ def _cc_image(x):
 
 
 def _parse_claude_code(c, d, ts):
-    """One line of a Claude Code session transcript (~/.claude/projects/<cwd>/<session>.jsonl) into the
-    same events as pi's: each assistant content block is its own line there; tool results come back in
-    user lines. The easel's tools are the MCP server's (mcp__easel__paint, ...), named here as pi named them."""
+    """One line of a Claude Code session transcript (<sessions>/<cwd>/<session>.jsonl) into the viewer's events:
+    each assistant content block is its own line there; tool results come back in user lines. The easel's tools
+    are the MCP server's (mcp__easel__paint, ...), named here without the prefix."""
     if not c["cwd"] and d.get("cwd"):
         c["cwd"] = d["cwd"]
         c["events"].append({"ts": ts, "kind": "start", "cwd": c["cwd"]})
@@ -388,8 +199,6 @@ def _parse_claude_code(c, d, ts):
                     ev.update(kind="jnote", text=a.get("text", ""))
                 elif name == "read":
                     ev.update(kind="read", path=a.get("path", ""))
-                    if in_reference(ev["path"], c["cwd"]):
-                        ev["ref"] = True
                 else:
                     ev.update(text=json.dumps(a)[:300])
                 c["calls"][x.get("id")] = len(c["events"])
@@ -428,8 +237,6 @@ def _parse_claude_code(c, d, ts):
             ev = {"ts": ts, "kind": "image", "img": idx, "path": c["events"][parent].get("path", "") if parent is not None else ""}
             if parent is not None and c["events"][parent]["kind"] == "look":
                 ev["look"] = c["events"][parent]["text"]
-            if parent is not None and c["events"][parent].get("ref"):
-                ev["ref"] = True
             c["events"].append(ev)
     t = "\n".join(s for s in said if s.strip())
     if t.strip() and not d.get("isMeta"):
@@ -479,7 +286,6 @@ def _title_of(say):
     return None
 
 
-REFERENCE = object()  # in a glance's calls: a read of a reference picture
 _warm = None  # the server's first scan of every painter for the picker: set when done (None: scan on request)
 _glances = {}  # path -> what the picker needs from one session file, read incrementally without keeping images
 
@@ -487,13 +293,12 @@ _glances = {}  # path -> what the picker needs from one session file, read incre
 def _glance_file(path):
     """One session file, scanned from where the last scan stopped: its image count, its newest whole look and its
     last picture (each as (index in the file, byte offset of the line, which image in the line)) and its last words.
-    Images are counted as parse() counts them, so the indices match the stream's. Reference pictures (read from
-    the studio's reference/) are counted but are never the whole look or the last picture."""
+    Images are counted as parse() counts them, so the indices match the stream's."""
     with _lock("g:" + path):
         g = _glances.get(path)
         size = os.path.getsize(path)
         if not g or size < g["offset"]:
-            g = _glances[path] = {"offset": 0, "calls": {}, "n": 0, "whole": None, "last": None, "say": "", "cwd": ""}
+            g = _glances[path] = {"offset": 0, "calls": {}, "n": 0, "whole": None, "last": None, "say": ""}
         with open(path, "rb") as fh:
             fh.seek(g["offset"])
             while True:
@@ -505,34 +310,8 @@ def _glance_file(path):
                     d = json.loads(line)
                 except ValueError:
                     continue
-                if d.get("type") == "session":
-                    g["cwd"] = d.get("cwd", "")
                 if d.get("type") in ("assistant", "user") and "sessionId" in d:
-                    _glance_claude_code(g, d, at)  # a Claude Code transcript (the atelier's artists)
-                    continue
-                m = (d.get("message") or {}) if d.get("type") == "message" else {}
-                content = m.get("content")
-                if not isinstance(content, list):
-                    continue
-                if m.get("role") == "assistant":
-                    for x in content:
-                        if x.get("type") == "text" and x.get("text", "").strip():
-                            g["say"] = x["text"]
-                        elif x.get("type") == "toolCall":  # a look's request; REFERENCE for a read from reference/
-                            a = x.get("arguments") or {}
-                            g["calls"][x.get("id")] = (look_text(a) if x.get("name") == "look" else REFERENCE
-                                                       if x.get("name") == "read" and in_reference(a.get("path", ""), g["cwd"])
-                                                       else None)
-                elif m.get("role") == "toolResult":
-                    look, k = g["calls"].get(m.get("toolCallId")), 0
-                    for x in content:
-                        if x.get("type") == "image" and x.get("data"):
-                            if look is not REFERENCE:
-                                g["last"] = (g["n"], at, k)
-                                if is_whole(look):
-                                    g["whole"] = g["last"]
-                            g["n"] += 1
-                            k += 1
+                    _glance_claude_code(g, d, at)
         return g
 
 
@@ -547,8 +326,6 @@ def _cc_images(d):
 
 def _glance_claude_code(g, d, at):
     """_glance_file for one line of a Claude Code transcript."""
-    if not g["cwd"] and d.get("cwd"):
-        g["cwd"] = d["cwd"]
     content = (d.get("message") or {}).get("content")
     if not isinstance(content, list):
         return
@@ -559,21 +336,18 @@ def _glance_claude_code(g, d, at):
             elif x.get("type") == "tool_use":
                 m = EASEL_TOOL.match(x.get("name", ""))
                 name, a = (m.group(1) if m else x.get("name")), x.get("input") or {}
-                g["calls"][x.get("id")] = (look_text(a) if name == "look" else REFERENCE
-                                           if name == "read" and in_reference(a.get("path", ""), g["cwd"]) else None)
+                g["calls"][x.get("id")] = look_text(a) if name == "look" else None
         return
     for k, (call, _) in enumerate(_cc_images(d)):
-        look = g["calls"].get(call)
-        if look is not REFERENCE:
-            g["last"] = (g["n"], at, k)
-            if is_whole(look):
-                g["whole"] = g["last"]
+        g["last"] = (g["n"], at, k)
+        if is_whole(g["calls"].get(call)):
+            g["whole"] = g["last"]
         g["n"] += 1
 
 
 def glance(files):
     """A painter's picture and title for the picker: {"look": its newest whole look (or, before the look tool, the
-    last picture it saw; never a reference picture; None if it has seen none of its own) as a stream image index,
+    last picture it saw; None if it has seen none) as a stream image index,
     "title": from its last words or None}, and where that look's bytes are, for /api/glance."""
     gs, base, look, src, last, lsrc = [_glance_file(f) for f in files], 0, None, None, None, None
     for f, g in zip(files, gs):
@@ -594,11 +368,8 @@ def glance_image(src):
     with open(path, "rb") as fh:
         fh.seek(at)
         d = json.loads(fh.readline())
-    if d.get("type") == "user" and "sessionId" in d:  # Claude Code
-        imgs = [_cc_image(p) for _, p in _cc_images(d)]
-        return (imgs[k][0], base64.b64decode(imgs[k][1])) if k < len(imgs) else None
-    imgs = [x for x in d["message"]["content"] if x.get("type") == "image" and x.get("data")]
-    return (imgs[k].get("mimeType", "image/jpeg"), base64.b64decode(imgs[k]["data"])) if k < len(imgs) else None
+    imgs = [_cc_image(p) for _, p in _cc_images(d)]
+    return (imgs[k][0], base64.b64decode(imgs[k][1])) if k < len(imgs) else None
 
 
 def _hhmm(ts):
@@ -654,29 +425,12 @@ def stream(key, files):
         return st
 
 
-# the painting sources of painters whose folder is gone (a round's worktree, removed), by folder name
-ARCHIVE = os.path.join(os.path.dirname(HERE), "archive", "sources")
-
-
 def painting_sources(events):
-    """The folder to read the painting's source files from and those files, relative to it: the ones
-    the page may ask for. The folder is the painter's (its last start) or, once that is gone,
-    archive/sources/<its name>. The files: paintings/lua/painting.lua and, from the events, every .lua
-    under paintings/lua/ and .rs under paintings/ the painter wrote or edited or rendered with
-    `cargo paint <bin>`. Nothing else in the folder (the brief, notes, bin/, settings) is served."""
+    """The folder to read the painting's source from (the painter's: its last start) and the files, relative to it,
+    the page may ask for: paintings/lua/painting.lua only. Nothing else in the folder (the brief, notes, bin/,
+    settings) is served."""
     cwd = next((e["cwd"] for e in reversed(events) if e["kind"] == "start"), "")
-    rels = {"paintings/lua/painting.lua"}
-    for e in events:
-        if e["kind"] in ("write", "edit"):
-            p = e.get("path", "")
-            rels.add(p[len(cwd) + 1:] if cwd and p.startswith(cwd + "/") else p)
-        m = re.search(r"cargo paint (\w+)", e.get("text", "") or "") if e["kind"] == "cmd" else None
-        if m:
-            rels.add(f"paintings/src/bin/{m.group(1)}.rs")
-    ok = re.compile(r"paintings/(lua/[^/]+\.lua|(?:[^/]+/)*[^/]+\.rs)")
-    if cwd and not os.path.isdir(cwd):
-        cwd = os.path.join(ARCHIVE, os.path.basename(cwd.rstrip("/")))
-    return cwd, {r for r in rels if ok.fullmatch(r) and ".." not in r.split("/")}
+    return cwd, {"paintings/lua/painting.lua"}
 
 
 def image(st, i):
@@ -709,29 +463,22 @@ class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
-        # what to show: ?p=<painter folder> (all its sittings) or ?s=<session file> (one session)
-        painter, path = q.get("p", [""])[0], q.get("s", [""])[0]
-        if PUBLIC and (path or (painter and not PAINTER.match(painter))):
+        # what to show: ?p=<painter folder> (all its sittings)
+        painter = q.get("p", [""])[0]
+        if painter and not PAINTER.match(painter):
             return self._send(404, b"not found", "text/plain")
-        if path and not os.path.realpath(path).startswith(os.path.realpath(SESSIONS) + os.sep):
-            return self._send(403, b"no", "text/plain")
         if u.path == "/":
             with open(os.path.join(HERE, "index.html"), "rb") as fh:
-                page = fh.read()
-            if PUBLIC:
-                page = page.replace(b'<label id="allwrap"', b'<label id="allwrap" hidden')
-            return self._send(200, page, "text/html; charset=utf-8")
-        if u.path == "/stream.css":  # the livestream's layout: the page loads it itself with ?stream=1
-            with open(os.path.join(HERE, "stream.css"), "rb") as fh:
-                return self._send(200, fh.read(), "text/css; charset=utf-8")
+                return self._send(200, fh.read(), "text/html; charset=utf-8")
         if u.path == "/api/sessions":
             ss = list_sessions()
             for s in ss:
-                if s.get("painter") and (_warm is None or _warm.is_set()):  # (until the first scan is done, without)  # the picker's picture and title (the static export has them in sessions.json)
+                # the picker's picture and title (the static export has them in sessions.json); until the first scan is done, without
+                if _warm is None or _warm.is_set():
                     g = glance(s["files"])
                     s.update(look=g["look"], title=g["title"])
             if PUBLIC:
-                ss = [{k: v for k, v in s.items() if k != "files"} for s in ss if s.get("painter")]
+                ss = [{k: v for k, v in s.items() if k != "files"} for s in ss]
             return self._send(200, json.dumps(ss).encode(), "application/json")
         if u.path == "/api/glance":  # a painter's picture in the picker, read alone (not the painter's whole log)
             files = painter_files(painter)
@@ -740,10 +487,10 @@ class H(http.server.BaseHTTPRequestHandler):
             return self._send(200, im[1], im[0]) if im else self._send(404, b"not found", "text/plain")
         if u.path not in ("/api/events", "/api/file", "/img"):
             return self._send(404, b"not found", "text/plain")
-        files = painter_files(painter) if painter else [path] if path and os.path.isfile(path) else []
+        files = painter_files(painter)
         if not files:
             return self._send(404, b"no such session", "text/plain")
-        st = stream(("p:" + painter) if painter else ("s:" + path), files)
+        st = stream("p:" + painter, files)
         if u.path == "/api/events":
             since, ev = int(q.get("since", ["0"])[0]), st["events"]
             if q.get("epoch", [str(st["epoch"])])[0] != str(st["epoch"]):
@@ -774,7 +521,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--host", default="127.0.0.1", help="e.g. this machine's Tailscale IP to watch from another of your devices")
-    ap.add_argument("--sessions", default=SESSIONS, help="where pi keeps its session logs")
+    ap.add_argument("--sessions", default=SESSIONS, help="the painters' Claude Code transcripts, a folder per painter")
     ap.add_argument("--public", action="store_true", help="painters only, home path and account name scrubbed (a link for others)")
     a = ap.parse_args()
     SESSIONS = os.path.abspath(os.path.expanduser(a.sessions))
@@ -787,8 +534,7 @@ def main():
         import time
         while True:
             for s in list_sessions():
-                if s.get("painter"):
-                    glance(s["files"])
+                glance(s["files"])
             _warm.set()
             time.sleep(30)
     threading.Thread(target=warm, daemon=True).start()

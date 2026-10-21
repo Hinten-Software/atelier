@@ -4,12 +4,11 @@
 # ///
 """Export the studio viewer as static files, painters only and scrubbed as --public is.
 
-    uv run studio/export_static.py <out-dir>
+    python3 viewer/export_static.py <out-dir> --sessions <folder> [--private-words <file>]   (runner/export.py runs it)
 
-Writes <out>/index.html (the viewer, reading files instead of the live API), <out>/stream.css (its livestream
-layout, loaded with ?stream=1), <out>/data/sessions.json and,
+Writes <out>/index.html (the viewer, reading files instead of the live API), <out>/data/sessions.json and,
 per painter, data/<painter>/events.json (with the image extensions), data/<painter>/img/<i>.<ext> and
-data/<painter>/file/<the painting's source> (from archive/sources/ once the painter's folder is gone). Every text response is scrubbed like the public server's
+data/<painter>/file/paintings/lua/painting.lua. Every text response is scrubbed like the public server's
 (home folder -> ~, account name -> user); the export stops if a scrubbed file still names either.
 
 Each look also gets two small JPEG copies for the web, made once (again only when the look itself changes):
@@ -17,9 +16,7 @@ data/<painter>/t/<i>.jpg for the look-strip and data/<painter>/v/<i>.jpg for the
 the zoom. events.json's "web" lists which looks have them. Without Pillow there are none and the viewer uses the originals.
 
 The export owns <out>: it keeps a list of the files it wrote in <out>/.studio-export and, on the next run,
-deletes only the listed files it didn't write again. It won't write into a folder that has files and no list,
-except an export from before the list (index.html with the static switch, data/sessions.json, nothing else
-at the top), which it adopts, owning all of data/ as the old exporter did.
+deletes only the listed files it didn't write again. It won't write into a folder that has files and no list.
 """
 import argparse, base64, io, json, os, re, sys
 from concurrent.futures import ThreadPoolExecutor
@@ -69,24 +66,12 @@ def inside(out, *parts):
     return dest
 
 
-def old_export(out):
-    """out as an export from before the list: just index.html (the static page) and data/ with sessions.json."""
-    if sorted(os.listdir(out)) != ["data", "index.html"] or not os.path.isfile(os.path.join(out, "data", "sessions.json")):
-        return False
-    with open(os.path.join(out, "index.html"), "rb") as fh:
-        return b"STUDIO_STATIC = true" in fh.read()
-
-
 def owned(out):
     """The files the last export into out wrote (relative paths); exits if out has files but no list."""
     marker = os.path.join(out, MARKER)
     if os.path.isfile(marker):
         with open(marker) as fh:
             return [l for l in fh.read().splitlines() if l]
-    if os.path.isdir(out) and os.listdir(out) and old_export(out):
-        # adopt it: everything under data/ was the old exporter's, as it pruned all it didn't write
-        return ["index.html"] + [os.path.relpath(os.path.join(root, f), out)
-                                 for root, _, fs in os.walk(os.path.join(out, "data")) for f in fs]
     if os.path.isdir(out) and os.listdir(out):
         sys.exit(f"export: {out} is not empty and has no {MARKER}: not an earlier export, so nothing written "
                  f"(pick an empty or new folder; to adopt an old export, create an empty {MARKER} in it)")
@@ -135,7 +120,7 @@ def main():
     S.PUBLIC = True
     out = os.path.abspath(a.out)
     before = owned(out)
-    ss = [{k: v for k, v in s.items() if k != "files"} for s in S.list_sessions() if s.get("painter")]
+    ss = [{k: v for k, v in s.items() if k != "files"} for s in S.list_sessions()]
     n_img = n_web = 0
     pool = ThreadPoolExecutor(os.cpu_count() or 4) if Image else None
     for s in ss:
@@ -174,10 +159,8 @@ def main():
         # its last event is its own words: it ended a sitting (or the painting), not cut off mid-step; the website lists a
         # quiet run as in progress only then
         s["said"] = bool(ev) and ev[-1]["kind"] == "say"
-        if s["look"] is None:  # painters from before the look tool read their renders as files: the last picture they
-            # saw (a reference picture, read from the studio's reference/, is never the painter's picture)
-            refs = {e["img"] for e in ev if e["kind"] == "image" and e.get("ref")}
-            s["look"] = next((i for i in range(n - 1, -1, -1) if web[i] and i not in refs), None)
+        if s["look"] is None:  # no whole look yet: the last picture the painter saw (a wall painting it read, say)
+            s["look"] = next((i for i in range(n - 1, -1, -1) if web[i]), None)
         text(os.path.join(out, "data", p, "events.json"),
              json.dumps({"events": ev, "total": len(ev), "epoch": st["epoch"], "sittings": len(files), "imgext": exts, "web": web}))
         # the painting's source, as the live server's /api/file gives it
@@ -190,13 +173,10 @@ def main():
         print(f"{p}: {len(ev)} events, {n} images", flush=True)
     text(os.path.join(out, "data", "sessions.json"), json.dumps(ss))
     with open(os.path.join(S.HERE, "index.html"), "rb") as fh:
-        page = fh.read().replace(b'<label id="allwrap"', b'<label id="allwrap" hidden')
+        page = fh.read()
     page = page.replace(b"<script>\nconst $ =", b"<script>window.STUDIO_STATIC = true;</script>\n<script>\nconst $ =", 1)
     assert b"STUDIO_STATIC = true" in page, "index.html changed: the static switch didn't go in"
-    # (claude-paint's public copy adds the stillwet gallery's page-view counter here; the atelier has none: ATL-12)
     text(os.path.join(out, "index.html"), page)
-    with open(os.path.join(S.HERE, "stream.css"), "rb") as fh:  # the livestream's layout, for ?stream=1
-        text(os.path.join(out, "stream.css"), fh.read())
     now = sorted(os.path.relpath(f, out) for f in WRITTEN)
     stale = 0
     for rel in set(before) - set(now):
