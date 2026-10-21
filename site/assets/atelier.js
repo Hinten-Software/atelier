@@ -140,6 +140,11 @@ function steady(box, blocks) {  // blocks: [key, sig, make]
   nodes.forEach((n, i) => { const s = n.querySelector(".scroll"); if (s && at[i]) s.scrollTop = at[i]; });
 }
 
+// a painting's number as the painter counts it: its number on their walls, after any hung there at their birth (their
+// notebook says "Painting 12" of what the atelier counts as work 10: works set aside never hang)
+const no = (w) => w.wall ?? w.number;
+const birthCount = (d, a) => (d.artists.find((x) => x.id === a) || {}).walls_at_birth || 0;
+
 // the painting's size and support, as a museum label gives them (ATL-14): "oil on linen, 60 × 37.5 cm"
 const cm = (n) => String(n).replace(/\.0$/, "");
 const measure = (w) => (w.cm ? `oil on ${w.support === "linen" || !w.support ? "linen" : w.support}, ${cm(w.cm[0])} × ${cm(w.cm[1])} cm` : "");
@@ -147,7 +152,7 @@ const measure = (w) => (w.cm ? `oil on ${w.support === "linen" || !w.support ? "
 function label(w) {
   return el("p", { class: "label" },
     el("span", { class: "title", textContent: w.title || "Untitled" }),
-    `${studioName(artistOf(w.id))} · work ${w.number} · ${MODELS[w.model] || w.model || ""}${w.date ? " · " + day(w.date) : ""}`,
+    `${studioName(artistOf(w.id))} · painting ${no(w)} · ${MODELS[w.model] || w.model || ""}${w.date ? " · " + day(w.date) : ""}`,
     ...(w.cm ? [el("span", { class: "measure", textContent: measure(w) })] : []));
 }
 
@@ -191,12 +196,14 @@ async function walls() {
   const open = works.find((w) => !w.finished && w.state);
   const easel = document.getElementById("easel");
   easel.replaceChildren();
+  // the number the painting on the easel will hang under: after what is on their walls
+  const next = Math.max(birthCount(d, a), ...works.filter((w) => w.finished).map(no)) + 1;
   if (open) {  // the canvas as they last looked at it, and the way in to watch
     const [state, live] = STATES[open.state] || ["resting", false];
     const watch = `/studio/?p=${encodeURIComponent(open.viewer)}`;
     const look = ls.find((x) => x.p === open.viewer);
     if (look && look.look != null) easel.append(el("a", { href: watch, class: "canvas" }, el("img", { src: `/studio/data/${open.viewer}/v/${look.look}.jpg`, alt: "The painting in progress" })));
-    easel.append(el("div", { class: "state" + (live ? " live" : ""), textContent: `On the easel: work ${open.number}, ${state}` }), " ",
+    easel.append(el("div", { class: "state" + (live ? " live" : ""), textContent: `On the easel: number ${next}, ${state}` }), " ",
       el("a", { href: watch, textContent: live ? "Watch" : "See it so far", class: "state" }));
   }
   // newest first, wrapping like a hang on a wall; what hung there before their first work comes last
@@ -210,7 +217,7 @@ async function walls() {
   const texts = [];
   const last = done[0];
   if (last && last.notebook) texts.push(["notebook", `${last.number}\n${last.notebook}`,
-    () => written(`Their notebook, as they left it after work ${last.number}`, last.notebook)]);
+    () => written(`Their notebook, as they left it after painting ${no(last)}`, last.notebook)]);
   if (birth.temperament_note) {  // the owner's note for visitors: a heading line, then paragraphs, set as text (ATL-13)
     const [head, ...rest] = birth.temperament_note.split(/\n/);
     const paras = rest.join("\n").split(/\n\s*\n/).map((x) => x.trim()).filter(Boolean);
@@ -228,7 +235,7 @@ async function walls() {
   const figs = done.map((w, k) => el("figure", {},
     el("img", { src: finalImg(w, true), alt: w.title || "Untitled", loading: "lazy", onclick: () => lightbox(all, k) }),
     el("figcaption", {}, el("a", { href: workHref(w), class: "t", textContent: w.title || "Untitled" }),
-      el("div", { class: "state", textContent: `work ${w.number}${w.date ? " · " + day(w.date) : ""}${w.cm ? " · " + cm(w.cm[0]) + " × " + cm(w.cm[1]) + " cm" : ""}` }))));
+      el("div", { class: "state", textContent: `painting ${no(w)}${w.date ? " · " + day(w.date) : ""}${w.cm ? " · " + cm(w.cm[0]) + " × " + cm(w.cm[1]) + " cm" : ""}` }))));
   // a year of paintings stays easy to walk through: the current season on the wall, each earlier one folded under its
   // name (2026-10-13). While everything is from one season, the wall is as it always was.
   const seasons = [];
@@ -311,7 +318,7 @@ async function essaysPage() {
   const w = e.frontispiece && d.works.find((x) => x.id === e.frontispiece && x.finished);
   if (w) box.append(el("figure", { class: "frontispiece" },
     el("a", { href: workHref(w) }, el("img", { src: finalImg(w), alt: w.title || "Untitled" })),
-    el("figcaption", { class: "state", textContent: `${w.title || "Untitled"}, ${studioName(artistOf(w.id))}, work ${w.number}${w.cm ? ", " + measure(w) : ""}` })));
+    el("figcaption", { class: "state", textContent: `${w.title || "Untitled"}, ${studioName(artistOf(w.id))}, painting ${no(w)}${w.cm ? ", " + measure(w) : ""}` })));
   box.append(el("h1", { textContent: e.title }), el("p", { class: "state", textContent: day(e.published) }));
   for (const b of e.blocks) box.append(b.h ? el("h2", {}, ...prose(b.h)) : el("p", {}, ...prose(b.p)));
 }

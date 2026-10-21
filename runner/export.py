@@ -86,7 +86,27 @@ def canvas_of(w: Path) -> dict:
     return {}
 
 
+def wall_numbers(works) -> dict:
+    """Each hung work's number on its painter's walls: the painter's own count, the one their walls, notebook and
+    words use. A manifest has it since 2026-10-21; for earlier works, the hung ones of each artist in order, numbered
+    on after the paintings hung at their birth, each checked against the wall card's title."""
+    out, by_artist = {}, {}
+    for w in sorted(works, key=lambda w: (w.name.split("-")[0], int(w.name.split("-")[1]))):
+        m = w / "manifest.json"
+        if m.exists() and (man := json.loads(m.read_text())).get("finished"):
+            by_artist.setdefault(w.name.split("-")[0], []).append((w.name, man))
+    for artist, hung in by_artist.items():
+        cards = {int(c.stem): json.loads(c.read_text()) for c in (DATA / "artists" / artist / "walls").glob("*.json")}
+        n = sum(1 for c in cards.values() if c.get("at_birth"))
+        for id, man in hung:
+            n = man.get("wall") or n + 1
+            if cards.get(n, {}).get("title") == man.get("title"):  # the card on the wall under that number is this work
+                out[id] = n
+    return out
+
+
 def works_json(works):
+    walls = wall_numbers(works)
     out = []
     for w in works:
         m = w / "manifest.json"
@@ -99,6 +119,8 @@ def works_json(works):
             pub["notebook"] = (w / "notebook.after.md").read_text() if (w / "notebook.after.md").exists() else ""
             # the date of the painting as the atelier's calendar has it (the last sitting's day), not a visitor's
             pub["date"] = (man.get("sittings") or [{}])[-1].get("date_shown")
+            if w.name in walls:
+                pub["wall"] = walls[w.name]
             # its physical size and support, as a museum label gives them (ATL-14)
             pub.update(canvas_of(w))
             # its width in pixels, so a browser knows what the full-size copy holds (srcset)

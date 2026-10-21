@@ -427,7 +427,8 @@ class Work:
         finished = (pkg / "final.png").exists() and voluntary and not self.state.get("contaminated")
         why = None if finished else unfinished_why(self.state, voluntary)
         if finished and "hung" not in done:
-            hang(a, next_wall_number(a), pkg / "final.png", title, reply)
+            self.state["wall"] = next_wall_number(a)  # the painter's own number for it: theirs on their walls
+            hang(a, self.state["wall"], pkg / "final.png", title, reply)
             done.append("hung")
             self.save()
         manifest = {
@@ -440,7 +441,8 @@ class Work:
             "claude_code": CLAUDE_VERSION, "hashes": self.state["hashes"], "audit_hits": self.state["hits"],
             "contaminated": bool(self.state.get("contaminated")), "restarted": self.state.get("restarted", []), "replay": self.state.get("verdict"),
             "replay_verified": self.state.get("verified", False),  # a record (REC-4), not what hangs it
-            "final_from": self.state.get("final_from"),  # "live": the painter's canvas at close; "replay": from the log
+            "final_from": self.state.get("final_from"),
+            "wall": self.state.get("wall"),  # its number on the painter's walls (after any hung at their birth)  # "live": the painter's canvas at close; "replay": from the log
             "final_sha256": sha256(pkg / "final.png") if (pkg / "final.png").exists() else None,
             "finished": finished,  # written last: only once it hangs (QA Q8)
         }
