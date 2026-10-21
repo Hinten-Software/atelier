@@ -64,7 +64,8 @@ function lightbox(items, start) {  // items: [{src, srcset, full, title, href}]
   const show = () => {
     const it = items[i];
     box.classList.remove("full"); img.style.width = img.style.height = ""; box.scrollTop = box.scrollLeft = 0;
-    img.srcset = it.srcset || ""; img.sizes = it.srcset ? "(max-width: 640px) 100vw, 1600px" : "";  // as large as it may be shown: browser zoom enlarges it img.src = it.src; img.alt = it.title || "";
+    img.srcset = it.srcset || ""; img.sizes = it.srcset ? "(max-width: 640px) 100vw, 1600px" : "";  // as large as it may be shown: browser zoom enlarges it
+    img.src = it.src; img.alt = it.title || "";
     img.style.cursor = it.full ? "zoom-in" : "zoom-out";
     cap.replaceChildren(it.href ? el("a", { href: it.href, textContent: it.title || "Untitled" }) : it.title || "");
     if (items.length > 1) cap.append(el("span", { class: "state", textContent: `  ${i + 1} of ${items.length}` }));
