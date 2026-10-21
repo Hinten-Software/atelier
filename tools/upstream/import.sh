@@ -14,7 +14,7 @@ cache=${CLAUDE_PAINT_CACHE:-$HOME/.cache/atelier/claude-paint.git}
 ref=${1:-main}
 
 [ -d "$cache" ] || git clone -q --bare "$url" "$cache"
-git -C "$cache" fetch -q --prune --tags origin '+refs/heads/*:refs/heads/*'
+git -C "$cache" fetch -q --force --prune --tags origin '+refs/heads/*:refs/heads/*'
 sha=$(git -C "$cache" rev-parse --verify "$ref^{commit}")
 when=$(git -C "$cache" log -1 --format=%cs "$sha")
 map=$(grep -v '^#' "$repo/tools/upstream/map.txt" | shasum | cut -c1-12)
