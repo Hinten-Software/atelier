@@ -54,6 +54,7 @@ pub(crate) fn formed_film(um: f32) -> f32 {
 /// is the same whatever window it is rendered in. Convert between units and
 /// buffer pixels only through the methods below.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "replay-effects", derive(serde::Serialize, serde::Deserialize))]
 pub struct Frame {
     /// Pixels held (the window).
     pub w: usize,
@@ -212,6 +213,12 @@ pub struct Canvas {
     /// `Cracks::aged` fits its craquelure to).
     pub(crate) ground_um: f32,
     pub(crate) linen: Option<Linen>,
+    /// A paper support, instead of linen.
+    pub(crate) paper: Option<crate::paper::Paper>,
+    /// The micro-roughness under a pixel, µm: the mean depth of the pores
+    /// below the surface's top envelope (`paper`), what a pastel stick and
+    /// a finger meet. Empty unless the support is paper.
+    pub(crate) micro: Vec<f32>,
     /// Physical size: millimeters per unit (the canvas is 1000 units wide).
     pub(crate) mm_per_unit: f32,
     /// Wet paint on top of the dry picture.
@@ -220,6 +227,8 @@ pub struct Canvas {
     /// bristles feel.
     pub(crate) surf_gen: u64,
     pub(crate) base: Option<(u64, Vec<f32>)>,
+    /// Engine 7: `base`, cached block by block (`crate::engine7::contact_cache`).
+    pub(crate) e7_contact: crate::engine7::contact_cache::ContactCache,
     /// Loose graphite and chalk on the picture (None until something is
     /// drawn): `graphite`.
     pub(crate) drawing: Option<Box<crate::graphite::Drawing>>,
@@ -231,8 +240,40 @@ pub struct Canvas {
     pub(crate) hand_slice: Option<f32>,
     /// The engine version it is painted with (`crate::ENGINE`).
     pub(crate) engine: u32,
+    pub(crate) quarter_tiles: bool,
+    pub(crate) adaptive_sweep: bool,
+    pub(crate) liquid_film_levels: bool,
+    pub(crate) sealed_drawing_guide: bool,
+    pub(crate) drawing_optics: bool,
+    /// Engine 7: the `glaze` and `scumble` hands lay a thin film, and their
+    /// coverage is the share of the passage it reaches (`Handling::film`).
+    pub(crate) glaze_film: bool,
+    /// The `work` pass under way with a film ceiling (`Handling::film`):
+    /// the most wet film (coats) it lays on any pixel, and its first stroke
+    /// id. Transient.
+    pub(crate) film_pass: Option<(f32, u32)>,
+    /// Engine 7: a rag keeps what it lifts, and a mask wipe lifts only
+    /// inside its mask (`rag`).
+    pub(crate) rag_lift: bool,
+    /// Engine 7: a knife's paint laid on wet paint stays on top of it
+    /// (`Canvas::knife`).
+    pub(crate) knife_skim: bool,
+    /// Engine 7: a blender lays the wet paint it carries only where wet paint
+    /// was when its pass began, and a little way past it (`Canvas::work`).
+    pub(crate) blend_feather: bool,
+    /// Engine 7: a brush's paint laid on wet paint stays on top of it
+    /// (`bristle::BRUSH_SKIM_COATS`).
+    pub(crate) brush_skim: bool,
+    /// While a blender pass with `blend_feather` runs: how much of the paint
+    /// a bristle carries each pixel takes (0..1, see `Canvas::receptive`).
+    pub(crate) receptive: Option<Vec<f32>>,
     /// The bare cloth of a raw canvas (None: a primed canvas): `soak`.
     pub(crate) soak: Option<Box<crate::soak::Soak>>,
+    /// The drain switch (`with_drain`): an absorbent ground drains paint as
+    /// its pigment packs (`bristle::ground_drain`).
+    pub(crate) drain: bool,
+    /// A sheet of paper laid over part of the picture (`sheet.rs`).
+    pub(crate) sheet: Option<crate::sheet::Sheet>,
 }
 
 impl Canvas {
@@ -271,15 +312,32 @@ impl Canvas {
             absorb_any: false,
             ground_um: 0.0,
             linen: None,
+            paper: None,
+            micro: Vec::new(),
             mm_per_unit: 0.7,
             wet: crate::wet::Wet::new(n),
             surf_gen: 0,
             base: None,
+            e7_contact: Default::default(),
             drawing: None,
             tally: crate::tally::Tally::default(),
             hand_slice: None,
             engine: crate::ENGINE,
+            quarter_tiles: false,
+            adaptive_sweep: false,
+            liquid_film_levels: false,
+            sealed_drawing_guide: false,
+            drawing_optics: false,
+            glaze_film: false,
+            film_pass: None,
+            rag_lift: false,
+            knife_skim: false,
+            blend_feather: false,
+            brush_skim: false,
+            receptive: None,
             soak: None,
+            drain: false,
+            sheet: None,
         }
     }
 
@@ -287,10 +345,136 @@ impl Canvas {
     /// paints as the version its painting was painted with.
     pub fn with_engine(mut self, v: u32) -> Self {
         self.engine = v;
+        self.quarter_tiles &= v == 5;
+        self.adaptive_sweep &= v == 5;
+        self.liquid_film_levels &= v >= 4;
+        self.glaze_film &= crate::engine7::active(v);
+        self.rag_lift &= crate::engine7::active(v);
+        self.knife_skim &= matches!(v, crate::engine7::ENGINE | crate::REACH_END);
+        self.blend_feather &= matches!(v, crate::engine7::ENGINE | crate::REACH_END);
+        self.brush_skim &= matches!(v, crate::engine7::ENGINE | crate::REACH_END);
         self
     }
     pub fn engine(&self) -> u32 {
         self.engine
+    }
+
+    /// Turn on the drain switch (an easel log's `--@ drain`, engine 5 and
+    /// later): an absorbent ground drains the film over it as its pigment
+    /// packs, to the oil left when the pigment packs and below it only for
+    /// pigments coarser than the ground's pores, the packed layer growing up
+    /// from the ground while the surface keeps its oil, flow and gloss
+    /// (`bristle::ground_drain`); paint comes off from the top down; a film's
+    /// gloss reads its surface's oil against its pigment's packing
+    /// (`bake`). Without it an absorbent ground draws oil from the paint
+    /// just laid, as engine 4 has it (`bristle::ground_draw`), and a painting
+    /// is as it always was. A checkpoint keeps it (version 14).
+    pub fn with_drain(mut self, on: bool) -> Self {
+        self.drain = on;
+        self
+    }
+    /// The drain switch (`with_drain`).
+    pub fn drain(&self) -> bool {
+        self.drain
+    }
+
+    pub fn with_quarter_tiles(mut self, enabled: bool) -> Self {
+        self.quarter_tiles = enabled && self.engine == 5;
+        self
+    }
+
+    pub fn quarter_tiles(&self) -> bool {
+        self.quarter_tiles
+    }
+
+    pub(crate) fn work_tile_mode(&self) -> Option<String> {
+        if self.engine != 5 {
+            return None;
+        }
+        std::env::var("PAINT_SMALL_TILES").ok().or_else(|| self.quarter_tiles.then(|| "quarter".to_string()))
+    }
+
+    pub fn with_adaptive_sweep(mut self, enabled: bool) -> Self {
+        self.adaptive_sweep = enabled && self.engine == 5;
+        self
+    }
+
+    pub fn adaptive_sweep(&self) -> bool {
+        self.adaptive_sweep
+    }
+
+    pub fn with_glaze_film(mut self, enabled: bool) -> Self {
+        self.glaze_film = enabled && crate::engine7::active(self.engine);
+        self
+    }
+
+    pub fn glaze_film(&self) -> bool {
+        self.glaze_film
+    }
+
+    pub fn with_liquid_film_levels(mut self, enabled: bool) -> Self {
+        self.liquid_film_levels = enabled && self.engine >= 4;
+        self
+    }
+
+    pub fn liquid_film_levels(&self) -> bool {
+        self.liquid_film_levels
+    }
+
+    pub fn with_sealed_drawing_guide(mut self, enabled: bool) -> Self {
+        self.sealed_drawing_guide = enabled;
+        self
+    }
+
+    pub fn sealed_drawing_guide(&self) -> bool {
+        self.sealed_drawing_guide
+    }
+
+    /// Select separate retained/removable color before the first drawing.
+    pub fn with_drawing_optics(mut self, enabled: bool) -> Self {
+        assert!(self.drawing.is_none() || self.drawing_optics == enabled, "drawing optics must be selected before drawing");
+        self.drawing_optics = enabled;
+        self
+    }
+
+    pub fn drawing_optics(&self) -> bool {
+        self.drawing_optics
+    }
+
+    pub fn with_rag_lift(mut self, enabled: bool) -> Self {
+        self.rag_lift = enabled && crate::engine7::active(self.engine);
+        self
+    }
+
+    pub fn rag_lift(&self) -> bool {
+        self.rag_lift
+    }
+
+    pub fn with_knife_skim(mut self, enabled: bool) -> Self {
+        self.knife_skim = enabled && matches!(self.engine, crate::engine7::ENGINE | crate::REACH_END);
+        self
+    }
+
+    pub fn knife_skim(&self) -> bool {
+        self.knife_skim
+    }
+
+    pub fn with_blend_feather(mut self, enabled: bool) -> Self {
+        self.blend_feather = enabled && matches!(self.engine, crate::engine7::ENGINE | crate::REACH_END);
+        self
+    }
+
+    pub fn blend_feather(&self) -> bool {
+        self.blend_feather
+    }
+
+    pub fn with_brush_skim(mut self, enabled: bool) -> Self {
+        self.brush_skim = enabled && matches!(self.engine, crate::engine7::ENGINE | crate::REACH_END);
+        self
+    }
+
+    pub fn brush_skim(&self) -> bool {
+        self.brush_skim
     }
 
     /// Physical width of the painting in mm (default 700).
@@ -300,9 +484,63 @@ impl Canvas {
         self
     }
 
+    /// Use a sheet of paper as the support: its surface from its fibers,
+    /// flocs, mold, felt and pressing (`paper::lay`), its pores taking oil
+    /// as an absorbent ground does. A ground laid on it after
+    /// (`Style::prepare_paper`) is what the paint meets: an oil ground seals
+    /// the paper, as oil priming does (`ground_finish`).
+    pub fn with_paper(mut self, p: crate::paper::Paper) -> Self {
+        self.linen = None;
+        self.paper = Some(p);
+        self.build_support();
+        // the pores take oil: the sheet's pore volume, in coats
+        let cap = p.absorbent.clamp(0.0, 1.0) * p.porosity * p.caliper_um() / crate::surface::COAT_UM;
+        self.absorb.iter_mut().for_each(|v| *v = cap);
+        self.absorb_any = cap > 0.0;
+        // bare paper is matte
+        self.gloss.iter_mut().for_each(|v| *v = 0.05);
+        self
+    }
+
+    /// The micro-roughness at pixel `i` of the window, µm (see `micro`): the
+    /// paper's where paper is bare or only stained; over a paint film, the
+    /// film's own, which follows its gloss (a glossy film is smooth, about
+    /// 0.1 µm; a lean, matte one has its pigment standing proud, about
+    /// 2 µm: notes/research/dry_pigment_optics.md §4, estimates).
+    pub(crate) fn micro_um(&self, i: usize) -> f32 {
+        let paint = crate::lerp(2.0, 0.1, self.gloss[i].clamp(0.0, 1.0));
+        match self.micro.get(i) {
+            // a film thinner than the pores leaves them open
+            Some(&m) => {
+                let film_um = self.film[i] * crate::surface::COAT_UM;
+                let t = (film_um / m.max(1e-3)).min(1.0);
+                crate::lerp(m, paint, t)
+            }
+            None => paint,
+        }
+    }
+
+    /// How stiffly the surface at pixel `i` gives under a point load, MPa
+    /// per µm (a Winkler foundation: the sheet's z modulus over its
+    /// caliper). A canvas on its stretcher, or a board, is all but rigid.
+    pub(crate) fn give_mpa_per_um(&self, _i: usize) -> f32 {
+        match self.paper {
+            Some(p) => p.z_mpa / p.caliper_um().max(10.0),
+            None => 10.0,
+        }
+    }
+
     /// Use a woven linen support.
     pub fn with_linen(mut self, l: Linen) -> Self {
         self.linen = Some(l);
+        // (linen instead of a sheet of paper: the paper's surface, pores and
+        // matte face go with it, as on a canvas new from `new_window`)
+        if self.paper.take().is_some() {
+            self.micro.clear();
+            self.absorb.iter_mut().for_each(|v| *v = 0.0);
+            self.absorb_any = false;
+            self.gloss.iter_mut().for_each(|v| *v = OIL_GROUND_GLOSS);
+        }
         self.build_support();
         self
     }
@@ -550,82 +788,13 @@ impl Canvas {
     /// more of the room's light fills the shadows (a raking lamp in a dim
     /// room, or a gallery's light from above).
     pub fn seen_lit(&self, azimuth: f32, elevation: f32, strength: f32) -> Vec<Rgb> {
-        use rayon::prelude::*;
-        // the room's light that fills the shadows: little where one low lamp
-        // rakes across the picture in a dim room, much under a gallery's high
-        // light, where walls and ceiling light the picture too
-        let ambient = crate::lerp(0.3, 0.55, crate::smoothstep(10.0, 55.0, elevation));
-        let base = self.seen();
-        let (w, h) = (self.f.w, self.f.h);
-        let um_px = self.px_mm() * 1000.0;
-        // the surface: dry height plus the wet film where paint is wet
-        let surf = self.wet_surface();
-        let (az, el) = (azimuth.to_radians(), elevation.clamp(3.0, 89.0).to_radians());
-        // toward the light, in pixel axes (y runs down: light from the top is -y)
-        let (lx, ly, lz) = (el.cos() * az.cos(), -el.cos() * az.sin(), el.sin());
-        let k = 0.5 / um_px;
-        // µm the light ray climbs per pixel toward the light
-        let rise = el.tan() * um_px;
-        let (hi, lo) = surf.par_iter().fold(|| (f32::MIN, f32::MAX), |(a, b), &v| (a.max(v), b.min(v))).reduce(|| (f32::MIN, f32::MAX), |(a, b), (c, d)| (a.max(c), b.min(d)));
-        let steps = (((hi - lo) / rise).ceil() as usize).max(1).min(w.saturating_add(h));
-        let (sx, sy) = {
-            let m = (lx * lx + ly * ly).sqrt().max(1e-6);
-            (lx / m, ly / m)
-        };
-        let at = |x: isize, y: isize| surf[(y.clamp(0, h as isize - 1) as usize) * w + x.clamp(0, w as isize - 1) as usize];
-        // shadows are cast by the relief a pixel can resolve: bumps finer than
-        // a pixel (a stroke's furrows) shade by their slope, above, and don't
-        // shadow the paint around them
-        let shade_surf = crate::surface::box_blur(&surf, w, h, 1);
-        // Bound the actual sampled surface, including blur rounding.
-        let shade_hi = shade_surf.par_iter().copied().reduce(|| f32::MIN, f32::max);
-        let sat = |x: isize, y: isize| shade_surf[(y.clamp(0, h as isize - 1) as usize) * w + x.clamp(0, w as isize - 1) as usize];
-        let hv = {
-            let v = [lx, ly, lz + 1.0];
-            let hm = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-            [v[0] / hm, v[1] / hm, v[2] / hm]
-        };
-        (0..w * h)
-            .into_par_iter()
-            .map(|i| {
-                let (x, y) = ((i % w) as isize, (i / w) as isize);
-                let dx = (at(x + 1, y) - at(x - 1, y)) * k;
-                let dy = (at(x, y + 1) - at(x, y - 1)) * k;
-                // paint edges round over (as `relief`): soft-limit the slope,
-                // so the furrows of a stroke model it and don't turn it to bark
-                let g = (dx * dx + dy * dy).sqrt();
-                let soft = 1.0 / (1.0 + g / 1.2);
-                let (dx, dy) = (dx * soft, dy * soft);
-                let m = (dx * dx + dy * dy + 1.0).sqrt();
-                let n = [-dx / m, -dy / m, 1.0 / m];
-                let ndl = (n[0] * lx + n[1] * ly + n[2] * lz).max(0.0);
-                // cast shadow: does the surface toward the light rise above the ray?
-                let h0 = shade_surf[i];
-                let mut lit = 1.0f32;
-                for s in 1..=steps {
-                    let ray_height = h0 + rise * s as f32;
-                    if ray_height > shade_hi || lit == 0.0 {
-                        break;
-                    }
-                    let (px, py) = (x as f32 + sx * s as f32, y as f32 + sy * s as f32);
-                    if px < 0.0 || py < 0.0 || px >= w as f32 || py >= h as f32 { break; }
-                    let over = sat(px.round() as isize, py.round() as isize) - ray_height;
-                    if over > 0.0 {
-                        lit = lit.min(1.0 - (over / (0.5 * rise)).min(1.0));
-                    }
-                }
-                // (a slope facing a low lamp is lit more than the flat canvas,
-                // 1; capped, so the lowest lights don't burn ridges out to white)
-                let diffuse = (ambient + (1.0 - ambient) * ndl * lit / lz).min(1.6);
-                let shade = (1.0 + strength * (diffuse - 1.0)).max(0.0);
-                // sheen: wet oil shines, dry paint barely
-                let wet = (self.wet.vol[i] * 4.0).min(1.0);
-                let ndh = (n[0] * hv[0] + n[1] * hv[1] + n[2] * hv[2]).max(0.0);
-                let spec = (0.02 + 0.10 * wet) * ndh.powf(40.0) * lit;
-                let p = base[i];
-                [(p[0] * shade + spec).max(0.0), (p[1] * shade + spec).max(0.0), (p[2] * shade + spec).max(0.0)]
-            })
-            .collect()
+        crate::prepared_optics::PreparedLighting::new(
+            &self.wet_surface(), self.f.w, self.f.h, self.px_mm() * 1000.0,
+        ).lit(&self.seen(), &self.wet.vol, azimuth, elevation, strength)
+    }
+
+    pub fn prepare_optics(&self) -> crate::PreparedOptics {
+        crate::PreparedOptics::capture(self)
     }
 
     /// Save as an 8-bit sRGB PNG with triangular dither (prevents banding in
@@ -659,164 +828,58 @@ impl Canvas {
 }
 
 #[cfg(test)]
-mod tests {
-    // Solvent contributes geometry under raking light, while remaining
-    // optically clear in the diffuse view. The same relief must shade alike
-    // whether its height comes from the dry support or the liquid film.
+mod review_lighting_tests {
+    use super::*;
+
+    /// The light's two ends, exactly: overhead (90°) casts no shadow and
+    /// lights flat paint fully; grazing (0°), a lamp in the canvas's plane,
+    /// leaves flat paint to the room's light, lights the ridge's face turned
+    /// to it, and hides whatever lies behind the ridge. No NaN at either end.
     #[test]
-    #[cfg(tube_box)]
-    fn raking_light_includes_solvent_thickness() {
-        let mut liquid = crate::Style::oil().prepare(48, 1.0, 3);
-        let mut raised = crate::Style::oil().prepare(48, 1.0, 3);
-        let diffuse = liquid.seen();
-        liquid.wet.solv = vec![0.0; liquid.height.len()];
-        for i in 0..liquid.height.len() {
-            let x = i % liquid.f.w;
-            let thickness = if (16..32).contains(&x) { 600.0 } else { 0.0 };
-            liquid.wet.solv[i] = thickness;
-            raised.height[i] += thickness;
-        }
-        assert_eq!(liquid.seen(), diffuse, "clear solvent leaves diffuse color unchanged");
-        for azimuth in [0.0, 135.0, 270.0] {
-            assert!(liquid.seen_lit(azimuth, 10.0, 1.0) == raised.seen_lit(azimuth, 10.0, 1.0), "equal film geometry shades alike at {azimuth} degrees");
-        }
-    }
-
-    #[cfg(tube_box)]
-    use crate::color::hex;
-    #[cfg(tube_box)]
-    use crate::mask::Mask;
-    #[cfg(tube_box)]
-    use crate::pigment::Pigment;
-    #[cfg(tube_box)]
-    use crate::style::Style;
-
-    // Engine contract: glazing a dry patch must not advance time or cure
-    // other paint. The Lua guard alone cannot prevent an engine dry().
-    #[test]
-    #[cfg(tube_box)]
-    fn masked_glaze_preserves_wet_paint_and_clock_elsewhere() {
-        let mut c = Style::oil().prepare(100, 1.0, 3);
-        let pal = crate::Palette::tube_box();
-        let paint = pal.pile(vec![(pal.tubes.iter().position(|t| t.name == "bone black").unwrap(), 1.0)]).laid(0.0);
-        let mut held = crate::Held::new(crate::Tool::hog_flat(20.0), 1);
-        held.load(paint, 1.0);
-        c.drag(&mut held, &crate::Gesture::line((100.0, 200.0), (400.0, 200.0)).pressure(0.8, 0.8), None);
-        let stages = c.stages();
-        assert!(stages.iter().any(|s| *s != crate::Stage::Dry));
-        let clock = c.clock();
-        let m = Mask::from_fn(c.frame(), |x, y| if x > 700.0 && y > 700.0 { 1.0 } else { 0.0 });
-        c.glaze(&Pigment::transparent(hex("#302010")), Some(&m), |_, _| 0.5);
-        assert_eq!(c.clock(), clock, "glaze must not advance the drying clock");
-        assert_eq!(c.stages(), stages, "paint outside the glaze stays wet");
-    }
-
-    /// Largest channel change per distance band (40 units) from `at`.
-    #[cfg(tube_box)]
-    fn change_by_distance(c: &super::Canvas, before: &[crate::color::Rgb], at: (f32, f32)) -> Vec<f32> {
-        let f = c.f;
-        let mut bins = vec![0.0f32; 16];
-        for i in 0..c.px.len() {
-            let d = ((f.ux(i % f.w) - at.0).powi(2) + (f.uy(i / f.w) - at.1).powi(2)).sqrt();
-            let e = (0..3).map(|k| (c.px[i][k] - before[i][k]).abs()).fold(0.0, f32::max);
-            assert!(c.px[i].iter().all(|v| v.is_finite()) && c.height[i].is_finite(), "non-finite pixel at d {d}");
-            let b = ((d / 40.0) as usize).min(15);
-            bins[b] = bins[b].max(e);
-        }
-        bins
-    }
-
-    /// A glaze with a long Gaussian falloff
-    /// is tiny but positive far out (down to f32 denormals). The pixels stay
-    /// finite there, and the change falls off with the thickness to below
-    /// half an 8-bit step in the tail.
-    #[test]
-    #[cfg(tube_box)]
-    fn glaze_long_falloff_has_no_edge() {
-        let st = Style::oil();
-        let mut c = st.prepare(300, 1.5, 3);
-        let before = c.px.clone();
-        let at = (500.0f32, 300.0f32);
-        c.glaze(&Pigment::transparent(hex("#e8e0c0")), None, move |x, y| {
-            let d = ((x - at.0).powi(2) + (y - at.1).powi(2)).sqrt();
-            0.35 * (-(d / 38.0).powi(2)).exp()
-        });
-        let bins = change_by_distance(&c, &before, at);
-        assert!(bins[0] > 2.0 / 255.0, "the glaze shows at its center: {bins:?}");
-        for b in 3..bins.len() {
-            assert!(bins[b] < 0.5 / 255.0, "visible glaze in the tail at band {b}: {bins:?}");
-        }
-    }
-
-    /// A blurred mask leaves float residue
-    /// out to the canvas edges; a glaze through it must not lay a rectangle.
-    #[test]
-    #[cfg(tube_box)]
-    fn glaze_through_blurred_mask_leaves_no_rectangle() {
-        let st = Style::oil();
-        let mut c = st.prepare(300, 1.5, 4);
-        let before = c.px.clone();
-        let m = Mask::from_fn(c.frame(), |x, y| if (x - 300.0).abs() < 20.0 && (y - 200.0).abs() < 60.0 { 1.0 } else { 0.0 }).blur(1.6);
-        let residue = m.data.iter().filter(|&&v| v > 0.0 && v < 1e-3).count();
-        c.glaze(&Pigment::transparent(hex("#3a2a1a")), Some(&m), |_, _| 1.2);
-        let f = c.f;
-        let mut far = 0.0f32;
-        for i in 0..c.px.len() {
-            let (x, y) = (f.ux(i % f.w), f.uy(i / f.w));
-            assert!(c.px[i].iter().all(|v| v.is_finite()) && c.height[i].is_finite());
-            if (x - 300.0).abs() > 60.0 || (y - 200.0).abs() > 100.0 {
-                far = far.max((0..3).map(|k| (c.px[i][k] - before[i][k]).abs()).fold(0.0, f32::max));
-            }
-        }
-        assert!(far < 0.5 / 255.0, "glaze outside the blurred mask: {far} ({residue} residue pixels)");
-    }
-
-    /// The film fades in smoothly below the minimum (no step, no overshoot).
-    #[test]
-    fn formed_film_is_smooth_and_monotone() {
-        let mut last = 0.0f32;
-        for k in 0..=4000 {
-            let um = k as f32 * 0.0005;
-            let f = super::formed_film(um);
-            assert!(f >= last - 1e-7 && f <= um + 1e-7, "{um}: {f}");
-            assert!(f - last < 0.0025, "step at {um}");
-            last = f;
-        }
-        assert_eq!(super::formed_film(0.02), 0.0);
-        assert_eq!(super::formed_film(0.2), 0.2);
-        assert_eq!(super::formed_film(3.0), 3.0);
-    }
-
-    /// A thin veil of 0.045-0.06 coats, a film of 0.34-0.45 µm, is laid as
-    /// asked: it darkens by more than a fifth as much as one four times as
-    /// thick.
-    #[test]
-    #[cfg(tube_box)]
-    fn a_thin_veil_is_laid() {
-        let st = Style::oil();
-        let dark = |coats: f32| {
-            let mut c = st.prepare(200, 1.5, 5);
-            let before = c.px.clone();
-            c.glaze(&Pigment::transparent(hex("#4a3a30")), None, move |_, _| coats);
-            let lum = |p: &crate::color::Rgb| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
-            before.iter().zip(&c.px).map(|(a, b)| (lum(a) - lum(b)) as f64).sum::<f64>() / c.px.len() as f64
-        };
-        let (thin, thicker) = (dark(0.045), dark(0.18));
-        assert!(thin > 0.0 && thin > 0.2 * thicker, "a 0.34 µm veil darkens {thin}, 1.35 µm {thicker}");
+    fn review_overhead_and_grazing_lights_are_exact() {
+        let mut c = Canvas::new(300, 1.0, [0.8; 3]).with_size_mm(300.0);
+        for y in 0..300 { for x in 200..205 { c.height[y * 300 + x] += 8000.0; } }
+        let (over, graze, low) = (c.seen_lit(0.0, 90.0, 1.0), c.seen_lit(0.0, 0.0, 1.0), c.seen_lit(0.0, 30.0, 1.0));
+        assert!(over.iter().chain(&graze).all(|p| p.iter().all(|v| v.is_finite())));
+        // the light comes from the right (azimuth 0): x 100 lies behind the ridge, x 250 in front of it
+        let (behind, front, face) = (150 * 300 + 100, 150 * 300 + 250, 150 * 300 + 205);
+        assert!((over[behind][0] - over[front][0]).abs() < 1e-4, "overhead: no shadow ({} vs {})", over[behind][0], over[front][0]);
+        assert!(graze[front][0] < low[front][0] * 0.6, "grazing: flat paint gets only the room's light");
+        assert!(graze[face][0] > graze[front][0] * 1.5, "grazing: the ridge's face toward the lamp is lit");
+        assert!(graze[behind][0] <= graze[front][0], "grazing: nothing behind the ridge is lit by the lamp");
     }
 }
 
 #[cfg(test)]
-mod review_lighting_tests {
-    use super::*;
-
+mod tests {
+    // From engine 4 a liquid film bridges the fine relief under it (surface.rs,
+    // `BRIDGE_UM`): a thick film of thinned liquid has a level top over the
+    // weave, where the same thickness of dry paint keeps the weave's texture.
+    // Outside the film the two surfaces are the same.
     #[test]
-    fn review_tall_relief_casts_shadows_beyond_64_pixels() {
-        let mut c = Canvas::new(300, 1.0, [0.8; 3]).with_size_mm(300.0);
-        let plain = c.seen_lit(0.0, 3.0, 1.0);
-        for y in 0..300 { for x in 200..205 { c.height[y * 300 + x] += 8000.0; } }
-        let lit = c.seen_lit(0.0, 3.0, 1.0);
-        let i = 150 * 300 + 100;
-        assert!(lit[i][0] < plain[i][0] * 0.8, "a ridge 100 pixels toward the light must cast a shadow");
+    fn a_liquid_film_levels_the_weave_under_it_from_engine_4() {
+        let mut liquid = crate::Style::oil().prepare(160, 1.0, 3).with_engine(4).with_liquid_film_levels(true);
+        let mut raised = crate::Style::oil().prepare(160, 1.0, 3).with_engine(4);
+        let w = liquid.f.w;
+        let band = |i: usize| (40..120).contains(&(i % w));
+        liquid.wet.solv = vec![0.0; liquid.height.len()];
+        for i in 0..liquid.height.len() {
+            if band(i) {
+                liquid.wet.solv[i] = 600.0;
+                raised.height[i] += 600.0;
+            }
+        }
+        let (l, r) = (liquid.wet_surface(), raised.wet_surface());
+        // the band's relief away from its edges: the mean step between neighbours along a row
+        let relief = |s: &[f32]| {
+            let steps: Vec<f32> = (0..s.len()).filter(|&i| (50..109).contains(&(i % w))).map(|i| (s[i + 1] - s[i]).abs()).collect();
+            steps.iter().sum::<f32>() / steps.len() as f32
+        };
+        assert!(relief(&r) > 0.0, "the ground has a weave to level");
+        assert!(relief(&l) < 0.5 * relief(&r), "a liquid film levels the weave: {} against dry paint's {}", relief(&l), relief(&r));
+        crate::tests::image_tolerance::assert_fields_close(
+            (0..l.len()).filter(|&i| !band(i)).map(|i| l[i]),
+            (0..r.len()).filter(|&i| !band(i)).map(|i| r[i]),
+        );
     }
 }

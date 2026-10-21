@@ -18,9 +18,9 @@ const initial = [ev('start', { cwd:'/painter' }), ev('think', { text:'# First\n\
   ev('look', { text:'mode normal' }, 13), ev('paint', { code:'local pending=4' }, 14),
   ev('sitting', { n:2 }, 20), ev('say', { text:'## Done\n\n3. ordered\n4. list\n\n---\n\n_literal_ <tag>' }, 21)];
 
-async function viewer(browser, fixture, { old = false, staticMode = false, liveFile = true, streamMode = false } = {}) {
+async function viewer(browser, fixture, { old = false, staticMode = false, liveFile = true, streamMode = false, sittings = 2, codeReady = true, failing = false, listed = true } = {}) {
   const page = await browser.newPage();
-  const state = { events:structuredClone(fixture), updates:[], epoch:'one', nupdates:0, file:'local live=99\n', files:0 };
+  const state = { events:structuredClone(fixture), updates:[], epoch:'one', nupdates:0, file:'local live=99\n', files:0, sittings, failing };
   page.on('pageerror', e => report.pageErrors.push(String(e)));
   await page.route('**/*', async route => {
     const u = new URL(route.request().url());
@@ -28,12 +28,13 @@ async function viewer(browser, fixture, { old = false, staticMode = false, liveF
       const html = old ? baseline : fs.readFileSync(candidate, 'utf8');
       return route.fulfill({ contentType:'text/html', body:staticMode ? html.replace('<script src="code-display.js">', '<script>window.STUDIO_STATIC=true;</script><script src="code-display.js">') : html });
     }
-    if (u.pathname === '/api/sessions' || u.pathname === '/data/sessions.json') return route.fulfill({ json:[{ p:'fixture', folder:'fixture', painter:true, sittings:2, mtime:0, title:'Fixture' }] });
+    if (u.pathname === '/api/sessions' || u.pathname === '/data/sessions.json') return route.fulfill({ json:listed ? [{ p:'fixture', folder:'fixture', painter:true, sittings, mtime:0, title:'Fixture' }] : [] });
     if (u.pathname === '/paintings.json') return route.fulfill({ json:[] });
     if (u.pathname === '/api/events' || u.pathname.endsWith('/events.json')) {
+      if (state.failing) return route.fulfill({ status:503, json:{ error:'unavailable' } });
       const since = staticMode || u.searchParams.has('epoch') && u.searchParams.get('epoch') !== state.epoch ? 0 : +(u.searchParams.get('since') || 0);
       const updates = state.updates.splice(0);
-      return route.fulfill({ json:{ epoch:state.epoch, sittings:2, events:state.events.slice(since), updates, nupdates:state.nupdates, total:state.events.length } });
+      return route.fulfill({ json:{ epoch:state.epoch, sittings:state.sittings, events:state.events.slice(since), updates, nupdates:state.nupdates, total:state.events.length } });
     }
     if (u.pathname === '/api/file' || u.pathname.includes('/file/')) { state.files++; return route.fulfill({ contentType:'text/plain', body:state.file }); }
     if (u.pathname === '/img' || u.pathname.includes('/img/')) return route.fulfill({ contentType:'image/svg+xml', body:'<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="800"><rect width="1000" height="800" fill="green"/></svg>' });
@@ -45,7 +46,8 @@ async function viewer(browser, fixture, { old = false, staticMode = false, liveF
     return route.fulfill({ status:404, body:'' });
   });
   await page.goto(origin + '/?p=fixture' + (streamMode ? '&stream=1' : ''));
-  await page.waitForFunction(() => events.length > 0 && !document.querySelector('#togglecode').disabled);
+  if (failing) return { page, state };
+  await page.waitForFunction(codeReady => events.length > 0 && (!codeReady || !document.querySelector('#togglecode').disabled), codeReady);
   if (liveFile) await page.waitForFunction(() => document.querySelector('#code .src')?.textContent.includes('live'));
   return { page, state };
 }
@@ -85,6 +87,59 @@ async function pollUpdate(v, i, replacement) {
 (async () => {
   const browser = await chromium.launch({ channel:'chrome', headless:true });
   try {
+    const dieRoll = [ev('start', { cwd:'/painter' }), ev('tool', { name:'write_concepts', out:'Saved notes/concepts.md.' }, 1),
+      ev('say', { text:'Saved the eight pictures and their estimates.' }, 2),
+      ev('sitting', { n:1 }, 10), ev('start', { cwd:'/painter' }, 10), ev('paint', { code:'canvas{}', out:'ok' }, 12),
+      ev('start', { cwd:'/painter' }, 20), ev('look', { text:'' }, 21),
+      ev('sitting', { n:2 }, 60), ev('start', { cwd:'/painter' }, 60), ev('say', { text:'end' }, 62)];
+    for (const staticMode of [false, true]) {
+      const v = await viewer(browser, dieRoll, { staticMode });
+      assert.deepEqual(await v.page.locator('#strip .sep').allTextContents(), ['sitting 1', 'sitting 2']);
+      assert.equal(await v.page.locator('#clock').textContent(), '0:04:00');
+      assert.match(await v.page.locator('#clocklbl').textContent(), /2 sittings/);
+      for (const [i, clock, label] of [[2, '0:00:00', 'at'], [5, '0:02:00', 'at · sitting 1 of 2'], [7, '0:02:00', 'at · sitting 1 of 2']]) {
+        await seek(v.page, i);
+        assert.equal(await v.page.locator('#clock').textContent(), clock);
+        assert.equal(await v.page.locator('#clocklbl').textContent(), label);
+      }
+      assert.match(await v.page.locator('#jbody').textContent(), /Saved the eight pictures/);
+      await v.page.close();
+    }
+    const first = await viewer(browser, [ev('sitting', { n:1 }), ev('start', { cwd:'/painter' }), ev('paint', { code:'canvas{}', out:'ok' }, 2)], { sittings:1 });
+    assert.equal(await first.page.locator('#strip .sep').textContent(), 'sitting 1');
+    assert.equal(await first.page.locator('#clock').textContent(), '0:02:00');
+    assert.equal(await first.page.locator('#clocklbl').textContent(), 'painted for');
+    await first.page.close();
+    const waiting = await viewer(browser, dieRoll.slice(0, 3).concat(dieRoll[4]), { staticMode:true, sittings:0, codeReady:false, liveFile:false });
+    waiting.state.events = dieRoll.slice(0, 6); waiting.state.sittings = 1;
+    await waiting.page.evaluate(async () => { lastStatic = 0; await poll(); });
+    assert.equal(await waiting.page.locator('#strip .sep').textContent(), 'sitting 1');
+    assert.equal(await waiting.page.locator('#clock').textContent(), '0:02:00');
+    assert.equal(await waiting.page.locator('#clocklbl').textContent(), 'painted for');
+    assert.equal(await waiting.page.evaluate(() => events.length), 6);
+    await waiting.page.close();
+    for (const staticMode of [false, true]) {
+      const firstSitting = [ev('sitting', { n:1 }), ev('start', { cwd:'/painter' }), ev('paint', { code:'local first=1', out:'ok' }, 1),
+        ev('look', { text:'' }, 2), ev('image', { img:0, look:'' }, 2), ev('start', { cwd:'/painter' }, 10)];
+      const rewound = await viewer(browser, firstSitting, { staticMode, sittings:1 });
+      await seek(rewound.page, 4);
+      await rewound.page.waitForFunction(() => document.querySelector('#img').naturalWidth > 0);
+      const canvas = (await rewound.page.locator('#img').getAttribute('src')).replace(/epoch=[^&]+/, 'epoch=');
+      rewound.state.events.splice(5, 0, ev('sitting', { n:2 }, 10));
+      rewound.state.events.push(ev('paint', { code:'local second=2', out:'ok' }, 12));
+      rewound.state.sittings = 2;
+      if (!staticMode) rewound.state.epoch = 'two';
+      await rewound.page.evaluate(async () => { lastStatic = 0; await poll(); });
+      await rewound.page.waitForFunction(() => !document.querySelector('#togglecode').disabled && codeBatch === null && document.querySelector('#img').naturalWidth > 0);
+      assert.equal((await rewound.page.locator('#img').getAttribute('src')).replace(/epoch=[^&]+/, 'epoch='), canvas);
+      assert.equal(await rewound.page.locator('#nopic').isVisible(), false);
+      assert.equal(await rewound.page.evaluate(() => pos), 4);
+      assert.equal(await rewound.page.evaluate(() => live), false);
+      assert.match((await snapshot(rewound.page)).code.join('\n'), /local first\s*=\s*1/);
+      assert.equal(await rewound.page.locator('#clocklbl').textContent(), 'at · sitting 1 of 2');
+      await rewound.page.close();
+    }
+    report.checks.push('sitting labels and clocks exclude die rolls, startup-only sessions and gaps in API/static replay');
     const canvas = [ev('start'), ev('look', {text:'scratch True'}, 1), ev('image', {img:0, look:'scratch True'}, 2),
       ev('paint', {scratch:true, code:'work{}', out:'ok'}, 3), ev('look', {text:'scratch True, crop 100,100,300,300'}, 4),
       ev('image', {img:1, look:'scratch True, crop 100,100,300,300'}, 5), ev('look', {text:''}, 6), ev('image', {img:2, look:''}, 7),
@@ -153,6 +208,21 @@ async function pollUpdate(v, i, replacement) {
       await v.page.close();
     }
     report.checks.push('canvas reset boundaries, stale whole-look ages, safe crop outlines and rewind in normal/stream and API/static views');
+    const implicitReset = [ev('start', { cwd:'/painter' }), ev('paint', { scratch:true, new_scratch:true, code:'local old_scratch=1', out:'ok' }, 1),
+      ev('paint', { scratch:true, err:true, code:'bad(', out:'error' }, 2),
+      ev('paint', { scratch:true, scratch_reset:true, code:'local fresh_scratch=2', out:'a fresh scratch canvas (the last one\'s log is paintings/lua/scratch-1.lua)\nok' }, 3),
+      ev('say', { text:'after the reset' }, 4)];
+    const implicit = await viewer(browser, implicitReset, { liveFile:false });
+    await seek(implicit.page, 4); await seek(implicit.page, 3);
+    await implicit.page.waitForFunction(() => document.querySelector('#code').textContent.includes('local fresh_scratch = 2'));
+    const reset = await snapshot(implicit.page);
+    assert.equal(reset.file, 'scratch.lua');
+    assert(reset.code.join('\n').includes('--@ chunk 1\nlocal fresh_scratch = 2'), 'a scratch reset reported by the result starts a new log');
+    assert(!reset.code.join('\n').includes('old_scratch'), 'a scratch reset reported by the result drops the previous canvas');
+    await seek(implicit.page, 2);
+    await implicit.page.waitForFunction(() => document.querySelector('#code').textContent.includes('local old_scratch = 1'));
+    assert((await snapshot(implicit.page)).code.join('\n').includes('--@ chunk 1\nlocal old_scratch = 1'), 'a failed scratch chunk without a reset keeps the earlier log');
+    report.checks.push('implicit scratch resets start a new reconstructed log, failed chunks without a reset keep it'); await implicit.page.close();
     for (const streamMode of [false, true]) {
       const v = await viewer(browser, [ev('start'), ev('paint', {code:'work{}', out:'ok'}, 1),
         ev('look', {text:''}, 2), ev('image', {img:0, look:''}, 3)], {streamMode, liveFile:false});
@@ -300,6 +370,15 @@ async function pollUpdate(v, i, replacement) {
     for (const i of [1, 2, 3, 4, 5, 2, 4]) { await seek(v.page, i); if (old) { await seek(old.page, i); await compare(v.page, old.page); } }
     const r = await snapshot(v.page); assert.equal(r.file, 'a.rs'); assert.deepEqual(r.code, ['fn a() { two(); }']); assert.deepEqual(r.changed, [1]);
     report.checks.push('write/edit reconstruction and first-file tie ordering'); await v.page.close(); if (old) await old.page.close();
+    // An edit with no complete copy before it has an unknown source: the current file is not shown as that history.
+    const unknown = [ev('start', { cwd:'/painter' }), ev('edit', { path:'/painter/unknown.lua', edits:[{ oldText:'before', newText:'after' }], out:'ok' }, 1), ev('say', { text:'end' }, 2)];
+    const u = await viewer(browser, unknown);
+    await seek(u.page, 1);
+    const unknownView = await u.page.evaluate(() => ({ code:document.querySelector('#code').textContent, label:document.querySelector('#codeformat').textContent, file:document.querySelector('#file').textContent }));
+    assert.doesNotMatch(unknownView.code, /live\s*=\s*99/, 'an unknown historical source must not show the current file');
+    assert.match(unknownView.label, /unknown/, 'an unknown historical source must say so in the header');
+    assert.equal(unknownView.file, 'unknown.lua');
+    report.checks.push('an edit with no complete copy before it is marked unknown, never shown as the current file'); await u.page.close();
     // A sliding 251-event journal retains exact grouping and stable block nodes.
     const large = [ev('start', { cwd:'/painter' }), ev('paint', { code:'local stable=1', out:'ok' }, 1)];
     for (let k = 2; k < 330; k++) large.push(ev(k % 3 === 0 ? 'think' : 'cmd', { text:k % 3 === 0 ? ('## Thought ' + k + '\n\n' + 'A **long** line with `code` & <safe>.\n').repeat(30) : 'echo ' + k, out:'ok' }, k));
@@ -372,6 +451,76 @@ async function pollUpdate(v, i, replacement) {
     assert.equal(await typing.page.locator('.th.last .cursor').count(), 0);
     assert.equal(await typing.page.locator('.th.last script').count(), 0);
     report.checks.push('every typewriter prefix preserves markdown'); await typing.page.close();
+    const edge = await viewer(browser, [ev('start', { cwd:'/painter' }), ev('paint', { code:'local first=1', out:'ok' }, 1)], { liveFile:false });
+    edge.state.file = 'local main_only = 1\n';
+    await edge.page.waitForFunction(() => document.getElementById('code').textContent.includes('main_only'));
+    assert.equal(await edge.page.locator('#file').textContent(), 'painting.lua');
+    let release;
+    const held = new Promise(resolve => { release = resolve; });
+    await edge.page.route(u => u.pathname === '/api/file' && u.searchParams.get('f') === 'paintings/lua/scratch.lua', async route => { await held; await route.fulfill({ contentType:'text/plain', body:'local scratch_only = 2\nlocal disk_only = 3\n' }); });
+    edge.state.events.push(ev('paint', { scratch:true, new_scratch:true, code:'local scratch_only = 2', out:'ok' }, 2));
+    await edge.page.waitForFunction(() => document.getElementById('file').textContent === 'scratch.lua');
+    const pending = (await snapshot(edge.page)).code.join('\n');
+    assert(!pending.includes('main_only'), 'scratch.lua is not labelled over painting source while its response is pending');
+    assert(pending.includes('scratch_only'), 'the scratch canvas shows its own source while its response is pending');
+    release();
+    await edge.page.waitForFunction(() => document.getElementById('code').textContent.includes('disk_only'));
+    const shown = await snapshot(edge.page);
+    assert.equal(shown.file, 'scratch.lua');
+    assert(!shown.code.join('\n').includes('main_only'));
+    await edge.page.close();
+    report.checks.push('live scratch source keeps its own file name while the scratch response is pending');
+    const drift = await viewer(browser, [ev('start', { cwd:'/painter' }), ev('write', { path:'/painter/paintings/lua/painting.lua', content:'local main_only = 1\n', out:'ok' }, 1)], { liveFile:false });
+    drift.state.file = 'local main_only = 1\n';
+    await drift.page.waitForFunction(() => liveText === 'local main_only = 1\n' && liveTextPath === '/painter/paintings/lua/painting.lua');
+    let settle;
+    const pendingRun = new Promise(resolve => { settle = resolve; });
+    await drift.page.route(u => u.pathname === '/api/file' && u.searchParams.get('f') === 'paintings/src/bin/foo.rs', async route => { await pendingRun; await route.fulfill({ contentType:'text/plain', body:'local main_only = 1\n' }); });
+    drift.state.events.push(...[2, 3, 4, 5].map(k => ev('cmd', { text:'cargo paint foo', out:'ok' }, k)));
+    await drift.page.waitForFunction(() => document.getElementById('file').textContent === 'foo.rs');
+    await seek(drift.page, 4);
+    settle();
+    await drift.page.waitForFunction(() => liveTextPath === '/painter/paintings/src/bin/foo.rs');
+    await seek(drift.page, 4);
+    assert.equal(await drift.page.locator('#file').textContent(), 'foo.rs');
+    assert.match(await drift.page.locator('#codeformat').textContent(), /unknown/, 'a rewound source with no complete copy says so in the header');
+    assert(!(await snapshot(drift.page)).code.join('\n').includes('main_only'), 'a rewound source with no complete copy never shows the current file');
+    await drift.page.close();
+    report.checks.push('an identical file response that arrives while rewound replaces the blank pending view');
+    const previousFirst = [ev('start', { cwd:'/painter' }), ev('paint', { code:'local first=1', out:'ok' }, 1), ev('look', { text:'' }, 2), ev('image', { img:0, look:'' }, 2),
+      ev('paint', { code:'local second=2', out:'ok' }, 3), ev('look', { text:'' }, 4), ev('image', { img:1, look:'' }, 4)];
+    const previous = await viewer(browser, previousFirst);
+    const previousFeedback = await previous.page.evaluate(() => {
+      document.querySelector('#play').click();
+      const replaying = document.querySelector('#badge').textContent;
+      document.querySelector('#prevlook').click();
+      return { replaying, rewound:document.querySelector('#badge').textContent, play:document.querySelector('#play').textContent, playing, pos };
+    });
+    assert.deepEqual(previousFeedback, { replaying:'REPLAY', rewound:'REWOUND', play:'▶ Replay', playing:null, pos:3 }, 'Previous at the first look refreshes the badge with the stopped timer');
+    await previous.page.close();
+    const fresh = () => initial.map(e => ({ ...e, ts:new Date().toISOString() }));
+    const dropped = await viewer(browser, fresh());
+    assert.equal(await dropped.page.locator('#badge').textContent(), 'LIVE');
+    const loaded = await dropped.page.evaluate(() => events);
+    dropped.state.failing = true;
+    await dropped.page.waitForFunction(() => disconnected);
+    await dropped.page.waitForFunction(() => document.getElementById('badge').className !== 'live' && document.getElementById('badge').textContent !== 'LIVE');
+    assert.deepEqual(await dropped.page.evaluate(() => events), loaded, 'a failed refresh keeps what was loaded');
+    dropped.state.failing = false;
+    await dropped.page.waitForFunction(() => document.getElementById('badge').textContent === 'LIVE');
+    await dropped.page.close();
+    const unreached = await viewer(browser, [], { failing:true });
+    await unreached.page.waitForFunction(() => !document.getElementById('nopic').hidden);
+    assert.doesNotMatch(await unreached.page.locator('#nopic').textContent(), /hasn't started/, 'a failed first request for a listed painter is not a painter that has not started');
+    const unlisted = await viewer(browser, [], { failing:true, listed:false });
+    await unlisted.page.waitForFunction(() => /hasn't started/.test(document.getElementById('nopic').textContent));
+    await unlisted.page.close();
+    unreached.state.failing = false;
+    await unreached.page.waitForFunction(() => document.getElementById('nopic').hidden);
+    unreached.state.events.push(...fresh());
+    await unreached.page.waitForFunction(() => document.getElementById('badge').textContent === 'LIVE');
+    await unreached.page.close();
+    report.checks.push('a failed refresh reads disconnected and keeps the loaded picture; a failed first load is not a painter that has not started');
     assert.deepEqual(report.pageErrors, []);
     fs.writeFileSync(path.join(root, 'replay-verification.json'), JSON.stringify(report, null, 2) + '\n');
     console.log(JSON.stringify(report));

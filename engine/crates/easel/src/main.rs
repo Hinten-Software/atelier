@@ -2,54 +2,47 @@
 //!
 //!   easel open [<name>]              start (or reattach to) a session
 //!   easel do '<lua>' | -f chunk.lua | -            run a chunk on the live canvas
-//!   easel look [--crop x0,y0,x1,y1] [--mode value|squint|mirror] [--grid [step]] [--size N]
-//!   easel log | status | globals | save [path] | frames on|off | close
+//!   easel look [--crop x0,y0,x1,y1] [--mode value,squint,edges,mirror,relief,gallery] [--light az,el] [--grid [step]] [--size N] [--mask name[,name]]
+//!   easel log | status | globals | save [path] [--light az,el | --gallery] | frames on|off | close
 //!   easel check                                    (replay build) replay the log, compare
 //!   easel note '<text>' | -                        append to notes/journal.md
-//!   easel run paintings/lua/<name>.lua [--out path] [--look] [--state-digest digests.txt]
+//!   easel run paintings/lua/<name>.lua [--out path] [--light az,el | --gallery] [--look] [--state-digest digests.txt]
+//!                                    (replay build) replay at the width it was painted at
 //!
-//! Two builds (see `USAGE`). The replay build (feature `replay`, on by
-//! default: developers, tests and the outside runner) has named sessions
-//! (`-s`, `EASEL_SESSION`), `EASEL_ROOT`, `run`, `check` and `hash-probe`. The
-//! painter build (`--no-default-features`) has none of them: its studio is
-//! the directory above the executable's (`<studio>/bin/easel`) and holds one
-//! painting, `PAINTING`. See notes/easel_guide.md.
+//! One binary, two runtime modes (notes/easel.md#studio-selection). The
+//! developer mode has named sessions, `EASEL_ROOT`, replay and finishing.
+//! Painter mode has none of them: its studio is the directory above the
+//! executable's (`<studio>/bin/easel`) and holds one painting, `PAINTING`.
 
 mod api;
 mod ground_cache;
 mod board;
 mod check;
-#[cfg(all(test, feature = "replay"))]
-mod checkpoint_tests;
 mod depth;
+mod display;
 mod draw_edges;
 mod draw_outline;
-#[cfg(feature = "finish")]
 mod finish;
 mod form;
-#[cfg(feature = "replay")]
 mod frames;
-#[cfg(feature = "replay")]
 mod legacy;
 mod look;
+mod output;
+mod live_frames;
 mod save;
+mod replay_checkpoint;
 #[cfg(feature = "state-store")]
 mod painting_store;
-#[cfg(all(feature = "replay", feature = "render-snapshot"))]
+#[cfg(feature = "render-snapshot")]
 mod optical;
 mod palette_look;
 mod session;
-#[cfg(feature = "replay")]
 mod state_dump;
+mod studio;
 mod time;
 mod world;
-#[cfg(all(test, feature = "replay"))]
-mod thinner_measure;
-#[cfg(all(test, feature = "replay"))]
-mod thinner_tests;
 
 use paint::Canvas;
-use paint::color::linear_to_srgb;
 use session::{Session, parse_program, root};
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -57,62 +50,97 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-/// The one width a painting is painted, replayed and delivered at (px).
+/// The width a painting is painted, replayed and delivered at (px) unless it
+/// names another (`session::WIDTH_MARK`, configured when it began: `configured_width`).
 const LIVE_WIDTH: usize = 2400;
 
 /// The width a painting paints at: an existing one its log's (a sketch if
-/// its head says so, `session::SKETCH_MARK`), a new one a sketch's if the
-/// session's name starts with "sketch".
-fn width_for(name: &str, log: Option<&str>) -> usize {
-    let sketch = match log {
-        Some(text) => session::logged_sketch(text),
-        None => name.starts_with("sketch"),
-    };
-    if sketch { session::SKETCH_WIDTH } else { LIVE_WIDTH }
+/// its head says so, `session::SKETCH_MARK`; else the width its head names,
+/// `session::WIDTH_MARK`, or `LIVE_WIDTH`), a new one a sketch's if the
+/// session's name starts with "sketch", else the configured one (`configured_width`).
+fn width_for(name: &str, log: Option<&str>) -> Result<usize, String> {
+    match log {
+        Some(text) if session::logged_sketch(text) => Ok(session::SKETCH_WIDTH),
+        Some(text) => session::logged_width(text),
+        None if name.starts_with("sketch") => Ok(session::SKETCH_WIDTH),
+        None => configured_width(),
+    }
 }
 
-/// The painter build's one session.
-#[cfg(not(feature = "replay"))]
+/// A new painting's width, as its box is configured (`session::configured_box`): a file
+/// `width` next to this executable (a painter's client passes the easel no EASEL_* variable),
+/// else `EASEL_WIDTH`, else `LIVE_WIDTH`. One of `session::WIDTHS`; both set, they must agree.
+fn configured_width() -> Result<usize, String> {
+    let file = std::env::current_exe().ok().and_then(|e| e.canonicalize().ok()).and_then(|e| e.parent().map(|d| d.join("width")));
+    let from_file = match file {
+        Some(f) if f.exists() => Some((std::fs::read_to_string(&f).map_err(|e| format!("{}: {e}", f.display()))?, f.display().to_string())),
+        _ => None,
+    };
+    new_width(from_file.as_ref().map(|(t, p)| (t.as_str(), p.as_str())), std::env::var("EASEL_WIDTH").ok().as_deref())
+}
+
+/// `configured_width` from what the file (its text and path) and `EASEL_WIDTH` say.
+fn new_width(file: Option<(&str, &str)>, env: Option<&str>) -> Result<usize, String> {
+    let parse = |v: &str, from: &str| {
+        v.trim().parse::<usize>().ok().filter(|w| session::WIDTHS.contains(w))
+            .ok_or_else(|| format!("{from} says width {:?}: want one of {:?}", v.trim(), session::WIDTHS))
+    };
+    let f = file.map(|(text, path)| parse(text, path)).transpose()?;
+    let e = env.filter(|v| !v.trim().is_empty()).map(|v| parse(v, "EASEL_WIDTH")).transpose()?;
+    match (f, e) {
+        (Some(a), Some(b)) if a != b => Err(format!("the width file says {a} but EASEL_WIDTH says {b}: set one, or both the same")),
+        (Some(w), _) | (None, Some(w)) => Ok(w),
+        (None, None) => Ok(LIVE_WIDTH),
+    }
+}
+
+/// Painter mode's one session.
 const PAINTING: &str = "painting";
 
-#[cfg(not(feature = "replay"))]
-const USAGE: &str = "easel: a live painting session (see notes/easel_guide.md)
+const PAINTER_USAGE: &str = "easel: a live painting session (see notes/easel_guide.md)
 
   easel open          start or reattach; replays paintings/lua/painting.lua if it exists
   easel do '<lua>'  |  easel do -f chunk.lua  |  easel do - (stdin)     [--look] also looks afterwards
-  easel look [--crop x0,y0,x1,y1] [--mode value,squint,mirror,relief,gallery] [--grid [step]] [--size 1000]
+  easel look [--crop x0,y0,x1,y1] [--mode value,squint,edges,mirror,relief,gallery] [--light az,el] [--grid [step]] [--size 1000] [--mask name[,name]]
              [--survey]   the whole canvas at full detail, in tiles
              [--compare <earlier look png>]   that look beside this one
+             [--ref <picture>]   the motif (a photo or study in the studio) beside the canvas, same view
              [--hold <knife or pile> --at x,y]   (speculative) the loaded knife held up to the canvas there
+             [--hold <stick> --at x,y [--pose force,alt,azimuth[,roll] | --side direction]]   with paper and pastel: where a pastel stick held there would touch
   easel look --palette   the palette board: every heap knifed out thick and smeared thin across a black stripe
+  easel probe --at x,y | --crop x0,y0,x1,y1   the paint there: color and value (sRGB 0-255), in gallery light too, and its drying
   easel log           the painting so far (= paintings/lua/painting.lua)
   easel status        chunks, width, canvas
   easel globals       the painting's globals, one a line: chunk that last set it, name, what it holds
-  easel save [path] [--light az,el | --gallery]   the canvas as a PNG (default out/easel/painting/painting.png), lit on its relief if asked
+  easel save [path] [--light az,el | --gallery]   the canvas as a PNG inside the studio (default out/easel/painting/painting.png), lit on its relief if asked
   easel frames on|off save a look after every chunk
   easel close         end the session (the log stays)
   easel note '<text>' | easel note - (stdin)    append a dated entry to notes/journal.md
   easel tubes [--markdown]   the tubes in the box (--markdown: as a table)";
 
-#[cfg(feature = "replay")]
-const USAGE: &str = "easel: a live painting session (see notes/easel_guide.md)
+const DEVELOPER_USAGE: &str = "easel: a live painting session (see notes/easel_guide.md)
 
   easel open <name>    start or reattach; replays paintings/lua/<name>.lua if it exists
+                      (a new session named sketch... is a sketch, 600px)
   easel do '<lua>'  |  easel do -f chunk.lua  |  easel do - (stdin)     [--look] also looks afterwards
-  easel look [--crop x0,y0,x1,y1] [--mode value,squint,mirror,relief,gallery] [--grid [step]] [--size 1000]
+  easel look [--crop x0,y0,x1,y1] [--mode value,squint,edges,mirror,relief,gallery] [--light az,el] [--grid [step]] [--size 1000] [--mask name[,name]]
              [--survey]   the whole canvas at full detail, in tiles
              [--compare <earlier look png>]   that look beside this one
+             [--ref <picture>]   the motif (a photo or study in the studio) beside the canvas, same view
              [--hold <knife or pile> --at x,y]   (speculative) the loaded knife held up to the canvas there
+             [--hold <stick> --at x,y [--pose force,alt,azimuth[,roll] | --side direction]]   with paper and pastel: where a pastel stick held there would touch
   easel look --palette   the palette board: every heap knifed out thick and smeared thin across a black stripe
+  easel probe --at x,y | --crop x0,y0,x1,y1   the paint there: color and value (sRGB 0-255), in gallery light too, and its drying
   easel log           the session so far (= paintings/lua/<name>.lua)
   easel status        chunks, width, canvas
   easel globals       the painting's globals, one a line: chunk that last set it, name, what it holds
-  easel save [path] [--light az,el | --gallery]   the canvas as a PNG (default out/easel/<name>/<name>.png), lit on its relief if asked
+  easel save [path] [--light az,el | --gallery]   the canvas as a PNG inside the studio (default out/easel/<name>/<name>.png), lit on its relief if asked
   easel frames on|off save a look after every chunk
   easel check         replay the log from scratch and compare with the live canvas
   easel close         end the session (the log stays)
   easel note '<text>' | easel note - (stdin)    append a dated entry to notes/journal.md
-  easel run <file.lua> [--out path.png] [--look] [--state-digest digests.txt]    replay at 2400px and write the PNG
+  easel run <file.lua> [--out path.png] [--light az,el | --gallery] [--look] [--state-digest digests.txt]
+                      replay at its width and write the PNG
       [--checkpoint-out path.ckpt]   export the final finishable state after success
       [--frames-every <s> --frames-dir <dir> [--frame-width 1000]]   and a frame per <s> of hand time
       [--width <px>]   replay narrower, a preview for development (not the painting)
@@ -126,9 +154,17 @@ const USAGE: &str = "easel: a live painting session (see notes/easel_guide.md)
   else the default tube box; its log names the box (a line \"--@ box <name>\"), and every
   replay of the log uses that box.
 
+  A new painting is 2400 px wide, or the width in a file `width` next to this executable,
+  else EASEL_WIDTH (2400 or 4800); a log
+  painted at another width names it (a line \"--@ width <px>\"), and every replay uses it.
+
   -s <name> (or EASEL_SESSION) picks the session; default: the last opened.";
 
 fn main() -> ExitCode {
+    if let Err(e) = studio::load() {
+        eprintln!("{e}");
+        return ExitCode::FAILURE;
+    }
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let name = match take_session(&mut args) {
         Ok(n) => n,
@@ -145,23 +181,19 @@ fn main() -> ExitCode {
     let r = match cmd.as_str() {
         "open" => open(&rest),
         "serve" => serve(&rest),
-        #[cfg(feature = "replay")]
         "run" => run(&rest),
-        #[cfg(feature = "replay")]
         "render-checkpoint" => render_checkpoint(&rest),
-        #[cfg(all(feature = "replay", feature = "state-store"))]
+        #[cfg(feature = "state-store")]
         "render-state" => render_state(&rest),
-        #[cfg(all(feature = "replay", feature = "render-snapshot"))]
+        #[cfg(feature = "render-snapshot")]
         "snapshot-state" => optical::export(&rest),
-        #[cfg(all(feature = "replay", feature = "render-snapshot"))]
+        #[cfg(feature = "render-snapshot")]
         "render-snapshot" => optical::render(&rest),
-        #[cfg(all(feature = "replay", feature = "render-snapshot"))]
+        #[cfg(feature = "render-snapshot")]
         "snapshot-companions" => optical::companions(&rest),
-        #[cfg(all(feature = "replay", feature = "finish"))]
         "finish" => finish_cmd(&rest),
         "note" => note(&rest, name),
         "tubes" => tubes(&rest),
-        #[cfg(feature = "replay")]
         "hash-probe" => {
             println!("{}", session::hash_probe());
             Ok(())
@@ -170,12 +202,8 @@ fn main() -> ExitCode {
             print_usage();
             Ok(())
         }
-        "do" | "look" | "log" | "status" | "globals" | "save" | "frames" | "close" => client(&cmd, &rest, name),
-        // replaying the log to compare it with the live canvas is the runner's, after the
-        // painter's session (scripts/check_painting); the painter build has no `check`
-        #[cfg(feature = "replay")]
-        "check" => client(&cmd, &rest, name),
-        o => Err(format!("easel: no command {o:?}\n\n{USAGE}")),
+        "do" | "look" | "probe" | "log" | "status" | "globals" | "save" | "frames" | "close" | "check" => client(&cmd, &rest, name),
+        o => Err(format!("easel: no command {o:?}\n\n{}", usage())),
     };
     match r {
         Ok(()) => ExitCode::SUCCESS,
@@ -187,17 +215,29 @@ fn main() -> ExitCode {
 }
 
 fn print_usage() {
-    println!("{USAGE}");
-    #[cfg(all(feature = "replay", feature = "state-store"))]
+    println!("{}", usage());
+    if studio::painter() {
+        return;
+    }
+    #[cfg(feature = "state-store")]
     println!("\n  run … --state-store DIR [--state-budget-mib N]   publish each successful chunk\n  render-state DIR out.png [--mode color|gallery|relief] [--look]   open the committed revision\n  EASEL_STATE_SESSION=<name> opts that live painting into per-chunk state publication");
-    #[cfg(all(feature = "replay", feature = "render-snapshot"))]
+    #[cfg(feature = "render-snapshot")]
     println!("\n  snapshot-state DIR out.view   export compact optics of the committed revision\n  render-snapshot out.view out.png [--mode color|gallery|relief] [--light az,el,strength] [--crop x0,y0,x1,y1]\n  snapshot-companions out.view CACHE [--gallery-light az,el,strength] [--relief-light az,el,strength] [--crop x0,y0,x1,y1] [--cache-budget-mib N]");
+}
+
+fn usage() -> &'static str {
+    if studio::painter() { PAINTER_USAGE } else { DEVELOPER_USAGE }
 }
 
 /// The session a command is for: `-s <name>` (taken out of `args`), else
 /// `EASEL_SESSION`, else (None) the last one opened.
-#[cfg(feature = "replay")]
 fn take_session(args: &mut Vec<String>) -> Result<Option<String>, String> {
+    if studio::painter() {
+        if let Some(a) = args.iter().find(|a| *a == "-s" || *a == "--session" || a.starts_with("--session=")) {
+            return Err(format!("easel: no option {a:?}: this studio has one painting, there are no sessions to pick\n\n{}", usage()));
+        }
+        return Ok(Some(PAINTING.to_string()));
+    }
     let mut name: Option<String> = std::env::var("EASEL_SESSION").ok();
     if let Some(i) = args.iter().position(|a| a == "-s" || a == "--session")
         && i + 1 < args.len()
@@ -206,16 +246,6 @@ fn take_session(args: &mut Vec<String>) -> Result<Option<String>, String> {
         args.remove(i);
     }
     Ok(name)
-}
-
-/// The painter build has one session: `-s` is refused, `EASEL_SESSION`
-/// ignored.
-#[cfg(not(feature = "replay"))]
-fn take_session(args: &mut Vec<String>) -> Result<Option<String>, String> {
-    if let Some(a) = args.iter().find(|a| *a == "-s" || *a == "--session") {
-        return Err(format!("easel: no option {a:?}: this studio has one painting, there are no sessions to pick\n\n{USAGE}"));
-    }
-    Ok(Some(PAINTING.to_string()))
 }
 
 fn session_dir(name: &str) -> PathBuf {
@@ -267,7 +297,6 @@ fn journal_path() -> PathBuf {
     root().join("notes/journal.md")
 }
 
-#[cfg(feature = "replay")]
 fn flag(args: &[String], f: &str) -> Option<String> {
     args.iter().position(|a| a == f).and_then(|i| args.get(i + 1).cloned())
 }
@@ -413,10 +442,7 @@ fn read_request(s: &mut impl Read) -> Result<Vec<u8>, String> {
 // ---------------------------------------------------------------- client
 
 fn request(name: &str, cmd: &str, args: &[String], payload: &[u8]) -> Result<(bool, String), String> {
-    #[cfg(feature = "replay")]
-    let not_running = || format!("no easel session {name:?} running: easel open {name}");
-    #[cfg(not(feature = "replay"))]
-    let not_running = || "no painting open: easel open".to_string();
+    let not_running = || if studio::painter() { "no painting open: easel open".to_string() } else { format!("no easel session {name:?} running: easel open {name}") };
     let mut s = UnixStream::connect(sock_path(name)).map_err(|_| not_running())?;
     let mut head = cmd.to_string();
     for a in args {
@@ -478,32 +504,28 @@ fn client(cmd: &str, args: &[String], name: Option<String>) -> Result<(), String
     }
 }
 
-/// The session `open` is for: the name given (replay build).
-#[cfg(feature = "replay")]
+/// The session `open` is for: the studio's painting or a developer's name.
 fn open_name(args: &[String]) -> Result<String, String> {
+    if studio::painter() {
+        if let Some(a) = args.first() {
+            return Err(format!("open: this studio has one painting; easel open takes no name or option (got {a:?})"));
+        }
+        return Ok(PAINTING.to_string());
+    }
     let name = args.first().filter(|a| !a.starts_with('-')).ok_or("open <name>")?.clone();
     valid_name(&name)?;
     if args.len() != 1 {
-        return Err("open: live sessions are fixed at 2400px; no width option".into());
+        return Err("open: no width option (a log replays at its own width; a file `width` beside the easel, or EASEL_WIDTH, sets a new painting's)".into());
     }
     Ok(name)
-}
-
-/// The painter build opens its one painting: `open` takes nothing.
-#[cfg(not(feature = "replay"))]
-fn open_name(args: &[String]) -> Result<String, String> {
-    if let Some(a) = args.first() {
-        return Err(format!("open: this studio has one painting; easel open takes no name or option (got {a:?})"));
-    }
-    Ok(PAINTING.to_string())
 }
 
 /// Remember the session opened last (replay build: commands without `-s`
 /// go to it).
 fn set_current(name: &str) -> Result<(), String> {
-    #[cfg(feature = "replay")]
-    std::fs::write(root().join("out/easel/current"), name).map_err(|e| e.to_string())?;
-    let _ = name;
+    if !studio::painter() {
+        std::fs::write(root().join("out/easel/current"), name).map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -532,7 +554,9 @@ fn open(args: &[String]) -> Result<(), String> {
     let name = open_name(args)?;
     let dir = session_dir(&name);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    if let Ok((ok, st)) = request(&name, "status", &[], &[]) {
+    if let Ok((ok, st)) = request(&name, "status", &[], &[])
+        && !replaying(&st)
+    {
         if !ok {
             return Err(st);
         }
@@ -542,15 +566,24 @@ fn open(args: &[String]) -> Result<(), String> {
     }
     // Replaying a real painting can take tens of minutes. Follow the server's
     // startup log so `open` shows that work instead of looking dead, and only
-    // time out when the replay itself has made no progress for 30 minutes.
+    // time out when the replay itself has made no progress for longer than a chunk may run.
     // The server is started only by the `open` that takes the session's lock; any
     // other waits for it (or, if it has gone, takes the lock in turn).
     let mut started = false;
     let mut shown = 0usize;
     let mut last_progress = Instant::now();
+    // a chunk may take its whole limit to replay (session::chunk_limit_for, by the width its log
+    // names): no progress for that long and ten minutes more, and never less than 30 minutes, is a stall
+    let width = std::fs::read_to_string(log_path(&name)).ok().and_then(|t| session::logged_width(&t).ok()).unwrap_or(LIVE_WIDTH);
+    let stall = (session::chunk_limit_for(width) + Duration::from_secs(600)).max(Duration::from_secs(1800));
     loop {
         if let Some(lock) = try_lock(&name)? {
             if started {
+                if let Ok(log) = std::fs::read_to_string(dir.join("server.log"))
+                    && log.contains("easel: fatal")
+                {
+                    return Err(log);
+                }
                 return Err(format!("the session's server stopped without saying why; see {}", dir.join("server.log").display()));
             }
             // no server holds the session: a socket left there is a dead one's
@@ -573,21 +606,14 @@ fn open(args: &[String]) -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(100));
         let log = std::fs::read_to_string(dir.join("server.log")).unwrap_or_default();
-        // started again by another open since we last read it
-        if log.len() < shown {
-            shown = 0;
-        }
-        if let Some(end) = log[shown..].rfind('\n').map(|i| shown + i + 1) {
-            for line in log[shown..end].lines() {
-                if line.starts_with("resuming ") || line.starts_with("resumed ") || line.starts_with("warning") {
-                    println!("{line}");
-                }
-            }
-            std::io::stdout().flush().map_err(|e| e.to_string())?;
-            shown = end;
+        if show_startup_progress(&log, &mut shown)? {
             last_progress = Instant::now();
         }
-        if let Ok((true, st)) = request(&name, "status", &[], &[]) {
+        if let Ok((true, st)) = request(&name, "status", &[], &[])
+            && !replaying(&st)
+        {
+            let log = std::fs::read_to_string(dir.join("server.log")).unwrap_or_default();
+            show_startup_progress(&log, &mut shown)?;
             set_current(&name)?;
             print!("easel {name:?} open: {st}");
             return Ok(());
@@ -599,11 +625,37 @@ fn open(args: &[String]) -> Result<(), String> {
             }
             return Err(log);
         }
-        if last_progress.elapsed() > Duration::from_secs(1800) {
-            return Err(format!("session made no replay progress for 30 minutes; see {}", dir.join("server.log").display()));
+        if last_progress.elapsed() > stall {
+            return Err(format!("session made no replay progress for {} minutes; see {}", stall.as_secs() / 60, dir.join("server.log").display()));
         }
     }
 }
+
+fn show_startup_progress(log: &str, shown: &mut usize) -> Result<bool, String> {
+    if log.len() < *shown {
+        *shown = 0;
+    }
+    let Some(end) = log[*shown..].rfind('\n').map(|i| *shown + i + 1) else { return Ok(false) };
+    for line in log[*shown..end].lines() {
+        if line.starts_with("warning: replay checkpoint") {
+            eprintln!("{line}");
+        } else if line.starts_with("resuming ") || line.starts_with("resumed ") || line.starts_with("reconstructed ") || line.starts_with("warning") {
+            println!("{line}");
+        }
+    }
+    std::io::stdout().flush().map_err(|e| e.to_string())?;
+    *shown = end;
+    Ok(true)
+}
+
+/// Whether a `status` answer is a replay's progress (`replay_status`): the server is reopening
+/// or rebuilding the painting from its log.
+fn replaying(status: &str) -> bool {
+    status.starts_with("rebuilding from the log (") || status.starts_with(STARTING)
+}
+
+/// `status` before the server has read the log it replays.
+const STARTING: &str = "the easel is starting; retry in a moment";
 
 /// The session's lock for `serve`, held until it exits: the one `open` passed on its
 /// stdin, else taken here. A session that has a server already gets no second one.
@@ -651,6 +703,8 @@ struct Server {
     build: u64,
     s: Session,
     frames: bool,
+    replay: replay_checkpoint::Live,
+    hand_frames: Option<frames::Recorder>,
     /// The log text as the easel last wrote (or read) it: if the file on
     /// disk differs, it was changed outside the session.
     written: Option<String>,
@@ -662,6 +716,7 @@ struct Server {
     /// canvas, with its own clock: time spent or waited there doesn't pass for the painting.
     /// None until first used.
     scratch: Option<Box<Server>>,
+    display: Option<std::rc::Rc<display::Pool>>,
     #[cfg(feature = "state-store")]
     committed: Option<painting_store::PaintingStore>,
     #[cfg(feature = "state-store")]
@@ -675,40 +730,71 @@ fn scratch_name(name: &str) -> String {
 
 
 fn serve(args: &[String]) -> Result<(), String> {
+    studio::serving();
     let name = args.first().ok_or("serve <name>")?.clone();
     valid_name(&name)?;
-    #[cfg(not(feature = "replay"))]
-    if name != PAINTING {
+    if studio::painter() && name != PAINTING {
         return Err(format!("easel: fatal: this studio has one painting, {PAINTING:?}"));
     }
     if args.len() != 1 {
-        return Err("easel: fatal: live sessions are fixed at 2400px".into());
+        return Err("easel: fatal: no width option (a log replays at its own width; a file `width` beside the easel, or EASEL_WIDTH, sets a new painting's)".into());
     }
     let _lock = serve_lock(&name).map_err(|e| format!("easel: fatal: {e}"))?;
-    let mut srv = Server::resume(name.clone()).map_err(|e| format!("easel: fatal: {e}"))?;
     let sock = sock_path(&name);
     // the lock is ours: a socket there is a dead server's
     let _ = std::fs::remove_file(&sock);
     let l = UnixListener::bind(&sock).map_err(|e| format!("easel: fatal: bind {}: {e}", sock.display()))?;
+    // the log replays with `status` answering how far it has got; other requests wait for it
+    let (done, total) = (std::sync::atomic::AtomicUsize::new(0), std::sync::atomic::AtomicUsize::new(usize::MAX));
+    let resumed = serving_status(&l, || replay_status(&done, &total), None, || {
+        Server::resume(name.clone(), &|k, n| {
+            total.store(n, std::sync::atomic::Ordering::Release);
+            done.store(k, std::sync::atomic::Ordering::Release);
+        })
+    });
+    let (mut srv, waiting) = match resumed {
+        Ok((Ok(srv), waiting)) => (srv, waiting),
+        Ok((Err(e), waiting)) => {
+            let _ = std::fs::remove_file(&sock);
+            for (mut conn, _) in waiting {
+                let _ = conn.write_all(format!("err
+{e}
+").as_bytes());
+            }
+            return Err(format!("easel: fatal: {e}"));
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&sock);
+            return Err(format!("easel: fatal: {e}"));
+        }
+    };
     let _ = std::io::stdout().flush();
     // the check running on its own thread, if any (check.rs; replay build only)
-    #[cfg(feature = "replay")]
     let mut checking: Option<check::Job> = None;
+    // requests that came while the log replayed or a chunk ran, read and waiting their turn
+    let mut pending = std::collections::VecDeque::from(waiting);
 
-    for conn in l.incoming() {
-        let Ok(mut conn) = conn else { continue };
-        // a request is a few KB sent at once: a client that stalls mid-request must not hold
-        // the one thread that serves every request
-        let _ = conn.set_read_timeout(Some(Duration::from_secs(60)));
-        let req = match read_request(&mut conn) {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = conn.write_all(format!("err\nthe easel couldn't read the request: {e}\n").as_bytes());
-                eprintln!("request dropped: {e}");
-                continue;
+    loop {
+        let (mut conn, req) = match pending.pop_front() {
+            Some(p) => p,
+            None => {
+                let Ok((mut conn, _)) = l.accept() else { continue };
+                // a request is a few KB sent at once: a client that stalls mid-request must not hold
+                // the one thread that serves every request
+                let _ = conn.set_read_timeout(Some(Duration::from_secs(60)));
+                match read_request(&mut conn) {
+                    Ok(r) => {
+                        let _ = conn.set_read_timeout(None);
+                        (conn, r)
+                    }
+                    Err(e) => {
+                        let _ = conn.write_all(format!("err\nthe easel couldn't read the request: {e}\n").as_bytes());
+                        eprintln!("request dropped: {e}");
+                        continue;
+                    }
+                }
             }
         };
-        let _ = conn.set_read_timeout(None);
         let text = String::from_utf8_lossy(&req).to_string();
         let (head, payload) = text.split_once('\n').unwrap_or((&text, ""));
         let mut parts = head.split('\t').map(|s| s.to_string());
@@ -720,7 +806,6 @@ fn serve(args: &[String]) -> Result<(), String> {
             eprintln!("{cmd} skipped: the client went away before it ran");
             continue;
         }
-        #[cfg(feature = "replay")]
         if cmd == "check" {
             if let Some(j) = checking.take() {
                 j.stop();
@@ -735,7 +820,27 @@ fn serve(args: &[String]) -> Result<(), String> {
             continue;
         }
         let t0 = Instant::now();
-        let r = srv.handle(&cmd, &args, payload);
+        let r = if cmd == "do" {
+            // while the chunk runs, `status` answers how far it has got; other requests wait
+            session::PROGRESS.clear();
+            let (name, written) = (srv.name.clone(), srv.written.clone().unwrap_or_default());
+            // once the chunk is kept, the log on disk has grown past `written`: `report` says so
+            let status = || {
+                if session::PROGRESS.kept() == 0 {
+                    validate_log(&name, &written)?;
+                }
+                Ok(session::PROGRESS.report(t0.elapsed()))
+            };
+            match serving_status(&l, status, None, || srv.handle(&cmd, &args, payload)) {
+                Ok((r, waiting)) => {
+                    pending.extend(waiting);
+                    r
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            srv.handle(&cmd, &args, payload)
+        };
         let reply = match &r {
             Ok(b) => format!("ok\n{b}"),
             Err(e) => format!("err\n{e}\n"),
@@ -748,9 +853,11 @@ fn serve(args: &[String]) -> Result<(), String> {
             return Err("easel: fatal: state publication or journal export failed; reopen and inspect the accepted chunk count before retrying".into());
         }
         if cmd == "close" && r.is_ok() {
-            #[cfg(feature = "replay")]
             if let Some(j) = checking.take() {
                 j.stop();
+            }
+            for (mut conn, _) in pending.drain(..) {
+                let _ = conn.write_all(b"err\nthe easel closed before this request ran\n");
             }
             let _ = std::fs::remove_file(&sock);
             break;
@@ -759,7 +866,7 @@ fn serve(args: &[String]) -> Result<(), String> {
         if let Some(sc) = srv.scratch.as_mut()
             && sc.s.stale
         {
-            if let Err(e) = sc.s.rebuild() {
+            if let Err(e) = sc.rebuild(&|_, _| {}) {
                 eprintln!("warning: the scratch canvas couldn't be rebuilt ({e}); it is put away");
                 srv.scratch = None;
             }
@@ -774,18 +881,42 @@ fn serve(args: &[String]) -> Result<(), String> {
                 let _ = std::fs::remove_file(&sock);
                 return Err(format!("easel: fatal: {e}"));
             }
-            srv.replayed = srv.s.log.len();
             eprintln!("rebuilt {:.2}s", t0.elapsed().as_secs_f64());
         }
     }
     Ok(())
 }
 
-/// Only the socket and immutable integrity witness cross threads. Lua (and its
-/// Rc-backed engine state) stays on the serving thread throughout the replay.
+/// What a request other than `status` gets while the log replays after a failed chunk.
+const REBUILDING: &str = "the easel is rebuilding from the log; retry after it finishes";
+
+/// `status` while the log replays: how many of its chunks have (`total` unset: not begun).
+fn replay_status(done: &std::sync::atomic::AtomicUsize, total: &std::sync::atomic::AtomicUsize) -> Result<String, String> {
+    use std::sync::atomic::Ordering;
+    match total.load(Ordering::Acquire) {
+        usize::MAX => Err(STARTING.into()),
+        n => Ok(format!("rebuilding from the log ({} of {n} chunks)", done.load(Ordering::Acquire))),
+    }
+}
+
+/// Rebuild the session from its log (session.rs `stale`), answering `status` with its progress.
 fn rebuild_serving_status(listener: &UnixListener, srv: &mut Server) -> Result<(), String> {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    let completed = AtomicUsize::new(0);
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (done, total) = (AtomicUsize::new(0), AtomicUsize::new(srv.s.log.len()));
+    let (name, written) = (srv.name.clone(), srv.written.clone().ok_or("session integrity: uninitialized log")?);
+    let status = || validate_log(&name, &written).and_then(|()| replay_status(&done, &total));
+    serving_status(listener, status, Some(REBUILDING), || srv.rebuild(&|k, _| done.store(k, Ordering::Release)))?.0
+}
+
+/// Requests read while `work` ran (`serving_status`), each with its connection, in the order they came.
+type Waiting = Vec<(UnixStream, Vec<u8>)>;
+
+/// Run `work` on this thread while another thread answers `status` on the listener with
+/// `status()`. Any other request gets `refusal`, or with none is read and handed back, in the
+/// order it came, to run after `work`. Only the socket and what `status` reads cross threads:
+/// Lua (and its Rc-backed engine state) stays on this one.
+fn serving_status<R>(listener: &UnixListener, status: impl Fn() -> Result<String, String> + Sync, refusal: Option<&str>, work: impl FnOnce() -> R) -> Result<(R, Waiting), String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
     let done = AtomicBool::new(false);
     struct Stop<'a>(&'a AtomicBool);
     impl Drop for Stop<'_> {
@@ -793,29 +924,27 @@ fn rebuild_serving_status(listener: &UnixListener, srv: &mut Server) -> Result<(
             self.0.store(true, Ordering::Release);
         }
     }
-    // An absolute request deadline also bounds clients that trickle bytes.
+    // An absolute request deadline also bounds clients that trickle bytes; a request to be
+    // refused is given up when `work` ends, one to be handed back is read to its end.
     struct Reader<'a> {
         conn: &'a mut UnixStream,
         until: Instant,
-        done: &'a AtomicBool,
+        done: Option<&'a AtomicBool>,
     }
     impl Read for Reader<'_> {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             let remaining = self.until.saturating_duration_since(Instant::now());
-            if remaining.is_zero() || self.done.load(Ordering::Acquire) {
-                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "rebuild request deadline reached"));
+            if remaining.is_zero() || self.done.is_some_and(|d| d.load(Ordering::Acquire)) {
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "request deadline reached"));
             }
             self.conn.set_read_timeout(Some(remaining))?;
             self.conn.read(buf)
         }
     }
-    let total = srv.s.log.len();
-
-    let name = &srv.name;
-    let written = srv.written.as_deref().ok_or("session integrity: uninitialized log")?;
     listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-    let result = std::thread::scope(|scope| {
-        let worker = scope.spawn(|| -> Result<(), String> {
+    let result: Result<_, String> = std::thread::scope(|scope| {
+        let worker = scope.spawn(|| -> Result<Waiting, String> {
+            let mut kept = Vec::new();
             while !done.load(Ordering::Acquire) {
                 let mut conn = match listener.accept() {
                     Ok((conn, _)) => conn,
@@ -826,38 +955,47 @@ fn rebuild_serving_status(listener: &UnixListener, srv: &mut Server) -> Result<(
                     Err(e) => return Err(e.to_string()),
                 };
                 // A stalled reader/writer must neither block status indefinitely nor
-                // keep the scoped helper alive after replay finishes.
+                // keep the scoped helper alive after `work` finishes.
                 conn.set_nonblocking(false).map_err(|e| e.to_string())?;
-                let _ = conn.set_read_timeout(Some(Duration::from_millis(100)));
                 let _ = conn.set_write_timeout(Some(Duration::from_millis(100)));
-                let mut reader = Reader { conn: &mut conn, until: Instant::now() + Duration::from_millis(100), done: &done };
-                let reply = match read_request(&mut reader) {
-                    Err(e) => format!("err\n{e}\n"),
-                    Ok(req) => match validate_log(name, written) {
+                let wait = if refusal.is_some() { Duration::from_millis(100) } else { Duration::from_secs(10) };
+                let mut reader = Reader { conn: &mut conn, until: Instant::now() + wait, done: refusal.is_some().then_some(&done) };
+                let req = match read_request(&mut reader) {
+                    Ok(req) => req,
+                    Err(e) => {
+                        let _ = conn.write_all(format!("err\n{e}\n").as_bytes());
+                        continue;
+                    }
+                };
+                let head = req.split(|b| *b == b'\n').next().unwrap_or_default();
+                let reply = if head.split(|b| *b == b'\t').next() == Some(b"status".as_slice()) {
+                    match status() {
+                        Ok(s) => format!("ok\n{s}\n"),
                         Err(e) => format!("err\n{e}\n"),
-                        Ok(()) => {
-                            let head = req.split(|b| *b == b'\n').next().unwrap_or_default();
-                            if head.split(|b| *b == b'\t').next() == Some(b"status".as_slice()) {
-                                format!("ok\nrebuilding from the log ({} of {total} chunks)\n", completed.load(Ordering::Acquire))
-                            } else {
-                                "err\nthe easel is rebuilding from the log; retry after it finishes\n".into()
-                            }
-                        }
-                    },
+                    }
+                } else if let Some(r) = refusal {
+                    format!("err\n{r}\n")
+                } else {
+                    let _ = conn.set_read_timeout(None);
+                    let _ = conn.set_write_timeout(None);
+                    kept.push((conn, req));
+                    continue;
                 };
                 let _ = conn.write_all(reply.as_bytes());
             }
-            Ok(())
+            Ok(kept)
         });
         let stop = Stop(&done);
-        let replay = srv.s.rebuild_with_progress(|k, _| completed.store(k, Ordering::Release));
+        let r = work();
         drop(stop);
         worker.thread().unpark();
-        let served = worker.join().map_err(|_| "rebuild status listener panicked".to_string())?;
-        replay.and(served)
+        let kept = worker.join().map_err(|_| "the status listener panicked".to_string())??;
+        Ok((r, kept))
     });
     let blocking = listener.set_nonblocking(false).map_err(|e| e.to_string());
-    result.and(blocking)
+    let r = result?;
+    blocking?;
+    Ok(r)
 }
 
 /// The session's committed record: the log as the session last wrote it.
@@ -926,10 +1064,10 @@ const HOLD_HALF: f32 = 120.0;
 /// It shows the paint on the knife and nothing of how it would look laid: not thinned by
 /// a brush, not mixed into what is wet there, not over what is under it, not dried.
 /// Only reads: no hand time, nothing in the log, the canvas and state untouched.
-fn hold_look(s: &Session, name: &str, at: (f32, f32), v: &look::View) -> Result<(usize, usize, Vec<u8>), String> {
+fn hold_look(s: &Session, name: &str, at: (f32, f32), v: &look::View) -> Result<(usize, usize, Vec<u8>, [f32; 4]), String> {
     use image::ImageEncoder;
-    if v.size.is_some() || v.grid.is_some() || v.mirror || v.palette {
-        return Err("look --hold takes --at, --crop, --mode value, squint, relief or gallery and --light, nothing else".into());
+    if v.size.is_some() || v.grid.is_some() || v.mirror || v.edges || v.palette {
+        return Err("look --hold takes --at, --crop, --mask, --mode value, squint, relief or gallery and --light, nothing else".into());
     }
     let (paint, blade, full) = s.held(name)?;
     let c = s.canvas().ok_or("no canvas yet: the first chunk is canvas{...}")?;
@@ -942,14 +1080,16 @@ fn hold_look(s: &Session, name: &str, at: (f32, f32), v: &look::View) -> Result<
         return Err(format!("look --hold: --at {},{} lies outside the --crop", at.0, at.1));
     }
     let seen_as = |crop: [f32; 4]| look::View { crop: Some(crop), value: v.value, squint: v.squint, light: v.light, ..look::View::default() };
-    let (_, _, png) = look::render(&c, &seen_as(crop))?;
+    let mut passage_view = seen_as(crop);
+    passage_view.overlays = v.overlays.clone();
+    let (_, _, png) = look::render(&c, &passage_view)?;
     let mut passage = image::load_from_memory(&png).map_err(|e| e.to_string())?.to_rgb8();
     // the knife: its paint laid thick on a steel blade, on a board of its own with the
     // painting's pixels to the unit, millimetres to the unit and engine
     let f = c.frame();
     let (len, wide) = (2.0 * blade, blade + 12.0);
     let board_h = wide + 20.0;
-    let mut board = Canvas::new(f.full_w.max(16), 1000.0 / board_h, paint::hex("#9aa0a6")).with_size_mm(1000.0 * c.mm_per_unit()).with_engine(c.engine());
+    let mut board = Canvas::new(f.full_w.max(16), 1000.0 / board_h, paint::hex("#9aa0a6")).with_size_mm(1000.0 * c.mm_per_unit()).with_engine(c.engine()).with_drain(c.drain());
     let mut knife = paint::Knife::new(blade);
     knife.load(paint, full);
     let cy = board_h / 2.0;
@@ -957,16 +1097,105 @@ fn hold_look(s: &Session, name: &str, at: (f32, f32), v: &look::View) -> Result<
     board.knife(&mut knife, &[(10.0, cy), (50.0 + len, cy)], (0.15, 0.1), None, true, 0.25);
     let (_, _, bpng) = look::render(&board, &seen_as([30.0, cy - wide / 2.0, 30.0 + len, cy + wide / 2.0]))?;
     let blade_img = image::load_from_memory(&bpng).map_err(|e| e.to_string())?.to_rgb8();
-    // held over the passage: the blade's end at the point, its length to the right
-    let x0 = ((crop[0] * f.scale).round().max(0.0) as usize).clamp(f.x0, f.x0 + f.w) as i64;
-    let y0 = ((crop[1] * f.scale).round().max(0.0) as usize).clamp(f.y0, f.y0 + f.h) as i64;
-    let x = (at.0 * f.scale).round() as i64 - x0;
-    let y = (at.1 * f.scale).round() as i64 - y0 - blade_img.height() as i64 / 2;
+    // held over the passage: the blade's end at the point, its length to the right. The
+    // passage may be shown smaller than the canvas's own pixels (a crop of a painting wider
+    // than 2400 px, look.rs LOOK_SCALE; the blade is shown so too): the point is placed in
+    // the passage as shown
+    let px = |u: f32, lo: usize, hi: usize| ((u * f.scale).round().max(0.0) as usize).clamp(lo, hi) as i64;
+    let (x0, x1) = (px(crop[0], f.x0, f.x0 + f.w), px(crop[2], f.x0, f.x0 + f.w));
+    let (y0, y1) = (px(crop[1], f.y0, f.y0 + f.h), px(crop[3], f.y0, f.y0 + f.h));
+    let (kx, ky) = (passage.width() as f32 / (x1 - x0) as f32, passage.height() as f32 / (y1 - y0) as f32);
+    let shown = |n: i64| if f.scale > 2.4 { ((n as f32 * 2.4 / f.scale).round() as u32).max(1) } else { n as u32 };
+    let ratio = passage.width().max(passage.height()) as f32 / shown((x1 - x0).max(y1 - y0)) as f32;
+    let blade_img = if ratio < 1.0 {
+        image::imageops::resize(&blade_img, (blade_img.width() as f32 * ratio).round().max(1.0) as u32, (blade_img.height() as f32 * ratio).round().max(1.0) as u32, image::imageops::FilterType::Lanczos3)
+    } else {
+        blade_img
+    };
+    let x = (((at.0 * f.scale).round() as i64 - x0) as f32 * kx).round() as i64;
+    let y = (((at.1 * f.scale).round() as i64 - y0) as f32 * ky).round() as i64 - blade_img.height() as i64 / 2;
     image::imageops::overlay(&mut passage, &blade_img, x, y);
     let (w, h) = (passage.width(), passage.height());
     let mut out = Vec::new();
     image::codecs::png::PngEncoder::new(&mut out).write_image(passage.as_raw(), w, h, image::ExtendedColorType::Rgb8).map_err(|e| e.to_string())?;
-    Ok((w as usize, h as usize, out))
+    Ok((w as usize, h as usize, out, crop))
+}
+
+/// With the paper-and-pastel switch: a pastel stick held over the canvas
+/// (`look --hold <stick> --at x,y [--pose force,alt,azimuth[,roll] | --side
+/// direction]`): the passage at full detail with, seen from above, the
+/// stick's low part as a light shadow, the band where its crumbs would settle
+/// tinted with its color, and where it rests on the tooth at that force in
+/// its color: where a stroke from there would lay. `--side` lays it flat
+/// across a stroke going that way (degrees). Only reads: no hand time,
+/// nothing in the log, the canvas and its wear untouched.
+fn stick_hold_look(s: &Session, name: &str, at: (f32, f32), pose: [f32; 4], v: &look::View) -> Result<(usize, usize, Vec<u8>, String), String> {
+    use image::ImageEncoder;
+    if v.size.is_some() || v.grid.is_some() || v.mirror || v.palette {
+        return Err("look --hold takes --at, --pose or --side, --crop, --mask, --mode value, squint, relief or gallery and --light, nothing else".into());
+    }
+    let (stick, turned) = s.held_stick(name)?;
+    let c = s.canvas().ok_or("no canvas yet: the first chunk is canvas{...}")?;
+    let (wu, hu) = (c.width(), c.height());
+    if !(at.0.is_finite() && at.1.is_finite() && (0.0..=wu).contains(&at.0) && (0.0..=hu).contains(&at.1)) {
+        return Err(format!("look --hold: --at {},{} is not on the canvas ({wu} x {hu} units)", at.0, at.1));
+    }
+    let half = 60.0f32;
+    let crop = v.crop.unwrap_or([(at.0 - half).max(0.0), (at.1 - half).max(0.0), (at.0 + half).min(wu), (at.1 + half).min(hu)]);
+    // (as `hold_look`: the point in the passage shown)
+    if !(crop[0] <= at.0 && at.0 <= crop[2] && crop[1] <= at.1 && at.1 <= crop[3]) {
+        return Err(format!("look --hold: --at {},{} lies outside the --crop", at.0, at.1));
+    }
+    let seen_as = look::View { crop: Some(crop), value: v.value, squint: v.squint, light: v.light, overlays: v.overlays.clone(), ..look::View::default() };
+    let (_, _, png) = look::render(&c, &seen_as)?;
+    let mut img = image::load_from_memory(&png).map_err(|e| e.to_string())?.to_rgb8();
+    let p = paint::pastel::Pose { force: pose[0], alt: pose[1].to_radians(), az: pose[2].to_radians(), roll: (turned + pose[3]).to_radians() };
+    let cells = c.stick_contact(&stick, at.0, at.1, p);
+    let f = c.window();
+    // (the passage as rendered: a crop past the canvas's edge is clipped, as in `hold_look`)
+    let px = |u: f32, lo: usize, hi: usize| ((u * f.scale).round().max(0.0) as usize).clamp(lo, hi);
+    let (cx0, cx1) = (px(crop[0], f.x0, f.x0 + f.w), px(crop[2], f.x0, f.x0 + f.w));
+    let (cy0, cy1) = (px(crop[1], f.y0, f.y0 + f.h), px(crop[3], f.y0, f.y0 + f.h));
+    let (kx, ky) = (img.width() as f32 / (cx1 - cx0) as f32, img.height() as f32 / (cy1 - cy0) as f32);
+    let mut overlay = vec![0u8; img.width() as usize * img.height() as usize];
+    let col = stick.color.map(|v| (paint::color::linear_to_srgb(v) * 255.0).round() as f32);
+    let (mut touch, mut bed) = (0usize, 0usize);
+    for &(i, k) in &cells {
+        let (x, y) = (i % f.w + f.x0, i / f.w + f.y0);
+        if x < cx0 || y < cy0 || x >= cx1 || y >= cy1 {
+            continue;
+        }
+        match k {
+            2 => touch += 1,
+            1 => bed += 1,
+            _ => {}
+        }
+        let (x0, x1) = (((x - cx0) as f32 * kx).floor() as usize, (((x + 1 - cx0) as f32 * kx).ceil() as usize).min(img.width() as usize));
+        let (y0, y1) = (((y - cy0) as f32 * ky).floor() as usize, (((y + 1 - cy0) as f32 * ky).ceil() as usize).min(img.height() as usize));
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let q = &mut overlay[y * img.width() as usize + x];
+                *q = (*q).max(k + 1);
+            }
+        }
+    }
+    for (q, k) in img.pixels_mut().zip(overlay) {
+        let (share, to): (f32, [f32; 3]) = match k {
+            3 => (1.0, col),
+            2 => (0.45, col),
+            1 => (0.22, [20.0, 20.0, 20.0]),
+            _ => continue,
+        };
+        for ch in 0..3 {
+            q[ch] = (q[ch] as f32 * (1.0 - share) + to[ch] * share).round() as u8;
+        }
+    }
+    let mm2 = c.px_mm() * c.px_mm();
+    let note = format!("touching {:.1} mm², crumbs settle over {:.1} mm² more", touch as f32 * mm2, bed as f32 * mm2);
+    let (w, h) = (img.width(), img.height());
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut out).write_image(img.as_raw(), w, h, image::ExtendedColorType::Rgb8).map_err(|e| e.to_string())?;
+    Ok((w as usize, h as usize, out, note))
 }
 
 /// Write a look as `dir/look-NNNN.png`, NNNN one above the highest there, never over a file
@@ -1014,13 +1243,16 @@ impl Server {
         validate_log(&self.name, self.written.as_deref().ok_or("session integrity: uninitialized log")?)
     }
 
-    fn resume(name: String) -> Result<Self, String> {
-        Self::resume_as(name, None)
+    /// Reopen the session `name` from its log, reporting the chunks replayed (`progress`:
+    /// done, of how many; zero first).
+    fn resume(name: String, progress: &dyn Fn(usize, usize)) -> Result<Self, String> {
+        let display = if display::enabled() { Some(std::rc::Rc::new(display::Pool::configured()?)) } else { None };
+        Self::resume_as(name, None, display, progress)
     }
 
     /// `resume`; a new session's box and width are `like`'s when given (the scratch canvas
     /// takes the painting's), else the configured box and the name's width.
-    fn resume_as(name: String, like: Option<&Session>) -> Result<Self, String> {
+    fn resume_as(name: String, like: Option<&Session>, display: Option<std::rc::Rc<display::Pool>>, progress: &dyn Fn(usize, usize)) -> Result<Self, String> {
         let lp = log_path(&name);
         #[cfg(feature = "state-store")]
         let committed = if like.is_none() && std::env::var("EASEL_STATE_SESSION").ok().as_deref() == Some(name.as_str()) {
@@ -1047,38 +1279,88 @@ impl Server {
         // configured box (session::box_for)
         let (tubes, width) = match (like, &text) {
             (Some(l), None) => ((*l.st.borrow().tubes).clone(), l.st.borrow().width),
-            _ => (session::box_for(text.as_deref())?, width_for(&name, text.as_deref())),
+            _ => (session::box_for(text.as_deref())?, width_for(&name, text.as_deref())?),
         };
+        // the state store's budgets are a 2400 px painting's (a 4800 px state is about four times as large)
+        #[cfg(feature = "state-store")]
+        if committed.is_some() && width > LIVE_WIDTH {
+            return Err(format!("EASEL_STATE_SESSION keeps paintings of {LIVE_WIDTH} px; this one is {width} px"));
+        }
         #[cfg(feature = "state-store")]
         let width = committed.as_ref().and_then(|s| s.current.as_ref()).map(|(_, m)| m.painting_width).unwrap_or(width);
         let executable = std::env::current_exe().and_then(std::fs::read).map_err(|e| format!("read build identity: {e}"))?;
-        let mut srv = Self { name, build: save::fnv1a(&executable), s: Session::with_box(width, tubes).map_err(|e| e.to_string())?, frames: false, written: None, replayed: 0, scratch: None,
+        let frames = like.is_none() && name != "scratch" && !name.ends_with("-scratch") && !name.starts_with("sketch");
+        let mut srv = Self { name, build: save::fnv1a(&executable), s: Session::with_box(width, tubes).map_err(|e| e.to_string())?, frames, replay: replay_checkpoint::Live::new(), hand_frames: None, written: None, replayed: 0, scratch: None, display,
             #[cfg(feature = "state-store")] committed,
             #[cfg(feature = "state-store")] state_failed: false,
         };
+        // the paper-and-pastel switch: a log's own; a new painting's on, a scratch canvas's
+        // its painting's
+        let paper = match &text {
+            Some(text) => session::logged_paper(text),
+            None => like.is_none_or(|s| s.st.borrow().paper),
+        };
+        srv.s.set_paper(paper).map_err(|e| e.to_string())?;
         if let Some(text) = text {
             srv.written = Some(text.clone());
-            let chunks = parse_program(&text);
-            // a failed chunk refuses the whole reopen: no snapshots, no time limit (session.rs)
-            srv.s.set_replaying(true);
-            for (i, chunk) in chunks.iter().enumerate() {
-                let t0 = Instant::now();
-                eprintln!("resuming chunk {}/{}", i + 1, chunks.len());
-                srv.s.run(chunk).map_err(|e| format!("session integrity: replay failed at chunk {}: {e}; refusing partial session", i + 1))?;
-                eprintln!("resumed chunk {}/{} {:.2}s", i + 1, chunks.len(), t0.elapsed().as_secs_f64());
-            }
-            srv.s.set_replaying(false);
-            srv.replayed = chunks.len();
-            if srv.s.program(&srv.name) != text {
-                return Err("session integrity: noncanonical or incomplete log; refusing replay".into());
-            }
-            println!("resumed {} chunks from {}", srv.s.log.len(), lp.display());
+            srv.replay_log(&text, progress)?;
             #[cfg(feature = "state-store")]
             if let Some(store) = &mut srv.committed { store.publish(&srv.s, &text).map_err(|e| format!("state integrity: {e}"))?; }
         } else {
+            srv.start_hand_frames(None)?;
             srv.save_log()?;
         }
         Ok(srv)
+    }
+
+    fn rebuild(&mut self, progress: &dyn Fn(usize, usize)) -> Result<(), String> {
+        self.validate()?;
+        let text = self.written.clone().ok_or("session integrity: uninitialized log")?;
+        let (width, paper) = { let st = self.s.st.borrow(); (st.width, st.paper) };
+        let mut fresh = Session::with_box(width, self.s.tube_box()).and_then(|s| s.with_paper(paper)).map_err(|e| e.to_string())?;
+        fresh.chunk_limit = self.s.chunk_limit;
+        self.s = fresh;
+        self.replay = replay_checkpoint::Live::new();
+        self.replay_log(&text, progress)
+    }
+
+    fn replay_log(&mut self, text: &str, progress: &dyn Fn(usize, usize)) -> Result<(), String> {
+        let chunks = parse_program(text);
+        let width = self.s.st.borrow().width;
+        progress(0, chunks.len());
+        self.s.set_replaying(true);
+        let checkpoint = session_dir(&self.name).join("replay.ckpt");
+        let resumed = self.replay.resume(&checkpoint, text, width, &mut self.s, &chunks, &self.name, progress)
+            .and_then(|done| { self.start_hand_frames(Some(done))?; Ok(done) });
+        let done = match resumed {
+            Ok(done) => done,
+            Err(e) => {
+                eprintln!("warning: replay checkpoint: {e}; replaying the full log");
+                let limit = self.s.chunk_limit;
+                self.s = Session::with_box(width, self.s.tube_box()).and_then(|s| s.with_paper(session::logged_paper(text))).map_err(|e| e.to_string())?;
+                self.s.chunk_limit = limit;
+                self.s.set_replaying(true);
+                self.replay = replay_checkpoint::Live::new();
+                self.start_hand_frames(None)?;
+                progress(0, chunks.len());
+                0
+            }
+        };
+        for (i, chunk) in chunks.iter().enumerate().skip(done) {
+            let t0 = Instant::now();
+            eprintln!("resuming chunk {}/{}", i + 1, chunks.len());
+            self.run_chunk(chunk).map_err(|e| format!("session integrity: replay failed at chunk {}: {e}; refusing partial session", i + 1))?;
+            if let Err(e) = self.record_replay() { eprintln!("warning: chunk committed, replay checkpoint/frames not saved: {e}"); }
+            eprintln!("resumed chunk {}/{} {:.2}s", i + 1, chunks.len(), t0.elapsed().as_secs_f64());
+            progress(i + 1, chunks.len());
+        }
+        self.s.set_replaying(false);
+        self.replayed = chunks.len();
+        if self.s.program(&self.name) != text {
+            return Err("session integrity: noncanonical or incomplete log; refusing replay".into());
+        }
+        println!("resumed {} chunks from {}", self.s.log.len(), log_path(&self.name).display());
+        Ok(())
     }
 
     /// Append only the new suffix. Commit the redundant witness afterward.
@@ -1086,6 +1368,7 @@ impl Server {
     fn save_log(&mut self) -> Result<String, String> {
         let p = log_path(&self.name);
         let text = self.s.program(&self.name);
+        let changed = self.written.as_deref() != Some(text.as_str());
         #[cfg(feature = "state-store")]
         if self.committed.is_some() {
             if self.written.is_some() { self.validate()?; }
@@ -1099,6 +1382,10 @@ impl Server {
                     self.state_failed = true;
                     eprintln!("state store: chunk is committed but journal export needs recovery: {e}");
                 }
+            }
+            if changed {
+                self.record_frame();
+                if let Err(e) = self.record_replay() { eprintln!("warning: chunk committed, replay checkpoint/frames not saved: {e}"); }
             }
             return Ok(String::new());
         }
@@ -1121,7 +1408,47 @@ impl Server {
         f.write_all(text.as_bytes()).and_then(|_| f.sync_all()).map_err(|e| e.to_string())?;
         std::fs::rename(pending, self.witness()).map_err(|e| e.to_string())?;
         self.written = Some(text);
+        if changed {
+            self.record_frame();
+            if let Err(e) = self.record_replay() { eprintln!("warning: chunk committed, replay checkpoint/frames not saved: {e}"); }
+        }
         Ok(String::new())
+    }
+
+    fn start_hand_frames(&mut self, done: Option<usize>) -> Result<(), String> {
+        let resume = done.map(|n| self.replay.identity(&self.s.program(&self.name), self.s.st.borrow().width).map(|identity| (n, identity))).transpose()?;
+        frames::start(60.0, session_dir(&self.name).join("hand-frames"), 1000, Some(GALLERY_LIGHT), resume)?;
+        self.hand_frames = frames::stop();
+        Ok(())
+    }
+
+    fn run_chunk(&mut self, src: &str) -> Result<session::Ran, String> {
+        let result = frames::with(&mut self.hand_frames, || self.replay.with(|| self.s.run(src)));
+        if result.is_err() {
+            self.start_hand_frames((!self.s.log.is_empty()).then_some(self.s.log.len()))?;
+        }
+        result
+    }
+
+    fn record_replay(&mut self) -> Result<(), String> {
+        let n = self.s.log.len();
+        if n == 0 { return Ok(()); }
+        let width = self.s.st.borrow().width;
+        let source = self.s.program(&self.name);
+        let identity = self.replay.identity(&source, width)?;
+        frames::with(&mut self.hand_frames, || frames::chunk_end(self.s.canvas().as_deref(), n, &identity))?;
+        self.replay.completed(&session_dir(&self.name).join("replay.ckpt"), &self.s, &source, width)
+    }
+
+    fn record_frame(&self) {
+        if !self.frames { return; }
+        let n = self.s.log.len();
+        session::PROGRESS.keep(n);
+        let st = self.s.st.borrow();
+        let Some(c) = st.canvas.as_ref() else { return };
+        if let Err(e) = live_frames::write(c, st.recording_ground, &session_dir(&self.name).join("frames"), n) {
+            eprintln!("timelapse: chunk {n} committed, frame not saved: {e}");
+        }
     }
 
     /// The live canvas as a PNG, `save`'s (`live.png`, next to the committed log), its save
@@ -1149,6 +1476,12 @@ impl Server {
         Ok(format!("the live canvas is in {}\n", png.display()))
     }
 
+    fn view(&self, args: &[String]) -> Result<look::View, String> {
+        let mut v = look::View::parse(args)?;
+        v.overlays = v.mask.iter().map(|name| self.s.mask(name)).collect::<Result<_, _>>()?;
+        Ok(v)
+    }
+
     fn look(&mut self, args: &[String], path: Option<PathBuf>) -> Result<String, String> {
         // --survey: the whole canvas at full detail, in tiles; --compare <png>: an
         // earlier look beside this one (taken out before the view's own arguments)
@@ -1165,7 +1498,8 @@ impl Server {
             let p = new_look(&session_dir(&self.name), &png.2)?;
             return Ok(format!("{} ({}x{}, {:.2}s)\n", p.display(), png.0, png.1, t0.elapsed().as_secs_f64()));
         }
-        let (mut hold, mut at) = (None::<String>, None::<String>);
+        let (mut hold, mut at, mut reference) = (None::<String>, None::<String>, None::<PathBuf>);
+        let (mut pose, mut side) = (None::<String>, None::<String>);
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
@@ -1177,9 +1511,22 @@ impl Server {
                     at = Some(args.get(i + 1).ok_or("--at needs a point on the canvas: x,y in units")?.clone());
                     i += 1;
                 }
+                "--pose" => {
+                    pose = Some(args.get(i + 1).ok_or("--pose needs force,alt,azimuth[,roll] (N, degrees)")?.clone());
+                    i += 1;
+                }
+                "--side" => {
+                    side = Some(args.get(i + 1).ok_or("--side needs the stroke's direction in degrees")?.clone());
+                    i += 1;
+                }
                 "--survey" => survey = true,
                 "--compare" => {
-                    compare = Some(PathBuf::from(args.get(i + 1).ok_or("--compare needs an earlier look's png")?));
+                    // (not a following option taken for the path)
+                    compare = Some(PathBuf::from(args.get(i + 1).filter(|a| !a.starts_with("--")).ok_or("--compare needs the path of an image in this studio")?));
+                    i += 1;
+                }
+                "--ref" => {
+                    reference = Some(PathBuf::from(args.get(i + 1).ok_or("--ref needs a picture of the motif (a file in the studio)")?));
                     i += 1;
                 }
                 a => rest.push(a.to_string()),
@@ -1188,6 +1535,20 @@ impl Server {
         }
         if survey && compare.is_some() {
             return Err("look: --survey and --compare are two looks; ask for one".into());
+        }
+        // (a pastel stick comes with the paper-and-pastel switch: without it there is none to hold)
+        let sticks = self.s.st.borrow().paper;
+        if (pose.is_some() || side.is_some()) && !sticks {
+            return Err(format!("look: --pose and --side hold a pastel stick, which needs the paper-and-pastel switch; this painting doesn't have it (its log's head has no {:?} line)", session::PAPER_MARK));
+        }
+        if (pose.is_some() || side.is_some()) && hold.is_none() {
+            return Err("look: --pose and --side hold a pastel stick: they go with --hold <stick> --at x,y".into());
+        }
+        if let Some(r) = reference {
+            if survey || compare.is_some() || hold.is_some() || at.is_some() {
+                return Err("look: --ref is a look of its own: no --survey, --compare or --hold".into());
+            }
+            return self.reference(&rest, &r);
         }
         // --hold <pile> --at x,y: the loaded knife held up to the canvas (speculative: `hold_look`)
         if hold.is_some() || at.is_some() {
@@ -1199,11 +1560,47 @@ impl Server {
             if p.len() != 2 {
                 return Err(format!("--at {at}: want x,y in units"));
             }
-            let v = look::View::parse(&rest)?;
+            let v = self.view(&rest)?;
             let t0 = Instant::now();
-            let (w, h, png) = hold_look(&self.s, &pile, (p[0], p[1]), &v)?;
+            if sticks && self.s.held_stick(&pile).is_ok() {
+                let nums = |t: &str| -> Result<Vec<f32>, String> { t.split(',').map(|x| x.trim().parse::<f32>()).collect::<Result<_, _>>().map_err(|_| format!("{t}: want numbers separated by commas")) };
+                let ps = match (&pose, &side) {
+                    (Some(_), Some(_)) => return Err("look --hold: --pose or --side, not both".into()),
+                    (Some(t), None) => {
+                        let n = nums(t)?;
+                        if !(3..=4).contains(&n.len()) {
+                            return Err("--pose force,alt,azimuth[,roll]: newtons and degrees".into());
+                        }
+                        [n[0], n[1], n[2], n.get(3).copied().unwrap_or(0.0)]
+                    }
+                    // laid flat across a stroke going that way (as p:side holds it)
+                    (None, Some(t)) => {
+                        let n = nums(t)?;
+                        if n.len() != 1 {
+                            return Err("--side: the stroke's direction, degrees".into());
+                        }
+                        [2.0, 0.0, n[0] + 90.0, 0.0]
+                    }
+                    (None, None) => [1.5, 60.0, 45.0, 0.0],
+                };
+                if !(0.0..=20.0).contains(&ps[0]) || !(0.0..=90.0).contains(&ps[1]) {
+                    return Err("--pose: force 0 to 20 N, alt 0 to 90 degrees".into());
+                }
+                if !(ps[2].is_finite() && ps[3].is_finite()) {
+                    return Err("--pose, --side: the azimuth, direction and roll are numbers (degrees)".into());
+                }
+                let (w, h, png, note) = stick_hold_look(&self.s, &pile, (p[0], p[1]), ps, &v)?;
+                let path = new_look(&session_dir(&self.name), &png)?;
+                return Ok(format!("{} ({w}x{h}, {:.2}s): {pile} held at {},{}: {note}\n", path.display(), t0.elapsed().as_secs_f64(), p[0], p[1]));
+            }
+            if pose.is_some() || side.is_some() {
+                return Err(format!("look --hold {pile}: --pose and --side hold a pastel stick, not a knife or a pile"));
+            }
+            let (w, h, png, crop) = hold_look(&self.s, &pile, (p[0], p[1]), &v)?;
             let path = new_look(&session_dir(&self.name), &png)?;
-            return Ok(format!("{} ({w}x{h}, {:.2}s): {pile} held up to the canvas at {},{}\n", path.display(), t0.elapsed().as_secs_f64(), p[0], p[1]));
+            let c = self.s.canvas().unwrap();
+            let scale = look::crop_scale(c.window(), &look::View { crop: Some(crop), ..v }, w, h)?;
+            return Ok(format!("{} ({w}x{h}, {:.2}s): {pile} held up to the canvas at {},{}{scale}\n", path.display(), t0.elapsed().as_secs_f64(), p[0], p[1]));
         }
         if survey {
             return self.survey(&rest);
@@ -1212,7 +1609,7 @@ impl Server {
             return self.compare(&rest, &prev);
         }
         let args = &rest[..];
-        let v = look::View::parse(args)?;
+        let v = self.view(args)?;
         let t0 = Instant::now();
         if v.palette {
             let (w, h, png) = palette_look(&self.s)?;
@@ -1220,6 +1617,28 @@ impl Server {
             return Ok(format!("{} ({w}x{h}, {:.2}s)\n", path.display(), t0.elapsed().as_secs_f64()));
         }
         let c = self.s.canvas().ok_or("no canvas yet: the first chunk is canvas{...}")?;
+        if let Some(pool) = &self.display && v.display_eligible() {
+            let mut reply = None;
+            pool.submit(|| {
+                let optics = c.prepare_optics();
+                let (w, h, png) = look::render_pixels(optics.frame(), &v, optics.color())?;
+                let path = match path {
+                    Some(p) => {
+                        if let Some(dir) = p.parent() {
+                            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+                        }
+                        std::fs::write(&p, &png).map_err(|e| e.to_string())?;
+                        p
+                    }
+                    None => display::new_look(&session_dir(&self.name), &png)?,
+                };
+                let scale = look::crop_scale(optics.frame(), &v, w, h)?;
+                let publication = display::Publication::new(vec![(v, path.clone())])?;
+                reply = Some(format!("{} ({w}x{h}, {:.2}s){scale}\n", path.display(), t0.elapsed().as_secs_f64()));
+                Ok(Box::new(move |cancel| publication.render(optics, cancel)))
+            })?;
+            return Ok(reply.unwrap());
+        }
         let (w, h, path) = match path {
             Some(p) => {
                 let (w, h) = look::look(&c, &v, &p)?;
@@ -1230,12 +1649,13 @@ impl Server {
                 (w, h, new_look(&session_dir(&self.name), &png)?)
             }
         };
-        let reply = format!("{} ({w}x{h}, {:.2}s)\n", path.display(), t0.elapsed().as_secs_f64());
+        let scale = look::crop_scale(c.window(), &v, w, h)?;
+        let reply = format!("{} ({w}x{h}, {:.2}s){scale}\n", path.display(), t0.elapsed().as_secs_f64());
         look::companions(&c, &[(v, path)]);
         Ok(reply)
     }
 
-    /// The whole canvas at full detail (1:1), in tiles of at most 500 units a side,
+    /// The whole canvas at full detail (2.4 px a unit, as a crop), in tiles of at most 500 units a side,
     /// in reading order; the view's modes (gallery, value...) apply to each.
     fn survey(&mut self, args: &[String]) -> Result<String, String> {
         if args.iter().any(|a| a == "--crop" || a == "--size") {
@@ -1243,33 +1663,110 @@ impl Server {
         }
         let c = self.s.canvas().ok_or("no canvas yet: the first chunk is canvas{...}")?;
         // (the canvas as it is seen, lit or not, once for all the tiles)
-        let view = look::View::parse(args)?;
+        let view = self.view(args)?;
+        let (wu, hu) = (c.width(), c.height());
+        // (a tile is at most 500 units: 1200 px as a crop is shown, the most a crop takes)
+        let cols = (wu / 500.0).ceil().max(1.0) as usize;
+        let rows = (hu / 500.0).ceil().max(1.0) as usize;
+        let (tw, th) = (wu / cols as f32, hu / rows as f32);
+        let render = |seen: &[paint::Rgb], stable: bool| -> Result<_, String> {
+            let mut out = format!("survey: {rows} rows x {cols} columns of {tw:.0} x {th:.0} units, at full detail\n");
+            let mut views = Vec::new();
+            for r in 0..rows {
+                for k in 0..cols {
+                    let crop = format!("{},{},{},{}", k as f32 * tw, r as f32 * th, (k + 1) as f32 * tw, (r + 1) as f32 * th);
+                    let mut v = view.clone();
+                    v.crop = Some([k as f32 * tw, r as f32 * th, (k + 1) as f32 * tw, (r + 1) as f32 * th]);
+                    let (w, h, png) = look::render_pixels(c.window(), &v, seen)?;
+                    let p = if stable { display::new_look(&session_dir(&self.name), &png)? } else { new_look(&session_dir(&self.name), &png)? };
+                    out += &format!("{} ({w}x{h}): row {} column {} ({crop})\n", p.display(), r + 1, k + 1);
+                    views.push((v, p));
+                }
+            }
+            Ok((out, views))
+        };
+        if let Some(pool) = &self.display && view.display_eligible() {
+            let mut reply = None;
+            pool.submit(|| {
+                let optics = c.prepare_optics();
+                let (out, views) = render(optics.color(), true)?;
+                let publication = display::Publication::new(views)?;
+                reply = Some(out);
+                Ok(Box::new(move |cancel| publication.render(optics, cancel)))
+            })?;
+            return Ok(reply.unwrap());
+        }
         let seen = match view.light {
             Some((az, el)) => c.seen_lit(az, el, 1.0),
             None => c.seen(),
         };
-        let (wu, hu) = (c.width(), c.height());
-        // (a tile is at most 500 units: 1200 px of a live canvas, the most a crop takes)
-        let cols = (wu / 500.0).ceil().max(1.0) as usize;
-        let rows = (hu / 500.0).ceil().max(1.0) as usize;
-        let (tw, th) = (wu / cols as f32, hu / rows as f32);
-        let mut out = format!("survey: {rows} rows x {cols} columns of {tw:.0} x {th:.0} units, at full detail\n");
-        let mut views = Vec::new();
-        for r in 0..rows {
-            for k in 0..cols {
-                let crop = format!("{},{},{},{}", k as f32 * tw, r as f32 * th, (k + 1) as f32 * tw, (r + 1) as f32 * th);
-                let mut a = args.to_vec();
-                a.extend(["--crop".to_string(), crop.clone()]);
-                let v = look::View::parse(&a)?;
-                let (w, h, png) = look::render_seen(&c, &v, Some(&seen))?;
-                let p = new_look(&session_dir(&self.name), &png)?;
-                out += &format!("{} ({w}x{h}): row {} column {} ({crop})\n", p.display(), r + 1, k + 1);
-                views.push((v, p));
-            }
-        }
+        let (out, views) = render(&seen, false)?;
         drop(seen);
         look::companions(&c, &views);
         Ok(out)
+    }
+
+    /// The paint at a point (`--at x,y`) or averaged over a window (`--crop x0,y0,x1,y1`), in
+    /// units: its color and value in 8-bit sRGB as a plain look and a value look show them,
+    /// the same in the gallery's light, and its drying stage (over a window, each stage's share).
+    fn probe(&self, args: &[String]) -> Result<String, String> {
+        let numbers = |s: &str, n: usize| {
+            let p: Vec<f32> = s.split(',').map(|t| t.trim().parse::<f32>()).collect::<Result<_, _>>().ok()?;
+            (p.len() == n && p.iter().all(|v| v.is_finite())).then_some(p)
+        };
+        let (place, [x0, y0, x1, y1]) = match args {
+            [a, s] if a == "--at" => {
+                let p = numbers(s, 2).ok_or(format!("probe: --at {s}: want x,y in canvas units"))?;
+                (format!("at {},{}", p[0], p[1]), [p[0], p[1], p[0], p[1]])
+            }
+            [a, s] if a == "--crop" => {
+                let p = numbers(s, 4).ok_or(format!("probe: --crop {s}: want x0,y0,x1,y1 in canvas units (opposite corners)"))?;
+                (format!("over {},{},{},{}", p[0], p[1], p[2], p[3]), [p[0].min(p[2]), p[1].min(p[3]), p[0].max(p[2]), p[1].max(p[3])])
+            }
+            _ => return Err("probe: want --at x,y or --crop x0,y0,x1,y1 (canvas units)".into()),
+        };
+        let c = self.s.canvas().ok_or("no canvas yet: the first chunk is canvas{...}")?;
+        let f = c.window();
+        // (to half a pixel: a canvas's height in units is its pixels', which needn't be round)
+        let (w, h) = (c.width(), c.height());
+        if x0 < 0.0 || y0 < 0.0 || x1 > w + 0.5 / f.scale || y1 > h + 0.5 / f.scale {
+            let round = |v: f32| (v * 100.0).round() / 100.0;
+            return Err(format!("probe: {place} is outside the canvas (0,0 to {},{})", round(w), round(h)));
+        }
+        // the pixels under the point, or every pixel the window touches
+        let span = |a: f32, b: f32, lo: usize, n: usize| {
+            let i = ((a * f.scale).floor() as usize).saturating_sub(lo).min(n - 1);
+            (i, ((b * f.scale).ceil() as usize).saturating_sub(lo).clamp(i + 1, n))
+        };
+        let ((px0, px1), (py0, py1)) = (span(x0, x1, f.x0, f.w), span(y0, y1, f.y0, f.h));
+        let (plain, lit, stages) = (c.seen(), c.seen_lit(GALLERY_LIGHT.0, GALLERY_LIGHT.1, 1.0), c.stages());
+        let (mut sums, mut counts) = ([[0.0f64; 3]; 2], [0usize; 4]);
+        for y in py0..py1 {
+            for x in px0..px1 {
+                let i = y * f.w + x;
+                for (sum, seen) in sums.iter_mut().zip([&plain, &lit]) {
+                    for q in 0..3 {
+                        sum[q] += seen[i][q] as f64;
+                    }
+                }
+                counts[stages[i] as usize] += 1;
+            }
+        }
+        let n = (px1 - px0) * (py1 - py0);
+        let level = |v: f64| (paint::color::linear_to_srgb(v as f32) * 255.0).round().clamp(0.0, 255.0) as u8;
+        let color = |sum: [f64; 3]| {
+            let rgb = sum.map(|v| v / n as f64);
+            let value = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+            format!("{},{},{} · value {}", level(rgb[0]), level(rgb[1]), level(rgb[2]), level(value))
+        };
+        let names = ["open", "setting", "tacky", "dry"];
+        let drying = if n == 1 {
+            names[counts.iter().position(|&k| k == 1).unwrap()].to_string()
+        } else {
+            names.iter().zip(counts).filter(|(_, k)| *k > 0).map(|(s, k)| format!("{s} {}%", (100.0 * k as f64 / n as f64).round())).collect::<Vec<_>>().join(", ")
+        };
+        let what = if n == 1 { place } else { format!("{place}, averaged over {} x {} pixels", px1 - px0, py1 - py0) };
+        Ok(format!("{what}\ncolor {}\nin gallery light {}\ndrying: {drying}\n", color(sums[0]), color(sums[1])))
     }
 
     /// An earlier look (left) beside the same view of the canvas now (right), at
@@ -1279,16 +1776,16 @@ impl Server {
         if !a.iter().any(|x| x == "--size" || x == "--crop") {
             a.extend(["--size".to_string(), "800".to_string()]);
         }
-        let v = look::View::parse(&a)?;
+        let v = self.view(&a)?;
         let c = self.s.canvas().ok_or("no canvas yet: the first chunk is canvas{...}")?;
         let (_, _, png) = look::render(&c, &v)?;
         let now = image::load_from_memory(&png).map_err(|e| e.to_string())?.to_rgb8();
-        // an earlier look of this studio: a picture under its folder, nothing outside it
+        // an image of this studio (usually an earlier look): a picture under its folder, nothing outside it
         let studio = root().canonicalize().map_err(|e| e.to_string())?;
         let prev = if prev.is_absolute() { prev.to_path_buf() } else { studio.join(prev) };
         let real = prev.canonicalize().map_err(|e| format!("--compare {}: {e}", prev.display()))?;
         if !real.starts_with(&studio) {
-            return Err(format!("--compare {}: an earlier look is a picture in this studio ({})", prev.display(), studio.display()));
+            return Err(format!("--compare {}: compare takes an image in this studio ({})", prev.display(), studio.display()));
         }
         let before = image::open(&real).map_err(|e| format!("--compare {}: {e}", prev.display()))?.to_rgb8();
         let h = now.height();
@@ -1305,7 +1802,77 @@ impl Server {
         let mut bytes = Vec::new();
         both.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png).map_err(|e| e.to_string())?;
         let p = new_look(&session_dir(&self.name), &bytes)?;
-        Ok(format!("{} ({}x{}): left {}, right now\n", p.display(), both.width(), h, prev.display()))
+        let scale = look::crop_scale(c.window(), &v, now.width() as usize, h as usize)?;
+        Ok(format!("{} ({}x{}): left {}, right now{scale}\n", p.display(), both.width(), h, prev.display()))
+    }
+
+    /// The motif beside the canvas, as a painter pins a photograph or a study
+    /// beside the easel: the picture (a file in the studio) fitted to the
+    /// canvas's shape (centered, cropped to its aspect), on the left; the
+    /// same view of the canvas on the right. Both go through the view's
+    /// crop, size, modes and grid alike, so a passage is set beside the same
+    /// part of the motif. It is only looked at: nothing of it reaches the
+    /// painting, its log or its randomness.
+    fn reference(&mut self, args: &[String], pic: &Path) -> Result<String, String> {
+        let mut a = args.to_vec();
+        if !a.iter().any(|x| x == "--size" || x == "--crop") {
+            a.extend(["--size".to_string(), "800".to_string()]);
+        }
+        let v = self.view(&a)?;
+        if v.palette {
+            return Err("look: --ref sets the motif beside the canvas, not the palette".into());
+        }
+        let studio = root().canonicalize().map_err(|e| e.to_string())?;
+        let pic = if pic.is_absolute() { pic.to_path_buf() } else { studio.join(pic) };
+        let real = pic.canonicalize().map_err(|e| format!("--ref {}: {e}", pic.display()))?;
+        if !real.starts_with(&studio) {
+            return Err(format!("--ref {}: the motif is a picture in this studio ({})", pic.display(), studio.display()));
+        }
+        use image::ImageDecoder;
+        let im = (|| -> image::ImageResult<image::RgbImage> {
+            let mut decoder = image::ImageReader::open(&real)?.into_decoder()?;
+            let orientation = decoder.orientation()?;
+            let mut im = image::DynamicImage::from_decoder(decoder)?;
+            im.apply_orientation(orientation);
+            Ok(im.into_rgb8())
+        })().map_err(|e| format!("--ref {}: {e}", pic.display()))?;
+        let c = self.s.canvas().ok_or("no canvas yet: the first chunk is canvas{...}")?;
+        let (f, whole) = (c.window(), c.frame());
+        // the picture fitted to the canvas's shape: scaled to cover it, centered
+        let (iw, ih) = (im.width() as f32, im.height() as f32);
+        let k = (iw / whole.w as f32).min(ih / whole.h as f32);
+        let (ox, oy) = (0.5 * (iw - k * whole.w as f32), 0.5 * (ih - k * whole.h as f32));
+        let lin: Vec<f32> = (0..=255).map(|b| paint::color::srgb_to_linear(b as f32 / 255.0)).collect();
+        let at = |x: f32, y: f32| -> [f32; 3] {
+            // (bilinear between the picture's pixels)
+            let (x, y) = ((x - 0.5).clamp(0.0, iw - 1.0), (y - 0.5).clamp(0.0, ih - 1.0));
+            let (x0, y0) = (x.floor() as u32, y.floor() as u32);
+            let (x1, y1) = ((x0 + 1).min(im.width() - 1), (y0 + 1).min(im.height() - 1));
+            let (fx, fy) = (x - x0 as f32, y - y0 as f32);
+            let p = |xx: u32, yy: u32| im.get_pixel(xx, yy).0.map(|b| lin[b as usize]);
+            let (a, b, cc, d) = (p(x0, y0), p(x1, y0), p(x0, y1), p(x1, y1));
+            [0, 1, 2].map(|q| (a[q] * (1.0 - fx) + b[q] * fx) * (1.0 - fy) + (cc[q] * (1.0 - fx) + d[q] * fx) * fy)
+        };
+        let motif: Vec<[f32; 3]> = (0..f.w * f.h)
+            .map(|i| {
+                let (x, y) = ((i % f.w + f.x0) as f32 + 0.5, (i / f.w + f.y0) as f32 + 0.5);
+                at(ox + x * k, oy + y * k)
+            })
+            .collect();
+        // (one scale for both: the size budget may shrink a busy photograph's panel)
+        let ((_, _, left), (w, h, right)) = look::render_pair(&c, &v, &motif)?;
+        let scale = look::crop_scale(f, &v, w, h)?;
+        drop(c);
+        let (l, r) = (image::load_from_memory(&left).map_err(|e| e.to_string())?.to_rgb8(), image::load_from_memory(&right).map_err(|e| e.to_string())?.to_rgb8());
+        let gap = 12;
+        let h = l.height().max(r.height());
+        let mut both = image::RgbImage::from_pixel(l.width() + gap + r.width(), h, image::Rgb([24, 24, 28]));
+        image::imageops::replace(&mut both, &l, 0, 0);
+        image::imageops::replace(&mut both, &r, (l.width() + gap) as i64, 0);
+        let mut bytes = Vec::new();
+        both.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png).map_err(|e| e.to_string())?;
+        let p = new_look(&session_dir(&self.name), &bytes)?;
+        Ok(format!("{} ({}x{}): left the motif ({}), right the canvas{scale}\n", p.display(), both.width(), h, pic.display()))
     }
 
     /// The log on disk is the one the session wrote, and holds everything it ran.
@@ -1318,11 +1885,11 @@ impl Server {
     }
 
     /// What `check` replays and compares with (check.rs runs it on its own thread).
-    #[cfg(feature = "replay")]
     fn check_input(&self) -> Result<check::Input, String> {
         self.ready()?;
         Ok(check::Input {
             width: self.s.st.borrow().width,
+            paper: self.s.st.borrow().paper,
             tubes: self.s.tube_box(),
             chunks: self.s.log.iter().map(|c| c.src.clone()).collect(),
             live: self.s.canvas().map(|a| (bits(&a.seen()), bits_f(a.surface_um()))),
@@ -1341,7 +1908,7 @@ impl Server {
         if !scratch {
             return self.serve_cmd(cmd, &args, payload);
         }
-        if !matches!(cmd, "do" | "look" | "status" | "log" | "globals" | "save") {
+        if !matches!(cmd, "do" | "look" | "probe" | "status" | "log" | "globals" | "save") {
             return Err(format!("{cmd} is the painting's: it takes no --scratch"));
         }
         self.ready()?;
@@ -1367,7 +1934,7 @@ impl Server {
     /// Run a chunk of the easel's own (not the painter's) and log it.
     fn run_own(&mut self, src: &str) -> Result<(), String> {
         self.ready()?;
-        self.s.run(src)?;
+        self.run_chunk(src)?;
         self.save_log()?;
         Ok(())
     }
@@ -1381,7 +1948,7 @@ impl Server {
         if !(log_path(&name).exists() || witness_path(&name).exists()) {
             return String::new();
         }
-        match Server::resume_as(name.clone(), Some(&self.s)) {
+        match Server::resume_as(name.clone(), Some(&self.s), self.display.clone(), &|_, _| {}) {
             Ok(sc) => {
                 self.scratch = Some(Box::new(sc));
                 String::new()
@@ -1405,7 +1972,7 @@ impl Server {
         let name = scratch_name(&self.name);
         self.scratch = None;
         let aside = put_aside(&name)?;
-        let mut sc = Server::resume_as(name, Some(&self.s))?;
+        let mut sc = Server::resume_as(name, Some(&self.s), self.display.clone(), &|_, _| {})?;
         sc.run_own(&src)?;
         self.scratch = Some(Box::new(sc));
         Ok(match aside {
@@ -1420,22 +1987,15 @@ impl Server {
             "note" => append_note(self.s.st.borrow().clock, payload),
             "status" => Ok(format!("{}\n", self.s.status())),
             "globals" => Ok(self.s.globals()),
-            "do" => match self.s.run(payload) {
+            "do" => match self.run_chunk(payload) {
                 Ok(ran) => {
                     let note = self.save_log()?;
                     let n = self.s.log.len();
+                    session::PROGRESS.keep(n);
                     let mut out = note;
                     out.push_str(&ran.out);
                     out.push_str(&format!("{}\n", time::time_of_day(self.s.st.borrow().clock)));
                     out.push_str(&format!("ok · chunk {n} ({:.2} s to compute)\n", ran.secs));
-                    // the chunk is in the log: a look that fails now is reported with it, not
-                    // as a failed `do` (which would be sent again)
-                    if self.frames {
-                        let p = session_dir(&self.name).join("frames").join(format!("{n:04}.png"));
-                        if let Err(e) = self.look(&[], Some(p)) {
-                            out.push_str(&format!("(no frame saved: {e})\n"));
-                        }
-                    }
                     if args.iter().any(|a| a == "--look") {
                         match self.look(&[], None) {
                             Ok(l) => out.push_str(&l),
@@ -1453,17 +2013,29 @@ impl Server {
                 Err(e) => Err(format!("{e}\n(the chunk failed and changed nothing)")),
             },
             "look" => self.look(args, None),
+            "probe" => self.probe(args),
             "log" => Ok(self.s.program(&self.name)),
             "save" => {
                 // save [path] [--light az,el | --gallery]: lit on the paint's relief, or color only
                 let (path, light) = save_args(args)?;
-                let p = path.unwrap_or_else(|| session_dir(&self.name).join(format!("{}.png", self.name)));
+                let p = match path {
+                    Some(p) if !p.is_absolute() => root().join(p),
+                    Some(p) => p,
+                    None => session_dir(&self.name).join(format!("{}.png", self.name)),
+                };
                 #[cfg(feature = "state-store")]
                 if let Some(store) = &self.committed {
                     store.protect_output(&p).map_err(|e| e.to_string())?;
                     if same_file(&log_path(&self.name), &p)? || same_file(&self.witness(), &p)? {
                         return Err("save output must differ from the painting's journal exports".into());
                     }
+                }
+                let p = in_studio_png(&p)?;
+                // A path inside the studio can still share an inode with a file outside it.
+                // Keep the store's more specific alias checks above this general refusal.
+                use std::os::unix::fs::MetadataExt;
+                if std::fs::metadata(&p).is_ok_and(|m| m.is_file() && m.nlink() > 1) {
+                    return Err("save: that picture has hard links: save to a new file in this studio".into());
                 }
                 let c = self.s.canvas().ok_or("no canvas yet")?;
                 #[cfg(feature = "state-store")]
@@ -1482,7 +2054,14 @@ impl Server {
             }
             "close" => {
                 let note = self.save_log()?;
+                frames::with(&mut self.hand_frames, || {
+                    if let Some(c) = self.s.canvas() { frames::finish(&c); }
+                });
+                if let Some(e) = self.hand_frames.as_ref().and_then(|r| r.err.as_ref()) {
+                    eprintln!("warning: final hand-time frame not saved: {e}");
+                }
                 let live = self.save_live().unwrap_or_else(|e| format!("the live canvas couldn't be saved: {e}\n"));
+                if let Some(pool) = &self.display { pool.flush()?; }
                 Ok(format!("{note}{live}closed; the session is in {}\n", log_path(&self.name).display()))
             }
             o => Err(format!("unknown command {o:?}")),
@@ -1490,11 +2069,9 @@ impl Server {
     }
 }
 
-#[cfg(feature = "replay")]
 fn bits(v: &[paint::Rgb]) -> Vec<u32> {
     v.iter().flat_map(|p| p.map(f32::to_bits)).collect()
 }
-#[cfg(feature = "replay")]
 fn bits_f(v: &[f32]) -> Vec<u32> {
     v.iter().map(|x| x.to_bits()).collect()
 }
@@ -1508,14 +2085,17 @@ pub const GALLERY_LIGHT: (f32, f32) = (115.0, 55.0);
 /// `light az,el` (degrees) as a pair.
 pub(crate) fn light_of(s: &str) -> Result<(f32, f32), String> {
     let p: Vec<f32> = s.split(',').map(|t| t.trim().parse::<f32>()).collect::<Result<_, _>>().map_err(|_| format!("light {s}: want azimuth,elevation in degrees"))?;
-    if p.len() != 2 || !p[0].is_finite() || !(3.0..=89.0).contains(&p[1]) {
-        return Err(format!("light {s}: want azimuth,elevation in degrees (elevation 3 to 89)"));
+    if p.len() != 2 || !p[0].is_finite() || !(0.0..=90.0).contains(&p[1]) {
+        return Err(format!("light {s}: want azimuth,elevation in degrees (elevation 0 to 90)"));
     }
     Ok((p[0], p[1]))
 }
 
 /// `save`'s arguments: an optional path, then `--light az,el` or `--gallery`.
 fn save_args(args: &[String]) -> Result<(Option<PathBuf>, Option<(f32, f32)>), String> {
+    if args.iter().any(|a| a == "--gallery") && args.iter().any(|a| a == "--light") {
+        return Err("save: --light and --gallery are two lights; give one".into());
+    }
     let (mut path, mut light) = (None, None);
     let mut i = 0;
     while i < args.len() {
@@ -1533,6 +2113,51 @@ fn save_args(args: &[String]) -> Result<(Option<PathBuf>, Option<(f32, f32)>), S
     Ok((path, light))
 }
 
+/// Where `save <path>` may write: a `.png` inside this studio (EASEL_ROOT,
+/// or the painter's studio), as `look --compare` may only read one. A
+/// relative path is the studio's. The deepest folder of it that exists must
+/// be in the studio once its links are followed, the folders below it are
+/// plain names (no `..`), and the file itself, if it is there, is no link:
+/// so stable paths cannot lead outside the studio.
+fn in_studio_png(path: &Path) -> Result<PathBuf, String> {
+    use std::path::Component;
+    let refuse = |why: &str| Err(format!("save {}: {why}", path.display()));
+    if path.extension().and_then(|e| e.to_str()).is_none_or(|e| !e.eq_ignore_ascii_case("png")) {
+        return refuse("a picture is saved as a .png");
+    }
+    let studio = root().canonicalize().map_err(|e| format!("save: the studio {}: {e}", root().display()))?;
+    let p = if path.is_absolute() { path.to_path_buf() } else { studio.join(path) };
+    // the deepest folder that exists, and the plain names below it
+    let mut base = p.parent().ok_or("save: no folder")?.to_path_buf();
+    let mut tail = Vec::new();
+    while !base.exists() {
+        let name = base.file_name().map(|n| n.to_os_string());
+        match name {
+            Some(n) => tail.push(n),
+            None => return refuse("no folder of it exists"),
+        }
+        base = base.parent().ok_or("save: no folder")?.to_path_buf();
+    }
+    if p.components().any(|c| matches!(c, Component::ParentDir)) && !tail.is_empty() {
+        return refuse("`..` in a folder that doesn't exist yet");
+    }
+    let real = base.canonicalize().map_err(|e| format!("save {}: {e}", path.display()))?;
+    if !real.starts_with(&studio) {
+        return Err(format!("save {}: a picture is saved in this studio ({})", path.display(), studio.display()));
+    }
+    let mut out = real;
+    for n in tail.into_iter().rev() {
+        out.push(n);
+    }
+    let out = out.join(p.file_name().ok_or("save: no file name")?);
+    // Check the path we will actually write: a trailing slash or `/.` may
+    // have kept symlink_metadata on the original spelling from seeing a link.
+    if std::fs::symlink_metadata(&out).is_ok_and(|m| m.file_type().is_symlink()) {
+        return refuse("that is a link: save to a picture in this studio");
+    }
+    Ok(out)
+}
+
 /// The delivered PNG: the canvas as it is seen now (wet paint as laid, no
 /// drying), 8-bit sRGB. `save` and `run` both write it.
 fn deliver(c: &Canvas, out: &Path) -> Result<(), String> {
@@ -1547,17 +2172,15 @@ fn deliver_lit(c: &Canvas, out: &Path, light: Option<(f32, f32)>) -> Result<(), 
         Some((az, el)) => c.seen_lit(az, el, 1.0),
         None => c.seen(),
     };
-    let buf: Vec<u8> = px.iter().flat_map(|p| p.map(|v| (linear_to_srgb(v) * 255.0).round().clamp(0.0, 255.0) as u8)).collect();
+    let buf = output::rgb8_exact(&px, f.w);
     if let Some(d) = out.parent() {
         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
     }
     image::save_buffer(out, &buf, f.w as u32, f.h as u32, image::ColorType::Rgb8).map_err(|e| format!("{}: {e}", out.display()))
 }
 
-#[cfg(feature = "replay")]
-const RUN_USAGE: &str = "run <file.lua> [--out path.png] [--light az,el | --gallery] [--look] [--checkpoint-out path.ckpt] [--state-digest digests.txt] [--frames-every <s> --frames-dir <dir> [--frame-width 1000]] [--width <px>] (replays at the width it was painted at, 2400px, a sketch 600px, unless --width: a smaller preview for development, not the painting)";
+const RUN_USAGE: &str = "run <file.lua> [--out path.png] [--light az,el | --gallery] [--look] [--checkpoint-out path.ckpt] [--state-digest digests.txt] [--replay-checkpoint replay.ckpt [--until-chunk N] [--for-minutes M]] [--frames-every <s> --frames-dir <dir> [--frame-width 1000]] [--width <px>] (replays at the width it was painted at, 2400px or the width its head names, a sketch 600px, unless --width: a smaller preview for development, not the painting)";
 
-#[cfg(any(feature = "replay", feature = "state-store"))]
 fn normalized_path(path: &Path) -> std::io::Result<PathBuf> {
     let absolute = std::path::absolute(path)?;
     let mut pending: std::collections::VecDeque<_> = absolute.components().map(|c| c.as_os_str().to_os_string()).collect();
@@ -1589,7 +2212,6 @@ fn normalized_path(path: &Path) -> std::io::Result<PathBuf> {
     Ok(resolved)
 }
 
-#[cfg(any(feature = "replay", feature = "state-store"))]
 fn same_file(a: &Path, b: &Path) -> Result<bool, String> {
     use std::os::unix::fs::MetadataExt;
     let resolve = |p: &Path| normalized_path(p).map_err(|e| format!("{}: {e}", p.display()));
@@ -1599,7 +2221,77 @@ fn same_file(a: &Path, b: &Path) -> Result<bool, String> {
     })
 }
 
-#[cfg(feature = "replay")]
+fn preflight_run(args: &[String], file: &Path, out: &Path, chunks: usize) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let checkpoint = flag(args, "--replay-checkpoint").map(PathBuf::from);
+    let progress = checkpoint.as_deref().unwrap_or(out).with_extension("replay-progress.json");
+    let mut outputs = vec![("source", file.to_path_buf()), ("--out", out.to_path_buf()), ("replay progress", progress)];
+    if args.iter().any(|a| a == "--look") { outputs.push(("--look", out.with_extension("look.png"))); }
+    for option in ["--checkpoint-out", "--replay-checkpoint", "--state-digest", "--dump-surface"] {
+        if let Some(p) = flag(args, option) { outputs.push((option, PathBuf::from(p))); }
+    }
+    let resolve = |p: &Path| normalized_path(p).map_err(|e| format!("{}: {e}", p.display()));
+    let mut dirs: Vec<(&str, PathBuf)> = Vec::new();
+    for option in ["--frames-dir", "--dump-state"] {
+        let Some(p) = flag(args, option) else { continue };
+        let dir = PathBuf::from(p);
+        let resolved = resolve(&dir)?;
+        for (name, path) in &outputs {
+            let path = resolve(path)?;
+            if path.starts_with(&resolved) || resolved.starts_with(&path) {
+                return Err(format!("{name} must be outside {option}"));
+            }
+        }
+        for (other, path) in &dirs {
+            if resolved.starts_with(path) || path.starts_with(&resolved) {
+                return Err(format!("{option} must be separate from {other}"));
+            }
+        }
+        dirs.push((option, resolved.clone()));
+        let mut generated = if option == "--frames-dir" {
+            vec![dir.join("frames.tsv"), dir.join("frames.states")]
+        } else {
+            (1..=chunks).map(|n| dir.join(format!("chunk-{n:03}.state"))).chain([dir.join("final.ckpt")]).collect()
+        };
+        match std::fs::read_dir(&dir) {
+            Ok(entries) => {
+                for entry in entries {
+                    let path = entry.map_err(|e| format!("{}: {e}", dir.display()))?.path();
+                    for (name, output) in &outputs {
+                        if same_file(output, &path)? {
+                            return Err(format!("{name} must not alias an output in {option}"));
+                        }
+                    }
+                    if option == "--frames-dir" && path.extension().is_some_and(|e| e == "png") && path.file_stem().and_then(|n| n.to_str()).is_some_and(|n| n.parse::<usize>().is_ok()) {
+                        generated.push(path);
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("{}: {e}", dir.display())),
+        }
+        if option == "--frames-dir" {
+            for path in &generated {
+                let target = resolve(path)?;
+                if target.parent() == Some(resolved.as_path()) && target.extension().is_some_and(|e| e == "png") && target.file_stem().and_then(|n| n.to_str()).is_some_and(|n| n.parse::<usize>().is_ok()) && target != resolved.join(path.file_name().unwrap()) {
+                    return Err(format!("{option} must differ from source, progress and outputs"));
+                }
+            }
+        }
+        outputs.extend(generated.into_iter().map(|p| (option, p)));
+    }
+    let mut paths = std::collections::BTreeSet::<PathBuf>::new();
+    let mut files = std::collections::BTreeSet::new();
+    for (name, path) in outputs {
+        let resolved = resolve(&path)?;
+        if resolved.ancestors().any(|p| paths.contains(p)) || paths.range(resolved.clone()..).next().is_some_and(|p| p.starts_with(&resolved)) || std::fs::metadata(&path).is_ok_and(|m| !files.insert((m.dev(), m.ino()))) {
+            return Err(format!("{name} must differ from source, progress and outputs"));
+        }
+        paths.insert(resolved);
+    }
+    Ok(())
+}
+
 fn run(args: &[String]) -> Result<(), String> {
     let file = args.first().filter(|a| !a.starts_with('-')).ok_or(RUN_USAGE)?;
     let mut i = 1;
@@ -1607,65 +2299,33 @@ fn run(args: &[String]) -> Result<(), String> {
         match args[i].as_str() {
             #[cfg(feature = "state-store")]
             "--state-store" | "--state-budget-mib" if i + 1 < args.len() => i += 2,
-            "--out" | "--dump-surface" | "--dump-state" | "--checkpoint-out" | "--frames-every" | "--frames-dir" | "--frame-width" | "--state-digest" | "--width" | "--light" if i + 1 < args.len() => i += 2,
+            "--out" | "--dump-surface" | "--dump-state" | "--checkpoint-out" | "--frames-every" | "--frames-dir" | "--frame-width" | "--state-digest" | "--width" | "--light" | "--replay-checkpoint" | "--until-chunk" | "--for-minutes" if i + 1 < args.len() => i += 2,
             "--look" | "--gallery" => i += 1,
             o => return Err(format!("run: unknown argument {o:?} ({RUN_USAGE})")),
         }
+    }
+    if flag(args, "--replay-checkpoint").is_some() && args.iter().any(|a| matches!(a.as_str(), "--state-store" | "--dump-state")) {
+        return Err("--replay-checkpoint cannot resume a state store or per-chunk state dumps".into());
     }
     let text = std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
     let stem = Path::new(file).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or("easel".into());
     // a development preview may replay narrower (kernel radii are in mm, so it is not the
     // painting at a smaller size: see notes/workflow.md); the painting is the width it was
-    // painted at (LIVE_WIDTH, a sketch's SKETCH_WIDTH)
+    // painted at (LIVE_WIDTH, the width its head names, a sketch's SKETCH_WIDTH)
     let width = match flag(args, "--width") {
-        None => width_for(&stem, Some(&text)),
+        None => width_for(&stem, Some(&text))?,
         Some(w) => w.parse::<usize>().ok().filter(|w| (16..=LIVE_WIDTH * 4).contains(w)).ok_or_else(|| format!("--width {w}: want px, 16 to {}", LIVE_WIDTH * 4))?,
     };
     let out = flag(args, "--out").map(PathBuf::from).unwrap_or_else(|| root().join("out/lua").join(format!("{stem}.png")));
-    if let Some(p) = flag(args, "--checkpoint-out") {
-        let path = Path::new(&p);
-        let mut outputs = vec![out.clone()];
-        for flag_name in ["--state-digest", "--dump-surface"] {
-            if let Some(p) = flag(args, flag_name) {
-                outputs.push(PathBuf::from(p));
-            }
-        }
-        if args.iter().any(|a| a == "--look") {
-            outputs.push(out.with_extension("look.png"));
-        }
-        if same_file(path, Path::new(file))? {
-            return Err("--checkpoint-out must differ from the source and every output".into());
-        }
-        for output in outputs {
-            if same_file(path, &output)? {
-                return Err("--checkpoint-out must differ from the source and every output".into());
-            }
-        }
-        for flag_name in ["--dump-state", "--frames-dir"] {
-            if let Some(d) = flag(args, flag_name) {
-                let dir = Path::new(&d);
-                let resolve = |p: &Path| normalized_path(p).map_err(|e| format!("{}: {e}", p.display()));
-                if resolve(path)?.starts_with(resolve(dir)?) {
-                    return Err(format!("--checkpoint-out must be outside {flag_name}"));
-                }
-                match std::fs::read_dir(dir) {
-                    Ok(entries) => {
-                        for entry in entries {
-                            let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
-                            if same_file(path, &entry.path())? {
-                                return Err(format!("--checkpoint-out must not alias an output in {flag_name}"));
-                            }
-                        }
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => return Err(format!("{}: {e}", dir.display())),
-                }
-            }
-        }
-    }
     let chunks = parse_program(&text);
     if chunks.is_empty() {
         return Err(format!("{file}: no chunks (each starts with a line \"{}\")", session::MARK));
+    }
+    preflight_run(args, Path::new(file), &out, chunks.len())?;
+    // the state store's budgets are a 2400 px painting's (as for a live session: resume_as)
+    #[cfg(feature = "state-store")]
+    if flag(args, "--state-store").is_some() && width > LIVE_WIDTH {
+        return Err(format!("--state-store keeps paintings of {LIVE_WIDTH} px; {file} is {width} px"));
     }
     #[cfg(feature = "state-store")]
     let mut store = match flag(args, "--state-store") {
@@ -1699,38 +2359,58 @@ fn run(args: &[String]) -> Result<(), String> {
     // hand-time frames (frames.rs): only read the canvas, so the replay is
     // the same with or without them
     // --light or --gallery: the picture (and its frames) lit on the paint's relief
+    if args.iter().any(|a| a == "--gallery") && args.iter().any(|a| a == "--light") {
+        return Err(format!("run: --light and --gallery are two lights; give one ({RUN_USAGE})"));
+    }
     let light = if args.iter().any(|a| a == "--gallery") { Some(GALLERY_LIGHT) } else { flag(args, "--light").map(|l| light_of(&l)).transpose()? };
     let frames = match (flag(args, "--frames-every"), flag(args, "--frames-dir")) {
-        (None, None) => false,
+        (None, None) => None,
         (Some(e), Some(d)) => {
             let every: f64 = e.parse().map_err(|_| format!("--frames-every {e}: want seconds of hand time"))?;
             let fw = flag(args, "--frame-width").map(|w| w.parse::<u32>().map_err(|_| format!("--frame-width {w}: want px"))).transpose()?.unwrap_or(1000);
-            frames::start(every, PathBuf::from(d), fw, light)?;
-            true
+            Some((every, PathBuf::from(d), fw))
         }
         _ => return Err(format!("run: --frames-every and --frames-dir go together ({RUN_USAGE})")),
     };
-    let mut s = Session::replay_with(width, tubes).map_err(|e| e.to_string())?;
+    let mut s = Session::replay_with(width, tubes).and_then(|s| s.with_paper(session::logged_paper(&text))).map_err(|e| e.to_string())?;
+    let mut batch = replay_checkpoint::Batch::open(args, &text, width, &mut s, &chunks, &out)?;
+    if let Some((every, dir, fw)) = frames.clone() {
+        frames::start(every, dir, fw, light, (batch.done > 0).then(|| (batch.done, batch.identity().clone())))?;
+    }
+    batch.begin()?;
+    let frames = frames.is_some();
     // --state-digest: one line of state digests after every chunk (see `state_digest_line`)
     let mut digests = flag(args, "--state-digest").map(|p| std::fs::File::create(&p).map_err(|e| format!("{p}: {e}"))).transpose()?;
+    if let (Some(file), Some(rows)) = (&mut digests, &batch.digests) {
+        for row in rows { file.write_all(row.as_bytes()).map_err(|e| e.to_string())?; }
+    }
     let t0 = Instant::now();
-    for (i, c) in chunks.iter().enumerate() {
+    for (i, c) in chunks.iter().enumerate().skip(batch.done) {
+        if batch.stopped() { break; }
+        batch.begin_chunk(i + 1)?;
         let r = s.run(c).map_err(|e| format!("chunk {} failed:\n{e}", i + 1))?;
         #[cfg(feature = "state-store")]
         if let Some(store) = &mut store { store.publish(&s, &s.program(&stem)).map_err(|e| format!("state publication after chunk {} failed: {e}", i + 1))?; }
         print!("{}", r.out);
         eprintln!("  chunk {:>3}  {:>7.2}s", i + 1, r.secs);
+        if paint::engine7::stats() {
+            eprintln!("E7CHUNK	{}	{:.6}", i + 1, r.secs);
+        }
         if let Some(f) = digests.as_mut() {
-            f.write_all(state_digest_line(&s, i + 1, r.secs).as_bytes()).map_err(|e| format!("--state-digest: {e}"))?;
+            let line = state_digest_line(&s, i + 1, r.secs);
+            f.write_all(line.as_bytes()).map_err(|e| format!("--state-digest: {e}"))?;
+            batch.digests.as_mut().unwrap().push(line);
         }
         // --dump-state <dir>: every state value after the chunk (state_dump.rs; reads only)
         if let Some(d) = flag(args, "--dump-state") {
             state_dump::write_chunk(&s, i + 1, Path::new(&d))?;
         }
-        if frames && let Some(c) = s.canvas() {
-            frames::chunk_end(&c, i + 1);
+        if frames {
+            frames::chunk_end(s.canvas().as_deref(), i + 1, batch.identity())?;
         }
+        if batch.completed(&s, i + 1)? { break; }
     }
+    if batch.done < chunks.len() { return Ok(()); }
     let paint_secs = t0.elapsed().as_secs_f64();
     if let Some(d) = flag(args, "--dump-state") {
         state_dump::write_save(&s, &text, Path::new(&d))?;
@@ -1781,10 +2461,8 @@ fn run(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(feature = "replay")]
 const RENDER_CHECKPOINT_USAGE: &str = "render-checkpoint <save.ckpt[.zst]> <out.png> [--mode color|gallery|relief] [--look] [--log painting.lua]";
 
-#[cfg(feature = "replay")]
 fn render_checkpoint(args: &[String]) -> Result<(), String> {
     let (mut files, mut mode, mut log, mut bounded) = (Vec::new(), "gallery".to_string(), None::<String>, false);
     let mut i = 0;
@@ -1835,7 +2513,7 @@ fn render_checkpoint(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(all(feature = "replay", feature = "state-store"))]
+#[cfg(feature = "state-store")]
 fn render_state(args: &[String]) -> Result<(), String> {
     let Some(dir) = args.first().filter(|s| !s.starts_with('-')) else { return Err("render-state <store directory> <out.png> [--mode color|gallery|relief] [--look]".into()) };
     let Some(out) = args.get(1).filter(|s| !s.starts_with('-')) else { return Err("render-state needs an output PNG".into()) };
@@ -1859,7 +2537,6 @@ fn render_state(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(all(feature = "replay", feature = "finish"))]
 const FINISH_USAGE: &str = "finish <save file> <out.png> [--log painting.lua] [--coats C] [--no-varnish] [--no-cracks] [--relief]
        finish --print-chunk [--coats C] [--no-varnish] [--no-cracks] [--relief]";
 
@@ -1867,7 +2544,6 @@ const FINISH_USAGE: &str = "finish <save file> <out.png> [--log painting.lua] [-
 /// save.rs) into a fresh session, run the finishing chunk scripts/finish_painting builds
 /// (finish.rs `chunk`) and write the PNG, without replaying the log. With `--log`, the save
 /// must be of that log (its hash and chunk count). `--print-chunk` prints the chunk only.
-#[cfg(all(feature = "replay", feature = "finish"))]
 fn finish_cmd(args: &[String]) -> Result<(), String> {
     let (mut coats, mut varnish, mut cracks, mut relief) = ("0.4".to_string(), true, true, false);
     let (mut print_chunk, mut log, mut files) = (false, None::<String>, Vec::new());
@@ -1905,6 +2581,12 @@ fn finish_cmd(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
     let [save, out] = files.as_slice() else { return Err(FINISH_USAGE.into()) };
+    if same_file(Path::new(save), Path::new(out))? {
+        return Err("finish output must differ from the save and source log".into());
+    }
+    if let Some(l) = &log && same_file(Path::new(l), Path::new(out))? {
+        return Err("finish output must differ from the save and source log".into());
+    }
     let t0 = Instant::now();
     let r = save::read(Path::new(save))?;
     if let Some(l) = &log {
@@ -1928,7 +2610,6 @@ fn finish_cmd(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(feature = "replay")]
 use save::fnv1a;
 
 /// `run --state-digest`'s line for the state after chunk `n` (which took
@@ -1959,7 +2640,6 @@ use save::fnv1a;
 /// surface, film floors of past strokes) that checkpoints leave out too.
 /// The format is fixed (recorded goldens depend on it): a field added to
 /// `Held`, `Hand` or the checkpoint changes the digests.
-#[cfg(feature = "replay")]
 fn state_digest_line(s: &Session, n: usize, secs: f64) -> String {
     let mut st = s.st.borrow_mut();
     let canvas = match st.canvas.as_ref() {
@@ -1984,286 +2664,105 @@ fn state_digest_line(s: &Session, n: usize, secs: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A motif for `look --ref` is often a photograph: the easel reads JPEG
+    /// as well as PNG.
     #[test]
-    fn a_long_session_dir_gets_a_short_socket() {
-        use std::os::unix::fs::MetadataExt;
-        let short = std::path::Path::new("/s/out/easel/p");
-        assert_eq!(super::short_sock(short), short.join("sock"));
-        // under a directory this test makes, so its nearest existing ancestor is this
-        // user's (the temp dir itself may be root's, as /tmp is on Linux)
-        let mine = std::env::temp_dir().join(format!("easel-long-test-{}", std::process::id()));
-        std::fs::create_dir_all(&mine).unwrap();
-        let long = mine.join("d".repeat(120)).join("out/easel/p");
-        let s = super::short_sock(&long);
-        assert!(s.as_os_str().len() < 100, "{s:?}");
-        let private = std::fs::symlink_metadata(s.parent().unwrap()).unwrap();
-        assert!(private.is_dir() && private.mode() & 0o077 == 0, "the socket's directory is private");
-        assert_eq!(s, super::short_sock(&long), "the same directory, the same socket");
-        // The private <tmp>/easel-<uid> it made stays: it is the one live servers use,
-        // and removing it under a running easel would take its socket away.
-        std::fs::remove_dir(&mine).unwrap();
-    }
-    #[test]
-    fn a_shared_socket_dir_is_not_used() {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let d = std::env::temp_dir().join(format!("easel-shared-test-{}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
-        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o777)).unwrap();
-        let me = std::fs::metadata(&d).unwrap().uid();
-        assert!(!super::private_dir(&d, me), "open to others");
-        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(super::private_dir(&d, me));
-        assert!(!super::private_dir(&d, me.wrapping_add(1)), "another user's");
-        let link = d.with_extension("link");
-        let _ = std::fs::remove_file(&link);
-        std::os::unix::fs::symlink(&d, &link).unwrap();
-        assert!(!super::private_dir(&link, me), "a symlink");
-        std::fs::remove_file(&link).unwrap();
-        std::fs::remove_dir(&d).unwrap();
+    fn a_jpeg_motif_can_be_read() {
+        let im = image::RgbImage::from_fn(16, 12, |x, y| image::Rgb([(x * 16) as u8, (y * 20) as u8, 128]));
+        let mut jpg = Vec::new();
+        im.write_to(&mut std::io::Cursor::new(&mut jpg), image::ImageFormat::Jpeg).unwrap();
+        let back = image::load_from_memory(&jpg).unwrap().to_rgb8();
+        assert_eq!(back.dimensions(), (16, 12));
     }
     use super::*;
 
-    /// A stray look numbered at the top of u64 leaves no number above it: the look is
-    /// refused, not a panic (debug) or a wrap back to look-0000 (release).
+    /// A pastel stick held up (with the paper-and-pastel switch) only reads, as the held
+    /// knife: the state digest, the log and the clock are as they were, and the stick's
+    /// wear in the Lua heap too. It tints the passage where the stick would touch and says
+    /// how much; laid on its side it touches more, and its face lies near the paper over
+    /// much more.
     #[test]
-    fn a_look_above_the_last_number_is_refused() {
-        let dir = std::env::temp_dir().join(format!("easel-look-top-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(format!("look-{}.png", u64::MAX)), b"stray").unwrap();
-        let r = std::panic::catch_unwind(|| new_look(&dir, b"png"));
-        let names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
-        let _ = std::fs::remove_dir_all(&dir);
-        let r = r.expect("new_look panicked");
-        assert!(r.as_ref().is_err_and(|e| e.contains("look")), "{r:?}");
-        assert_eq!(names.len(), 1, "a look was written: {names:?}");
-    }
-
-    #[test]
-    fn orphaned_companion_names_are_never_reused_for_a_new_look() {
-        for preset in look::DISPLAY_PRESETS {
-            let dir = std::env::temp_dir().join(format!("easel-look-orphan-{}-{}", preset.name, std::process::id()));
-            std::fs::create_dir_all(dir.join(preset.folder)).unwrap();
-            std::fs::write(dir.join(preset.folder).join("look-0007.png"), b"old companion").unwrap();
-            let path = new_look(&dir, b"new primary").unwrap();
-            assert_eq!(path.file_name().unwrap(), "look-0008.png");
-            assert_eq!(std::fs::read(&path).unwrap(), b"new primary");
-            assert!(!dir.join(preset.folder).join(path.file_name().unwrap()).exists());
-            std::fs::remove_dir_all(dir).unwrap();
-        }
-    }
-
-    /// The lock-on-stdin signal is for this server only: once read it leaves the
-    /// environment, so no child the server ever starts takes it (or its stdin) as the lock.
-    #[test]
-    fn the_lock_on_stdin_signal_is_not_passed_on() {
-        // SAFETY: no other test reads or writes this variable
-        unsafe { std::env::set_var(LOCK_ON_STDIN, "1") };
-        // stdin here is no lock file: refused, but the signal is read all the same
-        let r = serve_lock("lock-signal-test");
-        assert!(r.is_err(), "a test's stdin was taken as the lock");
-        assert_eq!(std::env::var_os(LOCK_ON_STDIN), None, "{LOCK_ON_STDIN} is still set");
-    }
-
-    /// A request is served from its length line, even when the client's end of file never
-    /// comes (macOS sometimes loses a half-close; the server then waited for it until the
-    /// client was killed). The client here keeps its socket open, as a lost end of file looks.
-    #[test]
-    fn a_request_is_read_without_the_clients_end_of_file() {
-        let (mut client, mut server) = UnixStream::pair().unwrap();
-        server.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-        // more than a socket buffer holds: the client writes while the server reads
-        let payload = "-- ünïcode\n".repeat(2000);
-        let sent = payload.clone();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let t = std::thread::spawn(move || {
-            send_request(&mut client, b"do\n", sent.as_bytes()).unwrap();
-            // keep the socket open until the server has read: no end of file
-            let _ = done_rx.recv();
-            drop(client);
-        });
-        let req = read_request(&mut server).expect("the server waited for an end of file");
-        done_tx.send(()).unwrap();
-        t.join().unwrap();
-        assert_eq!(req, [b"do\n".as_slice(), payload.as_bytes()].concat());
-    }
-
-    #[test]
-    fn a_request_from_an_older_client_is_refused_with_a_reason() {
-        let (mut client, mut server) = UnixStream::pair().unwrap();
-        client.write_all(b"status\n").unwrap();
-        let e = read_request(&mut server).unwrap_err();
-        assert!(e.contains("different versions"), "{e}");
-    }
-
-    const PALETTE_CANVAS: &str = r#"canvas{size=300, aspect=1.25, seed=3, linen=15, ground={{pile={{"lead white", 4}, {"red earth", 1}}, um=80, apply="knife"}}}"#;
-
-    /// The held knife (speculative) only reads, as the palette look: the state digest, the
-    /// log, the globals and the clock are as they were. It shows the passage with a knife
-    /// over it at the point: a knife global with its own load, or a pile freshly loaded.
-    #[cfg(feature = "replay")]
-    #[test]
-    fn a_held_knife_shows_its_paint_over_the_passage_and_changes_nothing() {
-        let mut s = Session::new(1000).unwrap();
-        s.run(PALETTE_CANVAS).unwrap();
-        s.run(r#"skyP = pile{{"lead white", 6}, {"smalt", 1}, medium=0.2}; dk = pile{{"raw umber", 2}, {"bone black", 1}}
-                 b = brush("filbert", 8); b:load(skyP, 0.8); b:stroke({{100, 300}, {700, 340}})
-                 k = knife{width=40}; k:load(dk, 0.8); clean = knife{width=20}"#).unwrap();
-        let before = (state_digest_line(&s, 2, 0.0), s.program("t"), s.globals(), s.st.borrow().clock);
+    fn a_held_stick_shows_where_it_would_touch_and_changes_nothing() {
+        let mut s = Session::new(1000).unwrap().with_paper(true).unwrap();
+        s.run(r#"canvas{size=200, aspect=1.25, seed=3, paper={grammage=200}}"#).unwrap();
+        s.run(r#"P = {glow = pastel(pile{{"vermilion", 1}}, {kind="soft"})}"#).unwrap();
+        let before = (state_digest_line(&s, 2, 0.0), s.program("t"), s.st.borrow().clock);
         let plain = look::View::default();
-        let at = (400.0, 320.0);
-        let rgb = |png: &[u8]| image::load_from_memory(png).unwrap().to_rgb8();
-        let (w, h, png) = hold_look(&s, "k", at, &plain).unwrap();
-        // the passage is 240 units square: at this canvas's one px a unit, 240 px (give or take a rounded edge)
-        assert!((239..=241).contains(&w) && (239..=241).contains(&h), "{w} x {h}");
-        let side = w.min(h);
-        let held = rgb(&png);
-        // the same passage without the knife: the same left of the point, another picture right of it
-        let bare = rgb(&look::render(&s.canvas().unwrap(), &look::View { crop: Some([at.0 - HOLD_HALF, at.1 - HOLD_HALF, at.0 + HOLD_HALF, at.1 + HOLD_HALF]), ..look::View::default() }).unwrap().2);
-        let mid = (side / 2) as u32;
-        assert!((0..mid - 1).all(|x| (0..side as u32).all(|y| held.get_pixel(x, y) == bare.get_pixel(x, y))), "the passage left of the point is untouched");
-        let covered = (mid..side as u32).flat_map(|x| (0..side as u32).map(move |y| (x, y))).filter(|&(x, y)| held.get_pixel(x, y) != bare.get_pixel(x, y)).count();
-        assert!(covered > 100, "the blade covers {covered} pixels");
-        // the dark paint is on the blade: some of it much darker than the steel
-        let darkest = (mid..side as u32).map(|x| held.get_pixel(x, mid).0.iter().map(|&v| v as u32).sum::<u32>()).min().unwrap();
-        assert!(darkest < 200, "the darkest of the blade's middle row sums to {darkest}");
-        // a pile by its name is a fresh load; in grays the blade is gray too
-        hold_look(&s, "skyP", at, &plain).unwrap();
-        // The render clamps an out-of-bounds crop; blade placement uses the
-        // same origin, so it matches the explicitly clamped crop exactly.
-        let edge = (100.0, 100.0);
-        let outside = hold_look(&s, "k", edge, &look::View { crop: Some([-50.0, -50.0, 200.0, 200.0]), ..look::View::default() }).unwrap();
-        let clamped = hold_look(&s, "k", edge, &look::View { crop: Some([0.0, 0.0, 200.0, 200.0]), ..look::View::default() }).unwrap();
-        assert!(outside == clamped, "crop clipping cannot move the held blade");
-        let gray = rgb(&hold_look(&s, "k", at, &look::View { value: true, ..look::View::default() }).unwrap().2);
-        assert!((mid..side as u32).all(|x| { let p = gray.get_pixel(x, mid).0; p[0] == p[1] && p[1] == p[2] }));
-        // (kept for the eye: target/easel-look-test/held-knife.png)
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/easel-look-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("held-knife.png"), &png).unwrap();
-        let after = (state_digest_line(&s, 2, 0.0), s.program("t"), s.globals(), s.st.borrow().clock);
-        assert_eq!(before, after);
-        s.run("assert(k:fullness() > 0)").unwrap();
-        s.run("k:wipe(); k:load(dk, 0.01)").unwrap();
-        assert!((s.held("k").unwrap().2 - 0.01).abs() < 1e-5,
-            "the preview must preserve a nearly empty knife's load");
-        s.run(r#"skyP = pile{{"lead white", 1}, thinner=0.4}
-            skyP:add{{"lead white", 1}}
-            k:wipe(); k:load(skyP, 0.5)"#).unwrap();
-        assert!((s.held("skyP").unwrap().0.thinner - 0.2).abs() < 1e-5,
-            "a palette preview must use the current diluted thinner share");
-        assert!((s.held("k").unwrap().0.thinner - 0.2).abs() < 1e-5,
-            "a knife preview must retain the blade's carried solvent share");
-        // what it refuses: a clean knife, a name that holds neither, a point off the canvas or the crop, a view of its own
-        assert!(hold_look(&s, "clean", at, &plain).unwrap_err().contains("the knife is clean"));
-        let e = hold_look(&s, "nope", at, &plain).unwrap_err();
-        assert!(e.contains("no global of that name holds a knife or a pile") && e.contains("clean, dk, k, skyP"), "{e}");
-        assert!(hold_look(&s, "k", (1400.0, 320.0), &plain).unwrap_err().contains("not on the canvas"));
-        assert!(hold_look(&s, "k", (f32::NAN, 320.0), &plain).unwrap_err().contains("not on the canvas"));
-        assert!(hold_look(&s, "k", at, &look::View { crop: Some([0.0, 0.0, 100.0, 100.0]), ..look::View::default() }).unwrap_err().contains("outside the --crop"));
-        assert!(hold_look(&s, "k", at, &look::View { mirror: true, ..look::View::default() }).is_err());
-    }
-
-    /// A palette look only reads: the state digest (canvas, brushes, studio), the log and the
-    /// globals are the same before and after it, and it puts no time on the clock.
-    #[test]
-    #[cfg(tube_box)]
-    fn a_palette_look_changes_nothing() {
-        let mut s = Session::new(320).unwrap();
-        s.run(PALETTE_CANVAS).unwrap();
-        s.run(r#"skyP = pile{{"lead white", 6}, {"smalt", 1}, medium=0.2}; dk = pile{{"raw umber", 2}, {"bone black", 1}}
-                 b = brush("filbert", 8); b:load(skyP, 0.8); b:stroke({{100, 300}, {700, 340}})"#).unwrap();
-        let before = (state_digest_line(&s, 2, 0.0), s.program("t"), s.globals(), s.st.borrow().clock);
-        let (w, h, png) = palette_look(&s).unwrap();
-        assert!(w > 0 && h > 0 && png.starts_with(b"\x89PNG"));
-        assert_eq!(s.piles().iter().map(|p| p.0.as_str()).collect::<Vec<_>>(), ["dk", "skyP"]);
-        let after = (state_digest_line(&s, 2, 0.0), s.program("t"), s.globals(), s.st.borrow().clock);
-        assert_eq!(before, after);
-        // and the next chunk runs as it would have without the look
-        let mut t = Session::new(320).unwrap();
-        for c in &s.log {
-            t.run(&c.src).unwrap();
-        }
-        s.run("b:stroke({{100, 500}, {700, 520}})").unwrap();
-        t.run("b:stroke({{100, 500}, {700, 520}})").unwrap();
-        assert_eq!(state_digest_line(&s, 3, 0.0), state_digest_line(&t, 3, 0.0));
-    }
-
-    /// The palette's thick swatch is what `work` lays thick with that pile: within 2/255 of
-    /// the wet paint's mean in the middle of a heavily covered patch, for a few piles (one
-    /// test each, so they run side by side: together they took 11 s).
-    #[test]
-    #[cfg(tube_box)]
-    fn the_thick_swatch_matches_paint_laid_thick() {
-        thick_swatch_matches(r#"{"lead white", 6}, {"smalt", 1}, medium=0.2"#);
+        let at = (500.0, 400.0);
+        let (stick, turned) = s.held_stick("P.glow").unwrap();
+        assert_eq!(turned, 0.0);
+        let (w, h, png, note) = stick_hold_look(&s, "P.glow", at, [1.5, 60.0, 45.0, 0.0], &plain).unwrap();
+        let bare = look::render(&s.canvas().unwrap(), &look::View { crop: Some([at.0 - 60.0, at.1 - 60.0, at.0 + 60.0, at.1 + 60.0]), ..look::View::default() }).unwrap();
+        assert_eq!((w, h), (bare.0, bare.1));
+        let (held, bare) = (image::load_from_memory(&png).unwrap().to_rgb8(), image::load_from_memory(&bare.2).unwrap().to_rgb8());
+        // (the vermilion where it touches: redder than the paper)
+        let red = held.pixels().zip(bare.pixels()).filter(|(a, b)| a[0] as i32 - a[2] as i32 > b[0] as i32 - b[2] as i32 + 40).count();
+        assert!(red > 0, "the stick's contact shows in its color");
+        let touch = |note: &str| note.strip_prefix("touching ").and_then(|t| t.split(' ').next()).and_then(|t| t.parse::<f32>().ok()).unwrap();
+        assert!(touch(&note) > 0.0 && note.contains("crumbs settle over"), "{note}");
+        let (.., flat) = stick_hold_look(&s, "P.glow", at, [2.0, 0.0, 135.0, 0.0], &plain).unwrap();
+        // (laid flat, its face lies near the paper over much more: it rests on the highest fibers only)
+        let bed = |note: &str| note.split("settle over ").nth(1).and_then(|t| t.split(' ').next()).and_then(|t| t.parse::<f32>().ok()).unwrap();
+        assert!(touch(&flat) > touch(&note) && bed(&flat) > 3.0 * bed(&note), "on its side it covers more: {flat} vs {note}");
+        assert_eq!(before, (state_digest_line(&s, 2, 0.0), s.program("t"), s.st.borrow().clock));
+        assert_eq!(s.held_stick("P.glow").unwrap().0, stick, "no wear");
+        assert!(s.held_stick("nope").unwrap_err().contains("holds no pastel stick"));
+        assert!(stick_hold_look(&s, "P.glow", (1400.0, 400.0), [1.5, 60.0, 45.0, 0.0], &plain).unwrap_err().contains("not on the canvas"));
+        assert!(stick_hold_look(&s, "P.glow", at, [1.5, 60.0, 45.0, 0.0], &look::View { mirror: true, ..look::View::default() }).is_err());
     }
 
     #[test]
-    #[cfg(tube_box)]
-    fn the_thick_swatch_matches_paint_laid_thick_dark() {
-        thick_swatch_matches(r#"{"raw umber", 2}, {"bone black", 1}"#);
+    fn a_held_stick_keeps_masks_and_scaled_contact() {
+        let mut s = Session::new(4800).unwrap().with_paper(true).unwrap();
+        let c = Canvas::new_window(4800, 1.25, [0.8; 3], Some(paint::Crop { units: [400.0, 300.0, 600.0, 500.0], margin: 0.0 }))
+            .with_size_mm(200.0).with_paper(paint::paper::Paper::drawing(3));
+        let mask = std::sync::Arc::new(paint::Mask::from_fn(c.frame(), |_, _| 1.0));
+        s.st.borrow_mut().canvas = Some(c);
+        s.run(r#"p = pastel(pile{{"vermilion", 1}}, {kind="soft"})"#).unwrap();
+        let crop = [440.0, 340.0, 560.0, 460.0];
+        let v = look::View { crop: Some(crop), overlays: vec![mask], ..look::View::default() };
+        let c = s.canvas().unwrap();
+        let (stick, _) = s.held_stick("p").unwrap();
+        let pose = paint::pastel::Pose { force: 1.5, alt: 60f32.to_radians(), az: 45f32.to_radians(), roll: 0.0 };
+        let cells = c.stick_contact(&stick, 500.0, 400.0, pose);
+        let (touch, bed) = (cells.iter().filter(|(_, k)| *k == 2).count(), cells.iter().filter(|(_, k)| *k == 1).count());
+        let f = c.window();
+        let (x0, y0) = ((crop[0] * f.scale).round() as usize, (crop[1] * f.scale).round() as usize);
+        let expected: std::collections::BTreeSet<_> = cells.iter().filter(|(_, k)| *k == 2)
+            .map(|(i, _)| (((i % f.w + f.x0 - x0) / 2) as u32, ((i / f.w + f.y0 - y0) / 2) as u32)).collect();
+        let mm2 = c.px_mm().powi(2);
+        let bare = look::render(&c, &v).unwrap();
+        let plain = look::render(&c, &look::View { crop: Some(crop), ..look::View::default() }).unwrap();
+        drop(c);
+        let (w, h, png, note) = stick_hold_look(&s, "p", (500.0, 400.0), [1.5, 60.0, 45.0, 0.0], &v).unwrap();
+        assert_eq!((w, h), (288, 288));
+        assert_eq!(note, format!("touching {:.1} mm², crumbs settle over {:.1} mm² more", touch as f32 * mm2, bed as f32 * mm2));
+        let held = image::load_from_memory(&png).unwrap().to_rgb8();
+        let bare = image::load_from_memory(&bare.2).unwrap().to_rgb8();
+        let plain = image::load_from_memory(&plain.2).unwrap().to_rgb8();
+        assert_eq!(held.get_pixel(0, 0), bare.get_pixel(0, 0));
+        assert_ne!(held.get_pixel(0, 0), plain.get_pixel(0, 0));
+        let color = stick.color.map(|v| (paint::color::linear_to_srgb(v) * 255.0).round() as u8);
+        let contact: std::collections::BTreeSet<_> = held.enumerate_pixels().filter(|(_, _, p)| p.0 == color).map(|(x, y, _)| (x, y)).collect();
+        assert!(!contact.is_empty(), "the contact stays visible after downsampling");
+        assert_eq!(contact, expected, "the resized contact covers its source footprint");
     }
 
     #[test]
-    #[cfg(tube_box)]
-    fn the_thick_swatch_matches_paint_laid_thick_earths() {
-        thick_swatch_matches(r#"{"yellow ochre", 3}, {"red earth", 1}, {"lead white", 2}"#);
-    }
-
-    #[cfg(tube_box)]
-    fn thick_swatch_matches(recipe: &str) {
-        let srgb = |c: paint::Rgb| c.map(|v| linear_to_srgb(v) * 255.0);
-        {
-            let mut s = Session::new(320).unwrap();
-            s.run(PALETTE_CANVAS).unwrap();
-            s.run(&format!(r#"p = pile{{{recipe}}}; work(rect(200, 200, 800, 600), {{hand="body", pile=p, coverage=6}})"#)).unwrap();
-            let (_, _, paint) = s.piles().into_iter().find(|p| p.0 == "p").unwrap();
-            let ground = s.ground_color().unwrap();
-            let want = srgb(look::swatches(&paint, ground)[0]);
-            let c = s.canvas().unwrap();
-            let f = c.window();
-            let seen = c.seen();
-            let mut acc = [0.0f64; 3];
-            let mut n = 0.0;
-            for y in (f.h * 3 / 8)..(f.h * 5 / 8) {
-                for x in (f.w * 3 / 8)..(f.w * 5 / 8) {
-                    for q in 0..3 {
-                        acc[q] += seen[y * f.w + x][q] as f64;
-                    }
-                    n += 1.0;
-                }
-            }
-            let got = srgb(acc.map(|v| (v / n) as f32));
-            for q in 0..3 {
-                assert!((got[q] - want[q]).abs() <= 2.0, "{recipe}: laid {got:?}, swatch {want:?}");
+    fn reference_looks_do_not_bypass_stick_pose_gating() {
+        for paper in [false, true] {
+            let mut server = Server {
+                name: "test".into(), build: 0, s: Session::new(160).unwrap().with_paper(paper).unwrap(),
+                frames: false, written: None, replayed: 0, scratch: None, display: None,
+                replay: replay_checkpoint::Live::new(), hand_frames: None,
+                #[cfg(feature = "state-store")] committed: None,
+                #[cfg(feature = "state-store")] state_failed: false,
+            };
+            for flag in ["--pose", "--side"] {
+                let args = ["--ref", "missing.jpg", flag, "garbage"].map(String::from);
+                let e = server.look(&args, None).unwrap_err();
+                assert!(e.contains(if paper { "go with --hold" } else { "paper-and-pastel switch" }), "{e}");
             }
         }
-    }
-
-    #[test]
-    fn journal_entries_are_dated_lines() {
-        assert_eq!(journal_entry(907.5, "first line\nsecond\n\nthird\n"), "- day 2, 00:07: first line\n  second\n\n  third\n");
-    }
-
-    #[test]
-    fn save_takes_a_path_and_a_light() {
-        let args = |a: &[&str]| save_args(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-        assert_eq!(args(&[]), Ok((None, None)));
-        assert_eq!(args(&["a.png"]), Ok((Some(PathBuf::from("a.png")), None)));
-        assert_eq!(args(&["a.png", "--gallery"]), Ok((Some(PathBuf::from("a.png")), Some(GALLERY_LIGHT))));
-        assert_eq!(args(&["--light", "135,25", "a.png"]), Ok((Some(PathBuf::from("a.png")), Some((135.0, 25.0)))));
-        for bad in [&["--light"][..], &["--light", "135"], &["--light", "135,91"], &["--light", "nan,25"], &["--light", "inf,25"], &["a.png", "b.png"], &["--lit"]] {
-            assert!(args(bad).is_err(), "{bad:?}");
-        }
-    }
-
-    /// A new session is a sketch by its name; a log by what its head says.
-    #[test]
-    fn a_log_replays_at_the_width_it_was_painted_at() {
-        assert_eq!(width_for("sketch-1", None), session::SKETCH_WIDTH);
-        assert_eq!(width_for("painting", None), LIVE_WIDTH);
-        let head = |mark: &str| format!("-- easel session\n--@ engine 4\n{mark}\n--@ chunk 1\ncanvas{{}}\n");
-        assert_eq!(width_for("renamed", Some(&head(session::SKETCH_MARK))), session::SKETCH_WIDTH);
-        assert_eq!(width_for("sketchbook", Some(&head(""))), LIVE_WIDTH);
     }
 }

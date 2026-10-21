@@ -16,7 +16,7 @@ sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
 
 import export_static as E
 import studio as S
-from test_studio import PAINTER, home, line, look, png_of, say, start
+from test_studio import PAINTER, call, export, home, line, look, png_of, result, say, start
 
 OTHER = "paint-studio-def456"
 TITLE = 'Barn & "Sky" <west>'
@@ -83,10 +83,15 @@ def site(exported):
             responses.append((self.path, code))
 
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Handler, directory=str(exported)))
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    yield f"http://127.0.0.1:{server.server_port}", requests, responses
-    server.shutdown()
-    server.server_close()
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", requests, responses
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=1)
+        assert not thread.is_alive()
 
 
 @pytest.fixture
@@ -95,6 +100,45 @@ def browser():
         browser = p.chromium.launch()
         yield browser
         browser.close()
+
+
+def test_static_reexport_refreshes_rewound_source_with_the_same_epoch(browser, site, exported, home):
+    root, studio, log = home
+    snapshots = []
+    for code in ("local old=1", "local new=2"):
+        log.write_text(start(str(studio)) + call("c1", code) + result("c1", "ok") + say("Done"))
+        run = export(root, exported)
+        assert run.returncode == 0, run.stderr
+        snapshots.append(json.loads((exported / "data" / PAINTER / "events.json").read_text()))
+    before, after = snapshots
+    assert before["epoch"] == after["epoch"] == 0
+    paint = next(i for i, e in enumerate(before["events"]) if e["kind"] == "paint")
+    assert before["events"][paint]["code"] == "local old=1"
+    assert after["events"][paint]["code"] == "local new=2"
+    expected = json.loads(json.dumps(before))
+    expected["events"][paint]["code"] = "local new=2"
+    assert after == expected
+    base, _, _ = site
+    page = browser.new_page()
+    page.set_default_timeout(5000)
+    current = before
+    page.route("**/events.json", lambda route: route.fulfill(json=current))
+    page.goto(base + f"/studio/?p={PAINTER}")
+    page.wait_for_function("events.length > 0")
+    page.locator("#scrub").evaluate("""(el, i) => {
+      el.value = String(i); el.dispatchEvent(new Event('input', {bubbles:true}));
+    }""", paint)
+    page.wait_for_function("/local old\\s*=\\s*1/.test(document.querySelector('#code').textContent)")
+    generation = page.evaluate("gen")
+    revision = page.evaluate("replayRevision")
+    current = after
+    page.evaluate("async () => { lastStatic = 0; await poll(); }")
+    assert page.evaluate("i => events[i].code", paint) == "local new=2"
+    page.wait_for_function("/local new\\s*=\\s*2/.test(document.querySelector('#code').textContent)")
+    assert "old" not in page.locator("#code").text_content()
+    assert page.evaluate("[pos, live, epoch, gen]") == [paint, False, 0, generation]
+    assert page.evaluate("replayRevision") > revision
+    page.close()
 
 
 @pytest.mark.parametrize("path,painter,title,model,width,height", [
@@ -115,6 +159,9 @@ def test_returned_canvas_and_header_survive_delayed_metadata_then_become_interac
     assert static_page.locator("#clockbox").is_hidden()
     assert static_page.locator("#img").evaluate("e => e.naturalWidth > 0")
     assert static_page.locator("#img").get_attribute("src") == f"/studio/data/{painter}/v/0.jpg"
+    assert static_page.locator("#img").get_attribute("tabindex") == "0"
+    assert static_page.locator("#img").get_attribute("role") == "button"
+    assert static_page.locator("#img").get_attribute("aria-label") == "Open the painting at full size"
     plain.close()
     context = browser.new_context(viewport={"width": width, "height": height})
     context.set_default_timeout(5000)
@@ -150,6 +197,25 @@ def test_returned_canvas_and_header_survive_delayed_metadata_then_become_interac
     page.wait_for_function("document.querySelector('#who .t').textContent === 'Gallery title'")
     assert page.locator("#finished").get_attribute("href") == "/painting/test/"
     context.close()
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_static_header_says_live_only_when_the_picker_card_is_working(browser, site, active):
+    base, _, _ = site
+    page = browser.new_page()
+    page.set_default_timeout(5000)
+    now = datetime(2026, 9, 29, 10, 1, tzinfo=timezone.utc)
+    page.clock.install(time=now)
+    sessions = [dict(p=PAINTER, painter=True, title="Selected", model="gpt-6.1-sol", mtime=now.timestamp(),
+                     active=active, look=0, said=True)]
+    page.route("**/paintings.json", lambda route: route.fulfill(json=[]))
+    page.route("**/data/sessions.json", lambda route: route.fulfill(json=sessions))
+    page.goto(base + f"/studio/?p={PAINTER}", wait_until="domcontentloaded")
+    page.wait_for_function("sessionsLoaded")
+    page.clock.run_for(1000)
+    assert ("painting now" in page.locator("#pklist .pks").first.text_content()) == active
+    assert (page.locator("#badge").inner_text() == "LIVE") == active
+    page.close()
 
 
 def test_unchanged_picker_survives_revalidation_and_time_changes(browser, site):
@@ -198,11 +264,30 @@ def test_unchanged_picker_survives_revalidation_and_time_changes(browser, site):
     page.close()
 
 
+def test_denied_storage_still_loads_the_static_viewer_and_takes_its_writes(browser, site):
+    base, requests, _ = site
+    context = browser.new_context(viewport={"width": 1280, "height": 720})
+    context.set_default_timeout(5000)
+    context.add_init_script("Object.defineProperty(window, 'localStorage', { get() { throw new DOMException('denied', 'SecurityError'); } })")
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.goto(base + "/studio/", wait_until="domcontentloaded")
+    page.wait_for_function("document.querySelector('#pklist button') !== null")
+    assert any(url.startswith("/studio/data/sessions.json") for url, _ in requests)
+    page.evaluate("document.getElementById('all').click()")
+    page.locator("#introok").click()
+    assert page.locator("#intro").is_hidden()
+    assert errors == []
+    context.close()
+
+
 def test_sessions_revalidation_reuses_the_unchanged_http_body(browser, site):
     base, requests, responses = site
     page = browser.new_page()
     page.clock.install()
     page.goto(base + f"/studio/?p={PAINTER}")
+    page.wait_for_function("sessionsLoaded")
     with page.expect_response(lambda r: r.url.endswith("/data/sessions.json")):
         page.clock.fast_forward(30001)
     session_headers = [h for path, h in requests if path == "/studio/data/sessions.json"]

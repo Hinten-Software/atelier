@@ -144,8 +144,9 @@ def runner_key(path, key):
 
 
 def lanes():
-    """paint-studio-... -> (round, lane, painter number, painters in the lane, outcome), from the runners'
-    studio lists (reread every 30 s)."""
+    """paint-studio-... -> (round, lane, painter number, painters in the lane, outcome, the title in the closing
+    reply the runner copied to p<n>_final.txt once there is an outcome), from the runners' studio lists (reread
+    every 30 s)."""
     import time
     if time.time() - _lanes["at"] > 30:
         m = {}
@@ -181,7 +182,14 @@ def lanes():
                             outcome = {"status": "finished", "reason": reason.strip()}
                     except OSError:
                         pass
-                m[studio] = (rnd, lane, number, size, outcome)
+                title = None
+                if outcome:
+                    try:
+                        with open(os.path.join(rd, f"p{number}_final.txt"), errors="replace") as fh:
+                            title = title_of(fh.read())
+                    except OSError:
+                        pass
+                m[studio] = (rnd, lane, number, size, outcome, title)
         _lanes.update(at=time.time(), map=m)
     return _lanes["map"]
 
@@ -290,13 +298,14 @@ def list_sessions():
                                     "files": [i["path"]], "mtime": i["mtime"], "size": i["size"]})
             continue
         if PAINTER.match(name):
+            numbers = sitting_numbers(fs)
             models = []
             for i in info:
                 if i["model"] and i["model"] not in models:
                     models.append(i["model"])
-            rnd, lane, n, size, outcome = lanes().get(name, ("", "", 0, 0, None))
+            rnd, lane, n, size, outcome, _ = lanes().get(name, ("", "", 0, 0, None, None))
             out.append({"p": name, "folder": name, "painter": True, "model": " → ".join(models),
-                        "sittings": sum(_glance_file(f)["worked"] for f in fs),
+                        "sittings": max(numbers, default=0), "sitting_numbers": numbers,
                         "thinking": session_thinking(fs[-1]), **about_brief(name),
                         "round": rnd, "lane": lane, "n": n, "chain": size if size > 1 else 0,
                         "outcome": outcome,
@@ -338,12 +347,12 @@ def parse(path):
 
 def _parse(path):
     # changed: indices of events whose result came in after them, in arrival order (see stream())
-    c = _cache.setdefault(path, {"offset": 0, "events": [], "images": [], "lights": {light: {} for light in DISPLAY_LIGHTS}, "calls": {}, "changed": [], "cwd": ""})
+    c = _cache.setdefault(path, {"offset": 0, "events": [], "images": [], "lights": {light: {} for light in DISPLAY_LIGHTS}, "display": {}, "calls": {}, "changed": [], "cwd": ""})
     stat = os.stat(path)
     size = stat.st_size
     stamp = (stat.st_dev, stat.st_ino, stat.st_mtime_ns)
     if size < c["offset"] or c.get("stamp") and (stamp[:2] != c["stamp"][:2] or size <= c.get("size", 0) and stamp != c["stamp"]):
-        c.update(offset=0, events=[], images=[], lights={light: {} for light in DISPLAY_LIGHTS}, calls={}, changed=[], cwd="")
+        c.update(offset=0, events=[], images=[], lights={light: {} for light in DISPLAY_LIGHTS}, display={}, calls={}, changed=[], cwd="")
         c["generation"] = c.get("generation", 0) + 1
         c.pop("sig", None)
     c.update(stamp=stamp, size=size)
@@ -400,6 +409,10 @@ def _parse(path):
                         ev.update(kind="look", text=look_text(a))
                     elif name == "note":
                         ev.update(kind="jnote", text=a.get("text", ""))
+                    elif name == "notebook":
+                        ev.update(kind="notebook", text=a.get("text", ""))
+                    elif name == "ask_critic":
+                        ev.update(kind="critic", text=a.get("note", ""))
                     else:
                         ev.update(text=json.dumps(a)[:300])
                     c["calls"][x.get("id")] = len(c["events"])
@@ -413,7 +426,9 @@ def _parse(path):
                         r"^a (?:fresh scratch canvas|scratch canvas beside the painting)|\(the scratch canvas couldn't be reopened, so it is put aside\)", txt, re.M):
                     ev["scratch_reset"] = True
                 if txt:
-                    ev["out"] = txt[-1500:]
+                    ev["out"] = txt if ev["kind"] == "critic" else txt[-1500:]
+                    if ev["kind"] == "look" and STICK_HELD.search(txt):
+                        ev["held"] = "stick"
                 if m.get("isError"):
                     ev["err"] = True
                 c["changed"].append(parent)
@@ -428,10 +443,15 @@ def _parse(path):
                     display_path = ""
                     if parent is not None and c["events"][parent]["kind"] == "look":
                         ev["look"] = c["events"][parent]["text"]  # what the painter asked to see (see is_whole)
+                        if c["events"][parent].get("held"):
+                            ev["held"] = c["events"][parent]["held"]
                         if picture_n < len(picture_paths):
                             display_path = picture_paths[picture_n]
                     elif parent is not None and c["events"][parent]["kind"] == "read" and not c["events"][parent].get("ref"):
                         display_path = src
+                    if display_path and display_status(c["cwd"], display_path) is not None:
+                        ev["display_pending"] = True
+                        c["display"][idx] = (len(c["events"]), display_path)
                     for light in DISPLAY_LIGHTS:
                         lit = display_companion_path(c["cwd"], display_path, light) if display_path else None
                         if lit:
@@ -453,6 +473,19 @@ def _parse(path):
                 if clock:
                     ev["clock"] = clock
                 c["events"].append(ev)
+    for idx, (event, display_path) in list(c["display"].items()):
+        status = display_status(c["cwd"], display_path)
+        if status == b"failed\n":
+            del c["display"][idx]
+            continue
+        paths = {light: display_companion_path(c["cwd"], display_path, light) for light in DISPLAY_LIGHTS}
+        if status == b"ready\n" and all(paths.values()):
+            for light, companion in paths.items():
+                c["lights"][light][idx] = (companion, None, None)
+                c["events"][event][light] = True
+            c["events"][event]["display_pending"] = False
+            c["changed"].append(event)
+            del c["display"][idx]
     if not any(e["kind"] == "look" for e in c["events"]):
         mark_whole(c, path)
     return c["events"], c["images"]
@@ -470,6 +503,20 @@ def session_lines(path, c):
             yield at, line
 
 
+def display_status(cwd, path):
+    if not cwd or not path:
+        return None
+    original = os.path.realpath(os.path.join(cwd, path))
+    if not original.startswith(os.path.realpath(cwd) + os.sep):
+        return None
+    marker = os.path.join(os.path.dirname(original), ".display", os.path.basename(original))
+    try:
+        with open(marker, "rb") as fh:
+            return fh.read(16)
+    except OSError:
+        return b"pending\n" if os.path.lexists(marker) else None
+
+
 def display_companion_path(cwd, path, light):
     if not cwd or light not in DISPLAY_LIGHTS:
         return None
@@ -477,20 +524,14 @@ def display_companion_path(cwd, path, light):
     companion = os.path.realpath(os.path.join(os.path.dirname(original), "." + light, os.path.basename(original)))
     if not companion.startswith(os.path.realpath(cwd) + os.sep):
         return None
+    if display_status(cwd, path) not in (None, b"ready\n"):
+        return None
     try:
         with open(companion, "rb") as fh:
             header = fh.read(8)
         return companion if header == b"\x89PNG\r\n\x1a\n" else None
     except OSError:
         return None
-
-
-def display_companion(cwd, path, light):
-    companion = display_companion_path(cwd, path, light)
-    if companion:
-        with open(companion, "rb") as fh:
-            return fh.read()
-    return None
 
 
 def _signature(data):
@@ -639,13 +680,20 @@ def look_text(args):
     return ", ".join(f"{k} {v}" for k, v in args.items())
 
 
+# a look's reply when it held a pastel stick over the canvas ("<look> (WxH, 0.12s): P.glow held at 400,300: <what
+# it shows>", main.rs), not a knife or a pile ("... held up to the canvas at 400,300"): the request alone can't tell,
+# a stick held without pose or side taking the easel's default pose
+STICK_HELD = re.compile(r"\): .+ held at -?[0-9.]+,-?[0-9.]+: ")
+
+
 def is_whole(look):
     """A look request that shows the whole canvas as it is: no crop, no mode (value, squint, mirror), no light,
-    not the palette, not a survey's tile, not a comparison, not a held knife and not the scratch canvas."""
+    not the palette, not a survey's tile, not a comparison, not a held knife or stick, not the motif pinned beside it and not
+    the scratch canvas."""
     if look is None:
         return False
     look = re.sub(r"mode (?:normal|color)(?:\s*,\s*(?:normal|color))*(?=, [a-z]+ |$)", "", look)
-    return not re.search(r"crop|mode|light|compare|hold|(?:palette|survey|scratch) (?!False)", look)
+    return not re.search(r"crop|mode|light|compare|hold|(?:^|, )(?:ref|mask) |(?:palette|survey|scratch) (?!False)", look)
 
 
 # a closing reply that begins with the painting's title: "**The Silent Shore**", "### *Hünengrab im Abendlicht* (...)",
@@ -693,6 +741,12 @@ def title_of_closings(says):
     return next((t for t in map(title_of, reversed(says)) if t), None)
 
 
+def runner_title(painter):
+    """The title in a finished painter's closing reply as its runner recorded it, for a session that ends in later
+    words (an agy painter's interview after the painting); None without a runner outcome."""
+    return lanes().get(painter, (None,) * 6)[5]
+
+
 REFERENCE = object()  # in a glance's calls: a read of a reference picture
 _warm = None  # the server's first scan of every painter for the picker: set when done (None: scan on request)
 _glances = {}  # path -> what the picker needs from one session file, read incrementally without keeping images
@@ -704,14 +758,18 @@ GLANCE_CACHE_SIZE = 256
 
 def _glance_file(path):
     """One session file, scanned from where the last scan stopped: its image count, its newest whole look and its
-    last picture (each as (index in the file, byte offset of the line, which image in the line)) and its last words.
-    Images are counted as parse() counts them, so the indices match the stream's. Reference pictures (read from
-    the studio's reference/) are counted but are never the whole look or the last picture."""
+    last picture from before the look tool (each as (index in the file, byte offset of the line, which image in the
+    line)) and its last words. Images are counted as parse() counts them, so the indices match the stream's.
+    Reference pictures (read from the studio's reference/) are counted but are never the whole look or the last
+    picture; nor are a look's other pictures (a survey's tile, a comparison, a held knife)."""
     with _lock("g:" + path):
         g = _glances.get(path)
-        size = os.path.getsize(path)
-        if not g or size < g["offset"]:
-            g = _glances[path] = {"offset": 0, "calls": {}, "n": 0, "whole": None, "last": None, "whole_version": None, "last_version": None, "say": "", "cwd": "", "worked": False}
+        stat = os.stat(path)
+        size = stat.st_size
+        stamp = (stat.st_dev, stat.st_ino, stat.st_mtime_ns)
+        if not g or size < g["offset"] or stamp[:2] != g["stamp"][:2] or size <= g["size"] and stamp != g["stamp"]:
+            g = _glances[path] = {"offset": 0, "calls": {}, "n": 0, "whole": None, "last": None, "whole_version": None, "last_version": None, "pending": [], "say": "", "cwd": "", "worked": False, "concepts": False}
+        g.update(stamp=stamp, size=size)
         with open(path, "rb") as fh:
             fh.seek(g["offset"])
             while True:
@@ -727,6 +785,8 @@ def _glance_file(path):
                     g["cwd"] = d.get("cwd", "")
                 m = (d.get("message") or {}) if d.get("type") == "message" else {}
                 content = m.get("content")
+                if m.get("role") == "user" and "Use write_concepts" in _text(content or []):
+                    g["concepts"] = True
                 if not isinstance(content, list):
                     continue
                 if m.get("role") == "assistant":
@@ -735,6 +795,8 @@ def _glance_file(path):
                             g["say"] = x["text"]
                             g["worked"] = True
                         elif x.get("type") == "toolCall":  # a look's request; REFERENCE for a read from reference/
+                            if x.get("name") == "write_concepts":
+                                g["concepts"] = True
                             if x.get("name") and x["name"] not in ("look", "read", "status", "log"):
                                 g["worked"] = True
                             a = x.get("arguments") or {}
@@ -743,22 +805,48 @@ def _glance_file(path):
                                                        else None)
                 elif m.get("role") == "toolResult":
                     look, k = g["calls"].get(m.get("toolCallId")), 0
+                    paths = re.findall(r"^(.+\.png)(?: \(.*)?$", _text(content), re.MULTILINE)
                     for x in content:
                         if x.get("type") == "image" and x.get("data"):
-                            if look is None:
-                                g["last"] = (g["n"], at, k)
-                                g["last_version"] = hashlib.sha256(x["data"].encode()).hexdigest()
-                            elif look is not REFERENCE and is_whole(look):
-                                g["whole"] = (g["n"], at, k)
-                                g["whole_version"] = hashlib.sha256(x["data"].encode()).hexdigest()
+                            field = "last" if look is None else "whole" if look is not REFERENCE and is_whole(look) else None
+                            if field:
+                                version = hashlib.sha256(x["data"].encode()).hexdigest()
+                                display_path = paths[k] if k < len(paths) else ""
+                                candidate = (g["n"], at, k)
+                                if display_status(g["cwd"], display_path) is None:
+                                    g[field], g[field + "_version"] = candidate, version
+                                else:
+                                    g["pending"].append((field, candidate, version, display_path))
                             g["n"] += 1
                             k += 1
+        for pending in list(g["pending"]):
+            field, candidate, version, display_path = pending
+            status = display_status(g["cwd"], display_path)
+            if status == b"ready\n" and all(display_companion_path(g["cwd"], display_path, light) for light in DISPLAY_LIGHTS):
+                if g[field] is None or candidate[0] > g[field][0]:
+                    g[field], g[field + "_version"] = candidate, version
+                g["pending"].remove(pending)
+            elif status == b"failed\n":
+                g["pending"].remove(pending)
+        if g["concepts"]:
+            g["worked"] = False
         return g
+
+
+def sitting_numbers(files):
+    """Each session's sitting number, or zero for concepts and startup-only sessions."""
+    numbers, n = [], 0
+    for f in files:
+        worked = _glance_file(f)["worked"]
+        n += worked
+        numbers.append(n if worked else 0)
+    return numbers
 
 
 def glance(files):
     """A painter's picture and title for the picker: {"look": its newest whole look (or, before the look tool, the
-    last picture it saw; never a reference picture; None if it has seen none of its own) as a stream image index,
+    last picture it read; never a reference picture or a look's other pictures; None if it has seen none of its own)
+    as a stream image index,
     "title": from its last words or None}, and where that look's bytes are, for /api/glance."""
     gs, base, look, src, last, lsrc = [_glance_file(f) for f in files], 0, None, None, None, None
     version, last_version = None, None
@@ -815,7 +903,7 @@ def _hhmm(ts):
 
 def stream(key, files):
     """The events of several session files (a painter's sittings) as one stream, in start
-    order, with a {"kind": "sitting"} event before each sitting after the first. Image
+    order, with a {"kind": "sitting"} event before each counted sitting. Image
     indices are renumbered to be unique across files. Built incrementally: each file is
     parsed from where it stopped, and only the new events are appended. If an earlier
     part changes (it shouldn't: a sitting ends before the next begins) the stream is
@@ -825,6 +913,7 @@ def stream(key, files):
     with _lock("s:" + key):
         st = _streams.get(key)
         parsed = [parse(f) for f in files]
+        numbers = sitting_numbers(files)
         parts = [(f, len(ev), len(im)) for f, (ev, im) in zip(files, parsed)]
         generations = [_cache[f].get("generation", 0) for f in files]
         if st:
@@ -832,7 +921,8 @@ def stream(key, files):
             same = (len(old) <= len(parts) and all(o[0] == n[0] for o, n in zip(old, parts))
                     and all(o == n for o, n in zip(old[:-1], parts))
                     and (not old or parts[len(old) - 1][1] >= old[-1][1] and parts[len(old) - 1][2] >= old[-1][2]))
-            if not same or st.get("generations", []) != generations[:len(old)]:
+            if (not same or st.get("generations", []) != generations[:len(old)]
+                    or st.get("sitting_numbers", []) != numbers[:len(old)]):
                 st = {"epoch": st["epoch"] + 1, "parts": [], "events": [], "base": [], "chg": [], "updates": []}
         else:
             st = {"epoch": STREAM_EPOCH, "parts": [], "events": [], "base": [], "chg": [], "updates": []}
@@ -841,9 +931,9 @@ def stream(key, files):
         for k, (f, n, ni) in enumerate(parts):
             ev = parsed[k][0]
             seen = old[k][1] if k < len(old) else 0
-            if seen == 0 and n and k > 0:
-                st["events"].append({"ts": ev[0]["ts"], "kind": "sitting", "n": k + 1,
-                                     "text": f"sitting {k + 1} · {_hhmm(ev[0]['ts'])}"})
+            if seen == 0 and n and numbers[k]:
+                st["events"].append({"ts": ev[0]["ts"], "kind": "sitting", "n": numbers[k],
+                                     "text": f"sitting {numbers[k]} · {_hhmm(ev[0]['ts'])}"})
             if k == len(st["base"]):
                 st["base"].append(len(st["events"]))  # where this file's events begin in the stream
             if k == len(st["chg"]):
@@ -851,6 +941,8 @@ def stream(key, files):
             changed = _cache[f]["changed"]
             for j in changed[st["chg"][k]:]:
                 if j < seen:  # already sent without its result
+                    e = ev[j]
+                    st["events"][st["base"][k] + j] = dict(e, img=e["img"] + ioff) if e["kind"] == "image" else e
                     st["updates"].append(st["base"][k] + j)
             st["chg"][k] = len(changed)
             for e in ev[seen:n]:
@@ -858,17 +950,20 @@ def stream(key, files):
             ioff += ni
         st["parts"] = parts
         st["generations"] = generations
+        st["sitting_numbers"] = numbers
+        st["sittings"] = max(numbers, default=0)
         return st
 
 
 # the painting sources of painters whose folder is gone (a round's worktree, removed), by folder name
-ARCHIVE = os.path.join(os.path.dirname(HERE), "archive", "sources")
+ARCHIVE = os.path.join(os.path.expanduser(os.environ.get("STILLWET_PAINTINGS", "~/src/a/stillwet-paintings")),
+                       "other", "claude-paint", "sources")
 
 
 def painting_sources(events):
     """The folder to read the painting's source files from and those files, relative to it: the ones
     the page may ask for. The folder is the painter's (its last start) or, once that is gone,
-    archive/sources/<its name>. The files: paintings/lua/painting.lua, paintings/lua/scratch.lua once the
+    stillwet-paintings/other/claude-paint/sources/<its name>. The files: paintings/lua/painting.lua, paintings/lua/scratch.lua once the
     painter paints there and, from the events, every .lua
     under paintings/lua/ and .rs under paintings/ the painter wrote or edited or rendered with
     `cargo paint <bin>`. Nothing else in the folder (the brief, notes, bin/, settings) is served."""
@@ -933,12 +1028,6 @@ def image_bytes(st, i, light=None):
     return None
 
 
-def image(st, i, light=None):
-    """Compatibility view of image i: (mime, base64 data), or None."""
-    im = image_bytes(st, i, light)
-    return (im[0], base64.b64encode(im[1]).decode()) if im else None
-
-
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -983,7 +1072,7 @@ class H(http.server.BaseHTTPRequestHandler):
                 s["epoch"] = STREAM_EPOCH
                 if s.get("painter") and (_warm is None or _warm.is_set()):  # (until the first scan is done, without)  # the picker's picture and title (the static export has them in sessions.json)
                     g = glance(s["files"])
-                    s.update(look=g["look"], title=g["title"], thumb_version=g["version"])
+                    s.update(look=g["look"], title=g["title"] or runner_title(s["p"]), thumb_version=g["version"])
             if PUBLIC:
                 ss = [{k: v for k, v in s.items() if k != "files"} for s in ss if s.get("painter")]
             return self._send(200, json.dumps(ss).encode(), "application/json")
@@ -1011,7 +1100,7 @@ class H(http.server.BaseHTTPRequestHandler):
             u = int(q.get("u", ["0"])[0]) if q.get("epoch", [""])[0] == str(st["epoch"]) else 0
             ups = [[i, ev[i]] for i in st["updates"][u:] if i < since]
             return self._send(200, json.dumps({"events": ev[since:], "total": len(ev), "epoch": st["epoch"],
-                                               "sittings": sum(_glance_file(f)["worked"] for f in files), "updates": ups,
+                                               "sittings": st["sittings"], "updates": ups,
                                                "nupdates": len(st["updates"])}).encode(), "application/json")
         if u.path == "/api/file":  # the painting's current source, from the painter's folder
             cwd, rels = painting_sources(st["events"])

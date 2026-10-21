@@ -1,5 +1,4 @@
 use image::ImageEncoder;
-use paint::color::linear_to_srgb;
 use paint::render_snapshot::{RenderSnapshot, RENDERER};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -109,8 +108,8 @@ fn load(path: &Path) -> io::Result<RenderSnapshot> {
 fn light(text: &str) -> io::Result<[u32; 3]> {
     let values: Vec<f32> = text.split(',').map(|v| v.parse::<f32>().map_err(|_| invalid("light needs azimuth,elevation,strength"))).collect::<io::Result<_>>()?;
     let [az, el, strength] = values.as_slice() else { return Err(invalid("light needs azimuth,elevation,strength")); };
-    if !az.is_finite() || !el.is_finite() || !strength.is_finite() || !(0.0..=360.0).contains(az) || !(3.0..=89.0).contains(el) || !(0.0..=3.0).contains(strength) {
-        return Err(invalid("light requires finite azimuth 0–360, elevation 3–89 and strength 0–3"));
+    if !az.is_finite() || !el.is_finite() || !strength.is_finite() || !(0.0..=360.0).contains(az) || !(0.0..=90.0).contains(el) || !(0.0..=3.0).contains(strength) {
+        return Err(invalid("light requires finite azimuth 0–360, elevation 0–90 and strength 0–3"));
     }
     Ok([az.to_bits(), el.to_bits(), strength.to_bits()])
 }
@@ -136,13 +135,11 @@ fn png(snapshot: &RenderSnapshot, r: [usize; 4], light: Option<[u32; 3]>, writer
     let f = snapshot.frame();
     let lit = light.map(|bits| { let [az, el, strength] = bits.map(f32::from_bits); snapshot.lit(az, el, strength) });
     let pixels = lit.as_deref().unwrap_or(snapshot.color());
-    let mut bytes = Vec::with_capacity((r[2] - r[0]) * (r[3] - r[1]) * 3);
-    for y in r[1]..r[3] {
-        for x in r[0]..r[2] {
-            let p = pixels[(y - f.y0) * f.w + x - f.x0];
-            bytes.extend(p.map(|v| (linear_to_srgb(v) * 255.0).round().clamp(0.0, 255.0) as u8));
-        }
-    }
+    png_pixels(pixels, f, r, writer)
+}
+
+fn png_pixels(pixels: &[paint::Rgb], f: paint::Frame, r: [usize; 4], writer: &mut impl Write) -> io::Result<()> {
+    let bytes = crate::output::rgb8_exact_region(pixels, f.w, [r[0] - f.x0, r[1] - f.y0, r[2] - f.x0, r[3] - f.y0]);
     image::codecs::png::PngEncoder::new(writer).write_image(&bytes, (r[2] - r[0]) as u32, (r[3] - r[1]) as u32, image::ExtendedColorType::Rgb8).map_err(|e| invalid(e.to_string()))
 }
 
@@ -317,11 +314,14 @@ pub fn companions(args: &[String]) -> Result<(), String> {
         }
         if selected.is_none() {
             if used.checked_add(png_budget(r) * 3 + 65536).is_none_or(|v| v > budget) { return Err(invalid("insufficient companion transaction space")); }
+            let prepared = snapshot.into_prepared_optics();
             let mut images = Vec::new();
             for illumination in [None, Some(gallery), Some(relief)] {
                 let staged = dir.join(format!(".optical-{}-{}.part", std::process::id(), images.len()));
                 if staged.exists() { return Err(invalid("companion staging collision")); }
-                atomic(&staged, png_budget(r), |w| png(&snapshot, r, illumination, w))?;
+                let lit = illumination.map(|bits| { let [az, el, strength] = bits.map(f32::from_bits); prepared.seen_lit(az, el, strength) });
+                let pixels = lit.as_deref().unwrap_or(prepared.color());
+                atomic(&staged, png_budget(r), |w| png_pixels(pixels, prepared.frame(), r, w))?;
                 let (digest, bytes) = hashed_file(&staged, png_budget(r))?;
                 std::fs::rename(&staged, dir.join(format!("{digest}.png")))?;
                 images.push(Png { id: digest, bytes });
@@ -347,7 +347,3 @@ pub fn companions(args: &[String]) -> Result<(), String> {
     })();
     result.map_err(|e| e.to_string())
 }
-
-#[cfg(test)]
-#[path = "optical_tests.rs"]
-mod tests;

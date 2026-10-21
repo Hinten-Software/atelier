@@ -28,6 +28,11 @@
 //! nothing new is kept on the canvas: the rag's own state is the `Rag` the
 //! caller holds.
 //!
+//! With the rag lift switch (`Canvas::with_rag_lift`, engine 7) the face
+//! keeps all it lifts: nothing is smeared back, so a loaded face lifts less
+//! and lays nothing down. A wipe over a mask lifts only inside the mask, by
+//! the mask's value, wherever the pad's rim reaches.
+//!
 //! In a crop render the rag sees only the window's paint, so its load (and
 //! what later strokes lift) can differ a little from the whole canvas's,
 //! as a brush's pick-up does.
@@ -175,11 +180,15 @@ const END_MM: f32 = 8.0;
 /// the rag's load [E].
 const SOAK: f32 = 0.35;
 const SMEAR: f32 = 0.2;
+/// A face loaded this far is full: it lifts almost nothing more (its
+/// thirst is under a tenth and its room a twentieth of a clean face's).
+/// With the rag lift switch the easel says so when a wipe starts on one.
+pub const FULL: f32 = 0.95;
 
 /// Paint at the cloth's surface during one wipe (engine 3, `SMEAR`):
 /// coats × pixels, its mean color, hiding and cure, and its solvent (µm ×
 /// pixels).
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct Pool {
     vol: f32,
     lat: crate::wet::Latent,
@@ -194,7 +203,8 @@ struct Pool {
 /// already. mm³ of paint, its mean color, hiding and cure, mm³ of solvent,
 /// and when it was last brought up to date: minutes of painting time
 /// (`Canvas::now_min`) and hand seconds (`Tally::secs`).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
+#[cfg_attr(feature = "replay-effects", derive(serde::Serialize, serde::Deserialize))]
 pub struct Mobile {
     pub mm3: f32,
     pub lat: crate::wet::Latent,
@@ -203,6 +213,25 @@ pub struct Mobile {
     pub solv_mm3: f32,
     pub at_min: f64,
     pub at_secs: f64,
+}
+
+impl std::fmt::Debug for Mobile {
+    /// As derived, but the paint's properties without the pigment's packing
+    /// (`Prop`'s last five) while it carries none: a rag on a canvas without
+    /// the drain switch, which lifts only the first five (`rag_contact`),
+    /// prints as it always did (`easel run --state-digest` hashes it).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let n = if self.hide[5..].iter().all(|&v| v == 0.0) { 5 } else { self.hide.len() };
+        f.debug_struct("Mobile")
+            .field("mm3", &self.mm3)
+            .field("lat", &self.lat)
+            .field("hide", &&self.hide[..n])
+            .field("cure", &self.cure)
+            .field("solv_mm3", &self.solv_mm3)
+            .field("at_min", &self.at_min)
+            .field("at_secs", &self.at_secs)
+            .finish()
+    }
 }
 
 /// One contact of the pad (`rag_contact`): how long it lasts (s) and how
@@ -237,7 +266,8 @@ struct Seg {
 /// 1 dipped well, as of `wet_at`; refolding preserves this dampness, and
 /// spirits evaporate, `DAMP_HALF_MIN`), the fold in use, and its own
 /// randomness (the cloth's creases).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "replay-effects", derive(serde::Serialize, serde::Deserialize))]
 pub struct Rag {
     pub width: f32,
     pub load: f32,
@@ -304,7 +334,7 @@ impl Rag {
     /// How damp the face in use is at `now_min` (`evaporate`), without
     /// changing the rag.
     pub fn damp_at(&self, now_min: f64) -> f32 {
-        let mut r = *self;
+        let mut r = self.clone();
         r.evaporate(now_min);
         r.damp
     }
@@ -608,13 +638,18 @@ impl Canvas {
             for &(i, take) in &asks[k0..k1] {
                 let take = take * scale;
                 if take > 0.0 {
+                    // (the drain switch: the rag lifts from the top down,
+                    // `bristle::take_from`)
+                    let h = if self.drain { crate::bristle::take_from(&mut self.wet.hide[i], self.wet.vol[i], take) } else { self.wet.hide[i] };
                     if pooled {
                         let l = &self.wet.lat[i];
+                        got.lat.add_parts(l, take);
                         for q in 0..l.len() {
                             got.lat[q] += l[q] * take;
                         }
-                        let h = &self.wet.hide[i];
-                        for q in 0..h.len() {
+                        // (without the drain switch the rag carries engine
+                        // 4's five properties; the packing is the drain's)
+                        for q in 0..if self.drain { h.len() } else { 5 } {
                             got.hide[q] += h[q] * take;
                         }
                         if timed {
@@ -697,6 +732,9 @@ impl Canvas {
         let v0 = pl.vol.max(0.0) * left;
         let t = v0 + got.vol;
         if t > 0.0 {
+            pl.lat.scale_parts(v0);
+            pl.lat.add_parts(&got.lat, 1.0);
+            pl.lat.scale_parts(1.0 / t);
             for q in 0..pl.lat.len() {
                 pl.lat[q] = (pl.lat[q] * v0 + got.lat[q]) / t;
             }
@@ -720,9 +758,13 @@ impl Canvas {
         for k in 0..l.len() {
             l[k] += (pl.lat[k] - l[k]) * a;
         }
+        l.blend_parts(&pl.lat, a);
         let hd = &mut self.wet.hide[i];
+        // (the drain switch: the smear is fluid however packed it was where
+        // the rag took it up, `Surf::add`)
+        let ph = if self.drain { crate::bristle::fluid_of(pl.hide) } else { pl.hide };
         for k in 0..hd.len() {
-            hd[k] += (pl.hide[k] - hd[k]) * a;
+            hd[k] += (ph[k] - hd[k]) * a;
         }
         if self.wet.clock.px.len() == self.wet.vol.len() {
             let p = &mut self.wet.clock.px[i];
@@ -730,6 +772,12 @@ impl Canvas {
         }
         self.wet.cover[i] = 1.0;
         self.wet.vol[i] = t;
+        // the drain switch: an absorbent ground drains the smear, as it
+        // drains paint a brush lays (`bristle::ground_drain`)
+        if self.drain && self.absorb_any {
+            let hd = &mut self.wet.hide[i];
+            self.wet.vol[i] = crate::bristle::ground_drain(&mut self.absorb[i], t, hd);
+        }
         if solv_um > 0.0
             && let Some(sv) = self.wet.solv.get_mut(i)
         {
@@ -741,6 +789,11 @@ impl Canvas {
     /// spread along the path). Counts the hand time; returns the volume
     /// lifted (mm³). One point is a blot (`rag_blot`).
     pub fn rag_wipe(&mut self, rag: &mut Rag, pts: &[(f32, f32)], pressure: &[f32], seed: u64) -> f64 {
+        self.rag_wipe_in(rag, pts, pressure, seed, None)
+    }
+
+    /// `rag_wipe`, lifting only inside `clip` (by its value) when it is given.
+    fn rag_wipe_in(&mut self, rag: &mut Rag, pts: &[(f32, f32)], pressure: &[f32], seed: u64, clip: Option<&Mask>) -> f64 {
         if pts.is_empty() {
             return 0.0;
         }
@@ -763,7 +816,7 @@ impl Canvas {
         self.tally.rag_stroke((len * mmu) as f64, (rag.width * mmu) as f64);
         let cs = rag.cloth_seed(seed);
         if self.engine >= 3 {
-            return self.rag_wipe3(rag, pts, &pr, cs);
+            return self.rag_wipe3(rag, pts, &pr, cs, clip);
         }
         // before engine 3: steps of each segment in turn
         let w = rag.width;
@@ -821,7 +874,7 @@ impl Canvas {
     /// `busy_s` (the hand time of the contact about to begin, which the
     /// tally already counts).
     fn rag_pool(&self, rag: &Rag, busy_s: f64) -> Pool {
-        let m = rag.mobile;
+        let m = rag.mobile.clone();
         if m.mm3 <= 0.0 {
             return Pool::default();
         }
@@ -844,7 +897,7 @@ impl Canvas {
         let sunit = self.px_mm().powi(2) / 1000.0;
         let v = pl.vol.max(0.0);
         rag.mobile = if v > 0.0 {
-            Mobile { mm3: v * unit, lat: pl.lat, hide: pl.hide, cure: pl.cure, solv_mm3: pl.solv.max(0.0) * sunit, at_min: self.now_min(), at_secs: self.tally.secs }
+            Mobile { mm3: v * unit, lat: pl.lat.clone(), hide: pl.hide, cure: pl.cure, solv_mm3: pl.solv.max(0.0) * sunit, at_min: self.now_min(), at_secs: self.tally.secs }
         } else {
             Mobile::default()
         };
@@ -860,7 +913,7 @@ impl Canvas {
     /// what the pad touches and for the box searched. A contact lasts the
     /// step's slide at `pace::RAG_MM_S` (`Touch`). Returns the volume lifted
     /// (mm³).
-    fn rag_wipe3(&mut self, rag: &mut Rag, pts: &[(f32, f32)], pr: &dyn Fn(f32) -> f32, cs: u64) -> f64 {
+    fn rag_wipe3(&mut self, rag: &mut Rag, pts: &[(f32, f32)], pr: &dyn Fn(f32) -> f32, cs: u64, clip: Option<&Mask>) -> f64 {
         let mmu = self.mm_per_unit;
         let w = rag.width;
         let r0 = 0.5 * w;
@@ -890,8 +943,10 @@ impl Canvas {
         let n = (len / step).ceil().max(1.0) as usize;
         let sl = len / n as f32;
         let touch = Touch { secs: sl * mmu / pace::RAG_MM_S as f32, slip_mm: sl * mmu };
-        // the face's mobile paint from before, soaked in the meantime
-        let mut pool = self.rag_pool(rag, (len * mmu) as f64 / pace::RAG_MM_S);
+        // the face's mobile paint from before, soaked in the meantime (with
+        // the rag lift switch the face keeps it all: no pool)
+        let keep = self.rag_lift;
+        let mut pool = if keep { Pool::default() } else { self.rag_pool(rag, (len * mmu) as f64 / pace::RAG_MM_S) };
         let mut total = 0.0;
         let mut first = 0usize;
         let mut pieces: Vec<Seg> = Vec::with_capacity(4);
@@ -939,11 +994,19 @@ impl Canvas {
                 bbox = (bbox.0.min(q.a.0.min(ex) - r - 1.0), bbox.1.min(q.a.1.min(ey) - r - 1.0), bbox.2.max(q.a.0.max(ex) + r + 1.0), bbox.3.max(q.a.1.max(ey) + r + 1.0));
             }
             let pc = &pieces;
-            total += self.rag_contact(rag, bbox, p, touch, Some(&mut pool), |x, y| pad3(pc, x, y, r, len, p, mmu, cs));
+            total += self.rag_contact(rag, bbox, p, touch, if keep { None } else { Some(&mut pool) }, |x, y| {
+                let e = pad3(pc, x, y, r, len, p, mmu, cs);
+                match clip {
+                    Some(m) => (e.0 * m.sample(x, y).clamp(0.0, 1.0), e.1, e.2, e.3),
+                    None => e,
+                }
+            });
         }
         // what is still at the cloth's surface goes with the face as the
         // pad lifts off (it is in `load` already)
-        self.rag_keep(rag, &pool);
+        if !keep {
+            self.rag_keep(rag, &pool);
+        }
         total
     }
 
@@ -964,7 +1027,7 @@ impl Canvas {
         // face's mobile paint doesn't smear (no slide) but soaks in while it
         // is pressed, and what it lifts joins it
         let dwell = if e3 { touch.secs / pace::BLOT_PRESS as f32 } else { 1.0 };
-        let mut pool = if e3 { Some(self.rag_pool(rag, pace::BLOT_PRESS)) } else { None };
+        let mut pool = if e3 && !self.rag_lift { Some(self.rag_pool(rag, pace::BLOT_PRESS)) } else { None };
         let got = self.rag_contact(rag, bbox, pressure, touch, pool.as_mut(), |px, py| {
             let (qx, qy) = (px - x, py - y);
             let d = (qx * qx + qy * qy).sqrt();
@@ -991,11 +1054,12 @@ impl Canvas {
     /// short of its edge by about a third of the pad (the pad's soft edge
     /// reaches it, a little past in places). `o.passes` times over, each
     /// pass a little turned. Refolds when `o.refold` says so. Long passes
-    /// age the paint as they go (hand time slices). Returns the strokes.
-    pub fn rag_region(&mut self, rag: &mut Rag, m: &Mask, o: &RagPass) -> usize {
+    /// age the paint as they go (hand time slices). Returns the strokes,
+    /// and how many of them began on a full face (`FULL`).
+    pub fn rag_region(&mut self, rag: &mut Rag, m: &Mask, o: &RagPass) -> (usize, usize) {
         self.check_mask(m);
         let mut rng = Rng::new(o.seed ^ 0x7A6E_0000);
-        let mut n = 0;
+        let (mut n, mut full) = (0, 0);
         for pass in 0..o.passes.max(1) {
             let ang = o.angle + if pass == 0 { 0.0 } else { rng.range(-0.18, 0.18) };
             let shift = if pass % 2 == 1 { 0.5 } else { 0.0 };
@@ -1009,7 +1073,8 @@ impl Canvas {
                 let p = (o.pressure * (1.0 + 0.1 * rng.normal())).clamp(0.0, 1.0);
                 let prof = [p * rng.range(0.8, 0.95), p, p * rng.range(0.85, 1.0)];
                 let s = o.seed.wrapping_add(((pass as u64) << 32) | k as u64);
-                self.rag_wipe(rag, pts, &prof, s);
+                full += usize::from(rag.load >= FULL);
+                self.rag_wipe_in(rag, pts, &prof, s, self.rag_lift.then_some(m));
                 n += 1;
                 if let Some(slice) = self.hand_slice_secs() {
                     let owed = self.hand_owed_secs();
@@ -1019,7 +1084,7 @@ impl Canvas {
                 }
             }
         }
-        n
+        (n, full)
     }
 }
 
@@ -1112,857 +1177,158 @@ pub fn plan_region(m: &Mask, w: f32, ang: f32, shift: f32, rng: &mut Rng) -> Vec
     out
 }
 
+
+#[cfg(test)]
+mod rag_lift {
+    use super::*;
+    use crate::color::{hex, luminance};
+    use crate::{Knife, Paint};
+
+    /// A 400 px canvas, light ground, with dark knife paint (wet) pulled
+    /// down at each of `xs` from y 200 to 800.
+    fn dark_wet(lift: bool, xs: &[f32]) -> Canvas {
+        let mut c = Canvas::new(400, 1.0, hex("#e8e0d0")).with_engine(crate::engine7::ENGINE).with_rag_lift(lift);
+        let mut k = Knife::new(120.0);
+        for &x in xs {
+            k.load(Paint::body(hex("#1c2430")), 1.0);
+            c.knife(&mut k, &[(x, 200.0), (x, 800.0)], (0.45, 0.45), Some(0.0), true, 0.1);
+        }
+        c
+    }
+
+    /// The wet film (µm) of each pixel in the box (units), and their mean
+    /// luminance.
+    fn film(c: &Canvas, b: (f32, f32, f32, f32)) -> (Vec<f32>, f32) {
+        let (w, s) = (c.f.w, c.f.scale);
+        let px = |u: f32| (u * s) as usize;
+        let seen = c.seen();
+        let ix: Vec<usize> = (px(b.1)..px(b.3)).flat_map(|y| (px(b.0)..px(b.2)).map(move |x| y * w + x)).collect();
+        let lum = ix.iter().map(|&i| luminance(seen[i])).sum::<f32>() / ix.len() as f32;
+        (ix.iter().map(|&i| c.wet.vol[i].max(0.0) * COAT_UM).collect(), lum)
+    }
+
+    /// A rag dipped in spirits wiped from a wet dark passage on across bare
+    /// ground: the passage's film thins and the ground's color comes back
+    /// through it, and none of what the rag took comes down on the ground it
+    /// goes on over. Without the switch (older logs) the face smears some of
+    /// it back there.
+    #[test]
+    fn a_wipe_lifts_a_wet_passage_and_lays_none_of_it_further_along() {
+        for lift in [true, false] {
+            let mut c = dark_wet(lift, &[330.0, 430.0]);
+            let core = (330.0, 480.0, 430.0, 520.0);
+            let beyond = (560.0, 440.0, 860.0, 560.0);
+            let (f0, l0) = film(&c, core);
+            let (_, ground) = film(&c, beyond);
+            let mut r = Rag::new(80.0, 7);
+            let now = c.now_min();
+            r.dip(0.5, now, c.tally_mut());
+            c.rag_wipe(&mut r, &[(250.0, 500.0), (900.0, 500.0)], &[0.6], 11);
+            let (f1, l1) = film(&c, core);
+            let (fb, _) = film(&c, beyond);
+            let (t0, t1) = (f0.iter().sum::<f32>(), f1.iter().sum::<f32>());
+            let laid = fb.iter().sum::<f32>() / fb.len() as f32;
+            if lift {
+                assert!(t1 < 0.3 * t0, "the passage's film {t0} -> {t1} µm·px");
+                assert!(l1 - l0 > 0.5 * (ground - l0), "luminance {l0} -> {l1}, ground {ground}");
+                assert_eq!(laid, 0.0, "film laid on the bare ground beyond: {laid} µm");
+            } else {
+                assert!(laid > 0.0, "older logs smear some back: {laid} µm");
+            }
+        }
+    }
+
+    /// A wipe over a mask laid on a wider wet film lifts inside the mask and
+    /// leaves the film outside it as it was. Without the switch the pad's
+    /// rim reaches past the mask and lifts there too.
+    #[test]
+    fn a_mask_wipe_lifts_nothing_outside_its_mask() {
+        for lift in [true, false] {
+            let mut c = dark_wet(lift, &[260.0, 360.0, 460.0, 560.0, 660.0, 740.0]);
+            let m = Mask::from_fn(c.frame(), |x, y| if (400.0..600.0).contains(&x) && (400.0..600.0).contains(&y) { 1.0 } else { 0.0 });
+            let around = (330.0, 330.0, 670.0, 670.0);
+            let inside = (420.0, 420.0, 580.0, 580.0);
+            let (f0, _) = film(&c, around);
+            let (i0, _) = film(&c, inside);
+            let mut r = Rag::new(60.0, 3);
+            c.rag_region(&mut r, &m, &RagPass { pressure: 0.6, angle: 0.0, passes: 1, refold: Some(0.5), seed: 5 });
+            let (f1, _) = film(&c, around);
+            let (i1, _) = film(&c, inside);
+            let (w, s) = (((670.0 - 330.0) * c.f.scale) as usize, c.f.scale);
+            let outside = |k: usize| {
+                let (x, y) = (330.0 + ((k % w) as f32 + 0.5) / s, 330.0 + ((k / w) as f32 + 0.5) / s);
+                !(400.0..600.0).contains(&x) || !(400.0..600.0).contains(&y)
+            };
+            let moved: f32 = (0..f0.len()).filter(|&k| outside(k)).map(|k| (f1[k] - f0[k]).abs()).sum();
+            assert!(i1.iter().sum::<f32>() < 0.5 * i0.iter().sum::<f32>(), "inside the mask the film thins");
+            if lift {
+                assert_eq!(moved, 0.0, "film outside the mask changed by {moved} µm·px");
+            } else {
+                assert!(moved > 0.0, "older logs lift past the mask");
+            }
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bristle::{Gesture, Held, Orient, Tool};
-    use crate::color::hex;
-    use crate::drying::GEL;
-    use crate::handling::Handling;
-    use crate::surface::Linen;
-    use crate::canvas::Crop;
-
-    /// The live width (px): the weave is resolved (a thread about 3.6 px).
-    const LIVE: usize = 2400;
-    /// The window the measures paint (a crop render, to keep them quick).
-    const WINDOW: Crop = Crop { units: [260.0, 190.0, 740.0, 490.0], margin: 30.0 };
-
-    fn blank(width: usize) -> Canvas {
-        let mut c = Canvas::new_window(width, 1.5, hex("#b08060"), Some(WINDOW)).with_size_mm(440.0).with_linen(Linen { warp_per_cm: 15.0, weft_per_cm: 15.0, ..Linen::fine(3) });
-        c.prime(hex("#e4dcc8"), 0.9, GROUND_UM, 0.6, 0.3, 5);
-        c
-    }
-
-    /// Is buffer pixel `i` inside mask `m` (a whole-canvas mask)?
-    fn inside(c: &Canvas, m: &Mask, i: usize) -> bool {
-        m.data[c.f.whole_index(i)] > 0.5
-    }
-
-    /// One thin brushed coat of ground: the weave shows through it.
-    const GROUND_UM: f32 = 25.0;
+    use crate::wet::OIL_VOLUME;
 
     #[test]
-    fn a_rag_smear_preserves_the_paint_oil_and_turps() {
-        let mut c = Canvas::new(240, 1.0, [0.3, 0.2, 0.1]).with_engine(4);
-        for i in 0..c.wet.vol.len() {
-            if i % 240 < 120 {
-                c.wet.vol[i] = 0.8;
-                c.wet.hide[i] = [0.8, 0.6, 1.0, 0.4, 0.6];
-                c.wet.lat[i] = mixbox::linear_float_rgb_to_latent(&[0.3, 0.2, 0.1]);
-            }
+    fn a_drained_rag_smear_conserves_integrated_scattering() {
+        let mut c = Canvas::new(2, 1.0, [0.3; 3]).with_engine(5).with_drain(true);
+        c.ground_finish(1.0);
+        let pl = Pool { hide: [1.0, 0.6, 1.0, 0.0, 1.0, 0.7, 0.4, 0.0, 0.5, 0.0], ..Pool::default() };
+        let mut mass = 0.0;
+        for v in [1.0, 0.2, 0.4] {
+            c.rag_lay(0, v, &pl, 0.0);
+            mass += v * pl.hide[0];
+            assert!((c.wet.vol[0] * c.wet.hide[0][0] - mass).abs() < 1e-6, "{mass} -> {}", c.wet.vol[0] * c.wet.hide[0][0]);
         }
-        let mut rag = Rag::new(50.0, 2);
-        let lifted = c.rag_wipe(&mut rag, &[(100.0, 200.0), (900.0, 200.0)], &[0.8], 19);
-        assert!(lifted > 0.0, "the wipe must actually lift and smear open paint");
-        let mut laid = 0;
-        for (i, (&v, h)) in c.wet.vol.iter().zip(&c.wet.hide).enumerate() {
-            if i % 240 >= 120 && v > 1e-5 {
-                laid += 1;
-                assert!((h[3] - 0.4).abs() < 1e-5 && (h[4] - 0.6).abs() < 1e-5,
-                    "smearing the same paint must preserve its material: {h:?}");
-            }
-        }
-        assert!(laid > 0, "the rag must carry paint onto the initially bare half");
+        assert!(c.wet.vol[0] < 1.6);
     }
 
-    /// A 440 mm canvas on 15-thread linen with a thin brushed ground, the
-    /// weave showing through, and a sky film laid over the middle with a
-    /// broad brush.
-    fn sky(width: usize, coverage: f32, load: f32) -> Canvas {
-        let mut c = blank(width);
-        c.set_hand_time(Some(15.0));
-        let f = c.frame();
-        let m = Mask::from_fn(f, |x, y| if (100.0..900.0).contains(&x) && (120.0..550.0).contains(&y) { 1.0 } else { 0.0 });
-        let hd = Handling::new(Tool::filbert(22.0)).color(|_, _| hex("#8fa6c0")).paint(0.85, 0.75).coverage(coverage).load(load).angle(|_, _| 0.0).fill(true);
-        c.work(&m, &hd, 11);
-        c.clock_hand_min();
-        c
-    }
-
-    /// The patch the rag wipes, and the part of it the measures read (its
-    /// middle, which every stroke's full width reaches).
-    fn patch(c: &Canvas) -> (Mask, Mask) {
-        let f = c.frame();
-        let wipe = Mask::from_fn(f, |x, y| if (300.0..700.0).contains(&x) && (230.0..450.0).contains(&y) { 1.0 } else { 0.0 });
-        let read = Mask::from_fn(f, |x, y| if (340.0..660.0).contains(&x) && (270.0..410.0).contains(&y) { 1.0 } else { 0.0 });
-        (wipe, read)
-    }
-
-    /// Paint over the ground at each pixel (coats): the wet film plus what
-    /// has set into the dry picture since `ground` (the film before painting).
-    fn paint_at(c: &Canvas, ground: &[f32]) -> Vec<f32> {
-        (0..c.wet.vol.len()).map(|i| c.wet.vol[i] + c.film[i] - ground[i]).collect()
-    }
-
-    /// Share of the paint removed between `a` and `b` on the tops of the
-    /// weave (the upper third of contact levels in `read`) and in the hollows
-    /// (the lower third), and over all of `read`.
-    fn shares(c: &mut Canvas, a: &[f32], b: &[f32], read: &Mask) -> (f64, f64, f64) {
-        let _ = c.surf();
-        let base = &c.base.as_ref().unwrap().1;
-        let idx: Vec<usize> = (0..a.len()).filter(|&i| inside(c, read, i) && a[i] > 0.02).collect();
-        let mut lv: Vec<f32> = idx.iter().map(|&i| base[i]).collect();
-        lv.sort_by(f32::total_cmp);
-        let (lo, hi) = (lv[lv.len() / 3], lv[2 * lv.len() / 3]);
-        let share = |keep: &dyn Fn(f32) -> bool| {
-            let (mut x, mut y) = (0.0f64, 0.0f64);
-            for &i in &idx {
-                if keep(base[i]) {
-                    x += a[i] as f64;
-                    y += (a[i] - b[i]) as f64;
+    /// With the drain switch an absorbent ground drains what a rag smears
+    /// onto it, as it drains paint a brush lays (`bristle::ground_drain`):
+    /// on bare absorbent ground the smear loses oil down toward its drained
+    /// floor and packs from the ground up, its stiffness its own; where the
+    /// ground's pores are already full it keeps its material. Without it a
+    /// smear stays as it came (`a_rag_smear_preserves_the_paint_oil_and_turps`).
+    #[test]
+    fn an_absorbent_ground_drains_a_rag_smear_with_the_drain_switch() {
+        for drain in [false, true] {
+            let mut c = Canvas::new(240, 1.0, [0.3, 0.2, 0.1]).with_engine(5).with_drain(drain);
+            c.ground_finish(1.0);
+            for i in 0..c.wet.vol.len() {
+                if i % 240 < 120 {
+                    c.wet.vol[i] = 0.8;
+                    c.wet.hide[i] = [0.8, 0.6, 1.0, 0.0, 1.0, 0.7, 0.4, 0.0, OIL_VOLUME, 0.0];
+                    *c.wet.lat[i] = mixbox::linear_float_rgb_to_latent(&[0.3, 0.2, 0.1]);
+                    // (painted on before: its ground's pores are full)
+                    c.absorb[i] = 0.0;
                 }
             }
-            y / x
-        };
-        (share(&|v| v >= hi), share(&|v| v <= lo), share(&|_| true))
-    }
-
-    fn mean_cure(c: &Canvas, read: &Mask) -> f32 {
-        let (mut s, mut n) = (0.0, 0.0);
-        for i in 0..c.wet.vol.len() {
-            if inside(c, read, i) && c.wet.vol[i] > 1e-3 {
-                s += c.wet.clock.px[i].cure;
-                n += 1.0;
-            }
-        }
-        if n > 0.0 { s / n } else { f32::NAN }
-    }
-
-    /// The canvas aged until its film's mean cure in `read` reaches `cure`
-    /// (a share of the gel point), or until nothing in it is wet any more.
-    fn aged(mut c: Canvas, read: &Mask, cure: f32) -> (Canvas, f64) {
-        let t0 = c.clock();
-        c.wait(0.0);
-        while c.clock() - t0 < 30.0 * 24.0 * 60.0 {
-            let m = mean_cure(&c, read);
-            if m.is_nan() || m >= cure * GEL {
-                break;
-            }
-            c.wait(2.0);
-        }
-        let t = c.clock() - t0;
-        (c, t)
-    }
-
-    /// Is any paint in the wet layer (open)?
-    fn any_open(c: &Canvas) -> bool {
-        c.wet.vol.iter().any(|&v| v > 0.0)
-    }
-
-    /// The canvas aged until no paint on it is open, stopping at most two
-    /// minutes after the last pixel sets, as `aged(.., 2.0)` over the whole
-    /// canvas does: hour-long waits while a copy aged one hour more still
-    /// has open paint, then two-minute waits. (`aged` waits two minutes at a
-    /// time from the start: over a thin film's day or two that took more
-    /// than a minute.)
-    fn aged_until_set(mut c: Canvas) -> Canvas {
-        let t0 = c.clock();
-        c.wait(0.0);
-        while c.clock() - t0 < 30.0 * 24.0 * 60.0 {
-            let mut ahead = c.clone();
-            ahead.wait(60.0);
-            if !any_open(&ahead) {
-                break;
-            }
-            c = ahead;
-        }
-        while any_open(&c) && c.clock() - t0 < 30.0 * 24.0 * 60.0 {
-            c.wait(2.0);
-        }
-        c
-    }
-
-    /// The rag over the patch `n` times, refolding to a cleaner face
-    /// before each pass and within a pass once a face is half loaded.
-    fn wipe_n(c: &mut Canvas, wipe: &Mask, n: u32, pressure: f32) -> Rag {
-        let mut r = Rag::new(PAD_MM / c.mm_per_unit(), 77);
-        for k in 0..n {
-            if k > 0 {
-                r.refold(&mut c.tally);
-            }
-            c.rag_region(&mut r, wipe, &RagPass { pressure, angle: 0.0, passes: 1, refold: Some(0.5), seed: 100 + k as u64 });
-        }
-        r
-    }
-
-    /// Today's way: a flat 16 wiped clean before every short stroke, laid
-    /// side by side across the patch (the round 22.1 painter's loop).
-    fn brush_wipe(c: &mut Canvas, wipe: &Mask) {
-        let mut b = Held::new(Tool { stiffness: 0.6, ..Tool::hog_flat(16.0) }, 9);
-        let mut rng = Rng::new(4);
-        for _ in 0..900 {
-            let (x, y) = (rng.range(300.0, 700.0), rng.range(230.0, 450.0));
-            if wipe.sample(x, y) > 0.5 {
-                b.wipe(1.0);
-                c.tally.wipe();
-                let g = Gesture::new(vec![(x - 30.0, y), (x + 30.0, y)]).pressure(0.7, 0.6).orient(Orient::Across);
-                c.drag(&mut b, &g, None);
-            }
-        }
-        c.clock_hand_min();
-    }
-
-    /// The table in the report: share removed on the tops and in the
-    /// hollows for 1, 2 and 3 passes, fresh, near the gel point and past
-    /// it, and the brush-wipe loop for comparison.
-    /// `cargo test -p paint --lib rag::tests::table -- --ignored --nocapture`
-    #[test]
-    #[ignore]
-    fn table() {
-        for (film, cov, load) in [("thick", 2.5f32, 0.8f32), ("thin", 1.0, 0.3)] {
-        let c0 = sky(LIVE, cov, load);
-        println!("--- {film} film (coverage {cov}, load {load})");
-        let (wipe, read) = patch(&c0);
-        let ground = blank(LIVE);
-        let gf = ground.film.clone();
-        for (label, cure) in [("fresh", 0.0f32), ("setting (cure 0.6 gel)", 0.6), ("near gel (cure 0.9 gel)", 0.9), ("past gel", 2.0)] {
-            let (aged0, mins) = aged(c0.clone(), &read, cure);
-            let before = paint_at(&aged0, &gf);
-            print!("{label} (aged {mins:.0} min, mean cure {:.3} gel):", mean_cure(&aged0, &read) / GEL);
-            for n in 1..=3 {
-                let mut c = aged0.clone();
-                let t0 = c.tally.secs;
-                let r = wipe_n(&mut c, &wipe, n, 0.5);
-                let after = paint_at(&c, &gf);
-                let (t, h, a) = shares(&mut c, &before, &after, &read);
-                print!("  {n}: tops {:.0}% hollows {:.0}% all {:.0}% ({:.0} s, load {:.2})", 100.0 * t, 100.0 * h, 100.0 * a, c.tally.secs - t0, r.load);
-            }
-            println!();
-        }
-        let mut c = c0.clone();
-        let before = paint_at(&c, &gf);
-        let (t0, n0) = (c.tally.secs, c.tally.strokes);
-        brush_wipe(&mut c, &wipe);
-        let after = paint_at(&c, &gf);
-        let (t, h, a) = shares(&mut c, &before, &after, &read);
-        println!("brush-wipe loop, fresh: tops {:.0}% hollows {:.0}% all {:.0}% ({} strokes, {:.0} s)", 100.0 * t, 100.0 * h, 100.0 * a, c.tally.strokes - n0, c.tally.secs - t0);
-        // finding 5 of the review: the blender is wiped every 3 strokes
-        #[cfg(tube_box)]
-        {
-            let st = crate::style::Style::oil();
-            let hd = st.blend().unwrap();
-            let mut c = c0.clone();
-            for k in 0..3 {
-                c.work(&wipe, &hd, 40 + k);
-                let after = paint_at(&c, &gf);
-                let (t, h, a) = shares(&mut c, &before, &after, &read);
-                println!("blend(), {} pass(es), fresh: tops {:.0}% hollows {:.0}% all {:.0}%", k + 1, 100.0 * t, 100.0 * h, 100.0 * a);
-            }
-        }
-        for p in [0.2f32, 0.8] {
-            let mut c = c0.clone();
-            wipe_n(&mut c, &wipe, 1, p);
-            let after = paint_at(&c, &gf);
-            let (t, h, a) = shares(&mut c, &before, &after, &read);
-            println!("fresh, 1 pass, pressure {p}: tops {:.0}% hollows {:.0}% all {:.0}%", 100.0 * t, 100.0 * h, 100.0 * a);
-        }
-        let ins: Vec<usize> = (0..before.len()).filter(|&i| inside(&c0, &read, i)).collect();
-        let mean: f64 = ins.iter().map(|&i| before[i] as f64).sum::<f64>() / ins.len() as f64;
-        println!("film in the read area: {mean:.2} coats");
-        }
-    }
-
-    /// Everything the canvas shows and holds: pixels, surface, film and the
-    /// wet layer.
-    fn state_bits(c: &Canvas) -> Vec<u32> {
-        c.px.iter().flat_map(|p| p.map(f32::to_bits)).chain(c.height.iter().chain(&c.film).chain(&c.wet.vol).map(|v| v.to_bits())).collect()
-    }
-
-    #[test]
-    fn manual_and_automatic_refolding_preserve_spirits() {
-        for engine in [3, 4, 5] {
-            let mut c = path::fixture(false, engine, 480, 300.0);
-            c.set_hand_time(Some(1.0));
-            let mut r = Rag::new(100.0, 7);
-            c.rag_wipe(&mut r, &thin::LINE, &[0.8], 3);
-            assert!(r.load > r.soaked && r.mobile.mm3 > 0.0);
-            r.dip(0.5, c.now_min(), &mut c.tally);
-            let (damp, wet_at, solvent) = (r.damp, r.wet_at, r.solvent_mm3);
-            r.refold(&mut c.tally);
-            assert_eq!((r.damp, r.wet_at, r.solvent_mm3), (damp, wet_at, solvent), "manual fold, engine {engine}");
-            assert_eq!(r.load, r.soaked);
-            assert_eq!(r.mobile, Mobile::default());
-
-            let fold = r.fold;
-            let mask = Mask::from_fn(c.frame(), |x, y| if (250.0..750.0).contains(&x) && (280.0..400.0).contains(&y) { 1.0 } else { 0.0 });
-            let strokes = c.rag_region(&mut r, &mask, &RagPass { pressure: 0.0, angle: 0.0, passes: 1, refold: Some(0.0), seed: 9 });
-            assert!(strokes > 1 && r.fold > fold, "automatic folds actually occur");
-            let expected = damp as f64 * (-(c.now_min() - wet_at).max(0.0) * std::f64::consts::LN_2 / DAMP_HALF_MIN).exp();
-            assert!((r.damp_at(c.now_min()) as f64 - expected).abs() < 1e-6, "automatic folds retain spirits while time evaporates them, engine {engine}");
-        }
-    }
-
-    /// The spirits in a dipped face evaporate as the painting goes on: half
-    /// of them every `DAMP_HALF_MIN` minutes, none left within the half hour
-    /// (nor a week later), and a dip wets it again. A rag dipped and then
-    /// left half an hour lifts exactly what a dry one does; dipped just
-    /// before the wipe, it lifts more.
-    #[test]
-    fn the_spirits_in_a_dipped_rag_evaporate() {
-        let mut t = Tally::default();
-        let mut r = Rag::new(10.0, 1);
-        // dipped at 100 minutes, back with the hand 2.5 s later
-        r.dip(0.5, 100.0 - pace::DIP / 60.0, &mut t);
-        assert_eq!(r.damp_at(100.0), 0.5);
-        assert!((r.damp_at(100.0 + DAMP_HALF_MIN) - 0.25).abs() < 1e-6, "{}", r.damp_at(100.0 + DAMP_HALF_MIN));
-        assert!(r.damp_at(110.0) > 0.04 && r.damp_at(110.0) < 0.06, "{}", r.damp_at(110.0));
-        assert_eq!(r.damp_at(130.0), 0.0);
-        assert_eq!(r.damp_at(100.0 + 7.0 * 24.0 * 60.0), 0.0, "a week later");
-        // reading it changes nothing; using it at a later time brings it up to date
-        assert_eq!(r.damp, 0.5);
-        r.evaporate(103.0);
-        assert!((r.damp - 0.25).abs() < 1e-6 && r.wet_at == 103.0);
-        r.evaporate(200.0);
-        assert_eq!(r.damp, 0.0);
-        r.dip(0.5, 200.0, &mut t);
-        assert_eq!(r.damp_at(200.0 + pace::DIP / 60.0), 0.5, "dipped again");
-
-        let c0 = sky(LIVE, 1.0, 0.3);
-        let (wipe, read) = patch(&c0);
-        let gf = blank(LIVE).film;
-        let pass = RagPass { pressure: 0.6, angle: 0.0, passes: 1, refold: None, seed: 9 };
-        let fresh = || Rag::new(PAD_MM / c0.mm_per_unit(), 4);
-        let wiped = |dip_then_wait: Option<bool>| {
-            let mut c = c0.clone();
-            let mut r = fresh();
-            if dip_then_wait == Some(true) {
-                r.dip(0.5, c.now_min(), &mut c.tally);
-            }
-            c.wait(30.0);
-            if dip_then_wait == Some(false) {
-                r.dip(0.5, c.now_min(), &mut c.tally);
-            }
-            // the same hand time either way
-            if dip_then_wait.is_none() {
-                c.tally.secs += pace::DIP;
-            }
-            let before = paint_at(&c, &gf);
-            c.rag_region(&mut r, &wipe, &pass);
-            let after = paint_at(&c, &gf);
-            let off = shares(&mut c, &before, &after, &read).2;
-            (c, r, off)
-        };
-        let (dry, dry_r, dry_off) = wiped(None);
-        let (left, left_r, _) = wiped(Some(true));
-        let (_, _, damp_off) = wiped(Some(false));
-        assert!(dry_off > 0.05, "the paint is still open after half an hour: {dry_off}");
-        assert!(state_bits(&left) == state_bits(&dry) && (left_r.load, left_r.soaked, left_r.damp) == (dry_r.load, dry_r.soaked, 0.0), "a rag left to dry lifts as a dry one");
-        assert!(damp_off > dry_off + 0.05, "a fresh dip lifts more: {damp_off} vs {dry_off}");
-    }
-
-    /// Two wipes must transfer paint into the cloth without creating or losing
-    /// it, including paint the loaded rim lays back. A second damp wipe must
-    /// continue clearing the same passage. Existing lift tests do not account
-    /// for the paint held by the cloth after smear-back.
-    #[test]
-    fn repeated_wipes_conserve_paint_and_a_second_damp_wipe_clears_more() {
-        let c0 = sky(480, 1.0, 0.3);
-        let ground = blank(480);
-        let (_, read) = patch(&c0);
-        let tone = tint(&c0, &ground, &read);
-        let volume = |c: &Canvas| c.wet.vol.iter().map(|&v| v as f64).sum::<f64>()
-            * (c.px_mm() as f64).powi(2) * COAT_UM as f64 / 1000.0;
-        let before = volume(&c0);
-        for damp in [false, true] {
-            let mut c = c0.clone();
-            let mut r = Rag::new(100.0, 7);
-            let cap = (r.width * c.mm_per_unit()) as f64;
-            let cap = cap * cap * CAP_UM as f64 / 1000.0;
-            if damp {
-                r.dip(0.5, c.now_min(), &mut c.tally);
-            }
-            let mut previous = before;
-            let mut previous_tone = tone;
-            for pass in 1..=2 {
-                c.rag_wipe(&mut r, &[(300.0, 340.0), (700.0, 340.0)], &[0.8], 19);
-                let after = volume(&c);
-                let left = tint(&c, &ground, &read);
-                assert!(r.load > 0.0 && r.load < 0.9, "cloth has spare capacity");
-                assert!((after + r.load as f64 * cap - before).abs() < before * 1e-5,
-                    "damp={damp} pass={pass}: canvas {after}, cloth {}, original {before}", r.load as f64 * cap);
-                assert!(after < previous, "each wipe removes more paint");
-                if damp {
-                    assert!(left < previous_tone, "a second damp wipe clears more color");
-                }
-                println!("damp={damp} pass={pass}: paint left {:.1}%, tone left {:.1}%", 100.0 * after / before, 100.0 * left / tone);
-                if let Ok(out) = std::env::var("RAG_REVIEW_DIR") {
-                    c.clone().save(std::path::Path::new(&out).join(format!("{}-{pass}.png", if damp { "damp" } else { "dry" }))).unwrap();
-                }
-                previous = after;
-                previous_tone = left;
-            }
-        }
-        if let Ok(out) = std::env::var("RAG_REVIEW_DIR") {
-            c0.clone().save(std::path::Path::new(&out).join("before.png")).unwrap();
-        }
-    }
-
-    /// Paint past its gel point has left the wet layer: no wipe, blot or
-    /// pressure lifts any of it, and the rag comes away clean. The hand
-    /// time is still spent.
-    #[test]
-    fn nothing_is_lifted_past_the_gel_point() {
-        let c0 = sky(LIVE, 1.0, 0.3);
-        let (wipe, read) = patch(&c0);
-        // aged until no paint on the canvas is open (the thickest dabs set last),
-        // within two minutes of the last one setting
-        let mut c = aged_until_set(c0);
-        assert!(c.wet.vol.iter().all(|&v| v <= 0.0), "paint still open");
-        let ground = blank(LIVE);
-        let laid: f32 = (0..c.film.len()).filter(|&i| inside(&c, &read, i)).map(|i| c.film[i] - ground.film[i]).sum();
-        assert!(laid > 0.0);
-        let before = state_bits(&c);
-        let t0 = c.tally.secs;
-        let mut r = Rag::new(PAD_MM / c.mm_per_unit(), 5);
-        // the patch lies within the crop window: wipe only over it
-        c.rag_region(&mut r, &wipe, &RagPass { pressure: 1.0, angle: 0.3, passes: 3, refold: Some(0.2), seed: 1 });
-        c.rag_wipe(&mut r, &[(320.0, 300.0), (680.0, 360.0)], &[1.0], 2);
-        c.rag_blot(&mut r, 500.0, 340.0, 1.0, 3);
-        // nor a rag damp with spirits
-        r.dip(1.0, c.now_min(), &mut c.tally);
-        c.rag_region(&mut r, &wipe, &RagPass { pressure: 1.0, angle: 0.0, passes: 1, refold: None, seed: 4 });
-        assert!(state_bits(&c) == before, "the rag changed set paint");
-        assert_eq!((r.load, r.soaked), (0.0, 0.0));
-        assert!(c.tally.secs > t0);
-    }
-
-    /// On fresh paint: a pass lifts more from the tops of the weave than
-    /// from the hollows; harder pressure and a second pass lift more; a
-    /// loaded face lifts less than a clean one, and a refold to a cleaner
-    /// face lifts more again; a stain stays.
-    #[test]
-    fn the_rag_lifts_open_paint_from_the_tops_first() {
-        let c0 = sky(LIVE, 1.0, 0.3);
-        let (wipe, read) = patch(&c0);
-        let gf = blank(LIVE).film;
-        let before = paint_at(&c0, &gf);
-        let removed = |c: &mut Canvas| shares(c, &before, &paint_at(c, &gf), &read);
-        let pass = |pressure| RagPass { pressure, angle: 0.0, passes: 1, refold: None, seed: 100 };
-        let fresh = || Rag::new(PAD_MM / c0.mm_per_unit(), 77);
-
-        let mut c = c0.clone();
-        let mut r = fresh();
-        c.rag_region(&mut r, &wipe, &pass(0.5));
-        let one = removed(&mut c);
-        assert!(one.0 > one.1 + 0.1, "tops {:.2} hollows {:.2}", one.0, one.1);
-        assert!(r.load > 0.1);
-        // the same face again: it lifts more, but less than a clean one does
-        let mut again = c.clone();
-        let mut loaded = r;
-        again.rag_region(&mut loaded, &wipe, &RagPass { seed: 101, ..pass(0.5) });
-        let mut clean = c.clone();
-        let mut refolded = r;
-        refolded.refold(&mut clean.tally);
-        assert!(refolded.load < r.load);
-        clean.rag_region(&mut refolded, &wipe, &RagPass { seed: 101, ..pass(0.5) });
-        let (two_loaded, two_clean) = (removed(&mut again).2, removed(&mut clean).2);
-        assert!(one.2 < two_loaded && two_loaded < two_clean, "one {:.2} loaded {two_loaded:.2} refolded {two_clean:.2}", one.2);
-        // pressed harder
-        let mut hard = c0.clone();
-        hard.rag_region(&mut fresh(), &wipe, &pass(0.9));
-        let h = removed(&mut hard);
-        assert!(h.2 > one.2 + 0.1 && h.1 > one.1, "pressure 0.9 {h:?} vs 0.5 {one:?}");
-        // even pressed hard and gone over five times, a dry rag thins the
-        // film without baring the ground anywhere (engine 3: `SLOW_COATS`)
-        let mut many = c0.clone();
-        let mut r = fresh();
-        many.rag_region(&mut r, &wipe, &RagPass { passes: 5, refold: Some(0.3), ..pass(0.9) });
-        let left = paint_at(&many, &gf);
-        let ins: Vec<usize> = (0..left.len()).filter(|&i| inside(&many, &read, i) && before[i] > 0.1).collect();
-        assert!(ins.iter().all(|&i| left[i] > 0.0 && left[i] < before[i]), "five passes thin every pixel and bare none");
-    }
-
-    /// A toning layer as the wipe-out handouts lay it: thin earth-brown
-    /// paint brushed over the whole patch (`work`, one layer, a light load).
-    fn toned() -> Canvas {
-        let mut c = blank(LIVE);
-        c.set_hand_time(Some(15.0));
-        let f = c.frame();
-        let m = Mask::from_fn(f, |x, y| if (100.0..900.0).contains(&x) && (120.0..550.0).contains(&y) { 1.0 } else { 0.0 });
-        let hd = Handling::new(Tool::filbert(22.0)).color(|_, _| hex("#5b4330")).paint(0.8, 0.4).coverage(1.0).load(0.3).angle(|_, _| 0.0).fill(true);
-        c.work(&m, &hd, 12);
-        c.clock_hand_min();
-        c
-    }
-
-    /// Mean OKLab distance of what the eye sees in `read` from the bare
-    /// ground there.
-    fn tint(c: &Canvas, ground: &Canvas, read: &Mask) -> f32 {
-        let (a, g) = (c.seen(), ground.seen());
-        let ins: Vec<usize> = (0..a.len()).filter(|&i| inside(c, read, i)).collect();
-        let d = |i: usize| {
-            let (p, q) = (crate::color::to_oklab(a[i]), crate::color::to_oklab(g[i]));
-            ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt()
-        };
-        ins.iter().map(|&i| d(i)).sum::<f32>() / ins.len() as f32
-    }
-
-    /// The rag over the patch by hand, `passes` times, stroke by stroke:
-    /// the painter turns a cleaner face out whenever the one in use is half
-    /// loaded, and with `dip` dips it in spirits as it is turned out (and at
-    /// the start).
-    fn by_hand(c: &mut Canvas, wipe: &Mask, passes: u32, pressure: f32, dip: Option<f32>) {
-        let mut r = Rag::new(PAD_MM / c.mm_per_unit(), 3);
-        let mut rng = Rng::new(31);
-        if let Some(d) = dip {
-            r.dip(d, c.now_min(), &mut c.tally);
-        }
-        for pass in 0..passes {
-            let plan = plan_region(wipe, r.width, 0.0, (pass % 2) as f32 * 0.5, &mut rng);
-            for (k, pts) in plan.iter().enumerate() {
-                if r.load > 0.5 {
-                    r.refold(&mut c.tally);
-                    if let Some(d) = dip {
-                        r.dip(d, c.now_min(), &mut c.tally);
+            let mut rag = Rag::new(50.0, 2);
+            assert!(c.rag_wipe(&mut rag, &[(100.0, 200.0), (900.0, 200.0)], &[0.8], 19) > 0.0);
+            let mut laid = 0;
+            for (i, (&v, h)) in c.wet.vol.iter().zip(&c.wet.hide).enumerate() {
+                if i % 240 >= 130 && v > 1e-5 {
+                    laid += 1;
+                    if drain {
+                        assert!(h[4] < 1.0 - 1e-3 && h[4] >= 0.4 - 1e-4 && h[7] > 1e-3 && (h[1] - 0.6).abs() < 1e-5, "a smear on bare absorbent ground drains and packs: {h:?}");
+                    } else {
+                        assert!((h[4] - 1.0).abs() < 1e-5 && (h[1] - 0.6).abs() < 1e-5, "without the switch a smear stays as it came: {h:?}");
                     }
                 }
-                c.rag_wipe(&mut r, pts, &[pressure], 500 + ((pass as u64) << 16) + k as u64);
             }
-        }
-    }
-
-    /// What painters describe of a wipe-out (R. Palesca, "How to create a
-    /// wipe-out underpainting in oil"; S. Downing-White, handout 3, the
-    /// rub-out method): a clean dry rag over the toning layer "should wipe
-    /// away the paint and leave a pale tint on the canvas"; a rag dipped in
-    /// spirits wipes the lights out nearly to the ground. The thresholds are
-    /// a reading of those words. Dry, three times over by hand: more than
-    /// half of the tone's color goes, but a tint stays (a fifth of it at
-    /// least, well above a just-noticeable difference). With spirits, three
-    /// times over: nearly all the film goes, from the tops of the weave and
-    /// from the hollows (90% of each), more than a dry rag takes from the
-    /// hollows, and a faint stain stays. (What the eye sees doesn't fall as
-    /// far: the stain the cloth can't take is the same, dry or damp; see
-    /// notes/rag/README.md.)
-    #[test]
-    fn a_dry_rag_leaves_a_pale_tint_and_spirits_lift_nearly_to_the_ground() {
-        let c0 = toned();
-        let (wipe, read) = patch(&c0);
-        let ground = blank(LIVE);
-        let tone = tint(&c0, &ground, &read);
-        let before = paint_at(&c0, &ground.film);
-        let mut dry = c0.clone();
-        by_hand(&mut dry, &wipe, 3, 0.8, None);
-        let left_dry = tint(&dry, &ground, &read);
-        let after = paint_at(&dry, &ground.film);
-        let dry_film = shares(&mut dry, &before, &after, &read);
-        let mut wet = c0.clone();
-        by_hand(&mut wet, &wipe, 3, 0.8, Some(0.5));
-        let left_wet = tint(&wet, &ground, &read);
-        let after = paint_at(&wet, &ground.film);
-        let wet_film = shares(&mut wet, &before, &after, &read);
-        println!("tone {tone:.3}; dry rag: tint {left_dry:.3} ({:.0}% of the tone), film off tops {:.0}% hollows {:.0}%; with spirits: tint {left_wet:.3} ({:.0}%), film off tops {:.0}% hollows {:.0}%",
-            100.0 * left_dry / tone, 100.0 * dry_film.0, 100.0 * dry_film.1, 100.0 * left_wet / tone, 100.0 * wet_film.0, 100.0 * wet_film.1);
-        assert!(left_dry < 0.5 * tone, "a dry rag lifts the tone: {left_dry} of {tone}");
-        assert!(left_dry > 0.2 * tone && left_dry > 0.02, "a dry rag leaves a pale tint: {left_dry} of {tone}");
-        // (engine 3: spirits work gradually, `DAMP_LIFT3`)
-        assert!(wet_film.0 > 0.9 && wet_film.1 > 0.9, "spirits lift nearly all the film: {wet_film:?}");
-        assert!(dry_film.1 < wet_film.1, "a dry rag leaves more in the hollows: {dry_film:?} vs {wet_film:?}");
-        assert!(wet_film.1 < 1.0 && left_wet > 0.0, "a faint stain stays");
-        assert!(left_wet < left_dry, "spirits leave less color than a dry rag: {left_wet} vs {left_dry}");
-    }
-
-    /// Thin films (rag work, step 1; HANDOVER 6.1 (1)).
-    mod thin {
-        use super::*;
-        use crate::Paint;
-        use crate::palette::Palette;
-
-        /// The probe's canvas: 480 px, 440 mm, engine 3, a smooth or a
-        /// linen canvas with a thin ground.
-        pub fn ground(linen: bool) -> Canvas {
-            let mut c = Canvas::new(480, 1.5, hex("#b08060")).with_engine(3).with_size_mm(440.0);
-            if linen {
-                c = c.with_linen(Linen { warp_per_cm: 15.0, weft_per_cm: 15.0, ..Linen::fine(3) });
-            }
-            c.prime(hex("#e4dcc8"), 0.9, 25.0, 0.6, if linen { 0.3 } else { 0.0 }, 5);
-            c
-        }
-
-        pub fn sienna() -> Paint {
-            let pal = Palette::named_box("inness").unwrap();
-            let name = std::env::var("RAG_EXP_TUBE").unwrap_or_else(|_| "raw sienna".into());
-            let i = pal.tubes.iter().position(|t| t.name == name).unwrap();
-            pal.pile(vec![(i, 1.0)]).laid(0.0)
-        }
-
-        /// The band painted (units), and the band read: the middle of the
-        /// wipe, which the pad's full width reaches.
-        pub const PAINTED: (f32, f32, f32, f32) = (150.0, 240.0, 850.0, 440.0);
-        pub const READ: (f32, f32, f32, f32) = (330.0, 320.0, 670.0, 360.0);
-        pub const LINE: [(f32, f32); 2] = [(250.0, 340.0), (750.0, 340.0)];
-
-        /// Buffer pixels whose centers lie in `r`.
-        pub fn px_in(c: &Canvas, r: (f32, f32, f32, f32)) -> Vec<usize> {
-            let f = c.f;
-            (0..f.w * f.h).filter(|&i| {
-                let (x, y) = (f.ux(i % f.w), f.uy(i / f.w));
-                x >= r.0 && x < r.2 && y >= r.1 && y < r.3
-            }).collect()
-        }
-
-        /// Paint the band with heavy overlapping strokes of `paint`.
-        pub fn brushed_in(c: &mut Canvas, paint: Paint, load: f32, r: (f32, f32, f32, f32)) {
-            let rows = ((r.3 - r.1 - 20.0) / 22.5).round() as u64 + 1;
-            for k in 0..rows {
-                let y = r.1 + 10.0 + 22.5 * k as f32;
-                let mut h = Held::new(Tool::hog_flat(40.0), 40 + k);
-                h.load(paint, load);
-                c.drag(&mut h, &Gesture::new(vec![(r.0, y), (r.2, y + 3.0)]).pressure(0.85, 0.85), None);
-            }
-        }
-
-        /// A direct fixture: the band painted, then every pixel in it set to
-        /// exactly `um` µm of fresh, unthinned paint (the brush only supplies
-        /// the color), so neither a ridge nor a lateral pile hides the film's
-        /// thickness.
-        pub fn film(linen: bool, um: f32) -> Canvas {
-            let mut c = ground(linen);
-            set_film(&mut c, um, PAINTED);
-            c
-        }
-
-        /// `film`'s fixture on canvas `c`, over the rectangle `r`.
-        pub fn set_film(c: &mut Canvas, um: f32, r: (f32, f32, f32, f32)) {
-            brushed_in(c, sienna(), 0.9, r);
-            let lat = sienna().latent();
-            let mid = ((r.0 + r.2) / 2.0, (r.1 + r.3) / 2.0);
-            let hide = c.wet.hide[px_in(c, (mid.0, mid.1, mid.0 + 2.0, mid.1 + 2.0))[0]];
-            let n = c.wet.vol.len();
-            if c.wet.clock.px.len() != n {
-                c.wait(0.0);
-            }
-            for i in px_in(c, r) {
-                c.wet.vol[i] = um / COAT_UM;
-                c.wet.lat[i] = lat;
-                c.wet.hide[i] = hide;
-                c.wet.cover[i] = 1.0;
-                c.wet.clock.px[i].cure = 0.0;
-                if let Some(s) = c.wet.solv.get_mut(i) {
-                    *s = 0.0;
+            assert!(laid > 0, "the rag must carry paint onto the bare half");
+            // (clear of the boundary, where the pad lays back what it took
+            // from the drained half)
+            for (i, h) in c.wet.hide.iter().enumerate() {
+                if i % 240 < 96 && c.wet.vol[i] > 1e-5 {
+                    assert!((h[4] - 1.0).abs() < 1e-5 && h[7] == 0.0, "full pores leave the paint its oil: {h:?}");
                 }
             }
-        }
-
-        /// µm of open paint per pixel of `idx`.
-        pub fn film_um(c: &Canvas, idx: &[usize]) -> Vec<f32> {
-            idx.iter().map(|&i| c.wet.vol[i].max(0.0) * COAT_UM).collect()
-        }
-
-        pub fn total(v: &[f32]) -> f64 {
-            v.iter().map(|&x| x as f64).sum()
-        }
-
-        /// The paint on the canvas and in the rag (mm³).
-        pub fn on_canvas(c: &Canvas) -> f64 {
-            c.wet.vol.iter().map(|&v| v.max(0.0) as f64).sum::<f64>() * (c.px_mm() as f64).powi(2) * COAT_UM as f64 / 1000.0
-        }
-
-        /// `wipes` wipes along `LINE` with one face, dry or dipped at 0.5.
-        pub fn wiped(c: &mut Canvas, damp: bool, wipes: u32) -> (Rag, f64) {
-            let mut r = Rag::new(100.0, 7);
-            if damp {
-                r.dip(0.5, c.now_min(), &mut c.tally);
-            }
-            let mut lifted = 0.0;
-            for k in 0..wipes {
-                lifted += c.rag_wipe(&mut r, &LINE, &[0.8], 19 + k as u64);
-            }
-            (r, lifted)
-        }
-
-        /// The table behind step 1: share of a direct film removed by one and
-        /// two wipes, dry and damp, on the smooth and the linen ground, with
-        /// the thinnest film left and the material balance.
-        /// `cargo test --release -p paint --lib rag::tests::thin::table -- --ignored --nocapture`
-        #[test]
-        #[ignore]
-        fn table() {
-            for linen in [false, true] {
-                println!("--- {} ground", if linen { "linen" } else { "smooth" });
-                for um in [0.25f32, 0.5, 1.0, 3.0, 10.0, 69.0] {
-                    let c0 = film(linen, um);
-                    let idx = px_in(&c0, READ);
-                    let a = film_um(&c0, &idx);
-                    print!("{um:>5} µm:");
-                    for (damp, wipes) in [(false, 1), (false, 2), (true, 1), (true, 2)] {
-                        let mut c = c0.clone();
-                        let before = on_canvas(&c);
-                        let (_, lifted) = wiped(&mut c, damp, wipes);
-                        let b = film_um(&c, &idx);
-                        let off = 1.0 - total(&b) / total(&a);
-                        let min = b.iter().copied().fold(f32::MAX, f32::min);
-                        let bal = (before - on_canvas(&c) - lifted).abs() / before;
-                        print!("  {}{}: {:5.1}% off, min left {:.2} µm (bal {:.0e})", if damp { "damp" } else { "dry" }, wipes, 100.0 * off, min, bal);
-                    }
-                    println!();
-                }
-            }
-        }
-    }
-
-    /// Fixtures for the path and transfer contracts.
-    mod path {
-        use super::*;
-        use super::thin::{PAINTED, px_in, set_film};
-
-        /// `thin::ground` at engine `e`, `w` px wide.
-        pub fn ground_e(linen: bool, e: u32, w: usize) -> Canvas {
-            let mut c = Canvas::new(w, 1.5, hex("#b08060")).with_engine(e).with_size_mm(440.0);
-            if linen {
-                c = c.with_linen(Linen { warp_per_cm: 15.0, weft_per_cm: 15.0, ..Linen::fine(3) });
-            }
-            c.prime(hex("#e4dcc8"), 0.9, 25.0, 0.6, if linen { 0.3 } else { 0.0 }, 5);
-            c
-        }
-
-        pub fn fixture(linen: bool, e: u32, w: usize, um: f32) -> Canvas {
-            let mut c = ground_e(linen, e, w);
-            set_film(&mut c, um, PAINTED);
-            c
-        }
-
-        /// `pts` with every segment cut into `n` equal collinear pieces.
-        pub fn dense(pts: &[(f32, f32)], n: usize) -> Vec<(f32, f32)> {
-            let mut out = vec![pts[0]];
-            for w in pts.windows(2) {
-                for k in 1..=n {
-                    let t = k as f32 / n as f32;
-                    out.push((w[0].0 + (w[1].0 - w[0].0) * t, w[0].1 + (w[1].1 - w[0].1) * t));
-                }
-            }
-            out
-        }
-
-        pub const REVERSAL: [(f32, f32); 3] = [(250.0, 340.0), (750.0, 340.0), (300.0, 340.0)];
-        /// Largest and mean |difference| (µm) of open paint between two
-        /// canvases, and the larger total.
-        pub fn delta(a: &Canvas, b: &Canvas) -> (f32, f64) {
-            let (mut mx, mut s) = (0.0f32, 0.0f64);
-            for i in 0..a.wet.vol.len() {
-                let d = ((a.wet.vol[i] - b.wet.vol[i]) * COAT_UM).abs();
-                mx = mx.max(d);
-                s += d as f64;
-            }
-            (mx, s / a.wet.vol.len() as f64)
-        }
-
-        /// A tube of the inness box as fresh paint.
-        pub fn tube(name: &str) -> crate::Paint {
-            let pal = crate::palette::Palette::named_box("inness").unwrap();
-            let i = pal.tubes.iter().position(|t| t.name == name).unwrap();
-            pal.pile(vec![(i, 1.0)]).laid(0.0)
-        }
-
-        /// `thin::set_film` with paint `paint`: every pixel in `r` exactly
-        /// `um` µm of it, fresh and unthinned.
-        pub fn set_film_of(c: &mut Canvas, um: f32, r: (f32, f32, f32, f32), paint: crate::Paint) {
-            thin::brushed_in(c, paint, 0.9, r);
-            let lat = paint.latent();
-            let mid = ((r.0 + r.2) / 2.0, (r.1 + r.3) / 2.0);
-            let hide = c.wet.hide[px_in(c, (mid.0, mid.1, mid.0 + 2.0, mid.1 + 2.0))[0]];
-            if c.wet.clock.px.len() != c.wet.vol.len() {
-                c.wait(0.0);
-            }
-            for i in px_in(c, r) {
-                c.wet.vol[i] = um / COAT_UM;
-                c.wet.lat[i] = lat;
-                c.wet.hide[i] = hide;
-                c.wet.cover[i] = 1.0;
-                c.wet.clock.px[i].cure = 0.0;
-                if let Some(s) = c.wet.solv.get_mut(i) {
-                    *s = 0.0;
-                }
-            }
-        }
-
-        /// The face's capacity (mm³), as `rag_contact` computes it.
-        pub fn cap(c: &Canvas, r: &Rag) -> f64 {
-            let w = (r.width * c.mm_per_unit()) as f64;
-            w * w * CAP_UM as f64 / 1000.0
-        }
-
-    }
-
-    /// Engine 3's path and transfer contracts (AGENT_BRIEF_V2 §2-3), on
-    /// direct 3 µm films at 480 px.
-    mod contracts {
-        use super::path::*;
-        use super::thin::{PAINTED, on_canvas};
-        use super::*;
-
-        /// The same continuous motion given with more points along it moves
-        /// the same paint: a line and a scrub back over it, as 2 or 3
-        /// points and as 51 (pieces a tenth of a step). Before the path fix
-        /// the 51-point line left up to 0.56 µm more or less at a pixel
-        /// and lifted 3.4% more (notes/rag/path-fix).
-        #[test]
-        fn a_wipe_does_not_depend_on_how_many_points_give_its_path() {
-            let c0 = fixture(true, 3, 480, 3.0);
-            for path in [thin::LINE.to_vec(), REVERSAL.to_vec()] {
-                let run = |pts: &[(f32, f32)]| {
-                    let mut c = c0.clone();
-                    let mut r = Rag::new(100.0, 7);
-                    let l = c.rag_wipe(&mut r, pts, &[0.8], 19);
-                    (c, r, l)
-                };
-                let (a, ra, la) = run(&path);
-                let (b, rb, lb) = run(&dense(&path, 50 / (path.len() - 1)));
-                let (mx, _) = delta(&a, &b);
-                assert!(mx < 1e-3, "largest difference {mx} µm");
-                assert!((la - lb).abs() < 1e-5 * la && (ra.load - rb.load).abs() < 1e-6, "lifted {la} vs {lb}");
-            }
-        }
-
-        /// One face takes no more than it has room for (`CAP_UM`): a damp
-        /// face scrubbed over a thick film until it is full holds at most
-        /// its capacity, and what the canvas lost is what the face holds.
-        #[test]
-        fn a_full_face_takes_no_more_and_loses_nothing() {
-            let mut c = fixture(false, 3, 480, 300.0);
-            let mut r = Rag::new(100.0, 7);
-            let cap = cap(&c, &r);
-            let start = on_canvas(&c);
-            for k in 0..8u64 {
-                r.dip(1.0, c.now_min(), &mut c.tally);
-                let pts = if k % 2 == 0 { thin::LINE.to_vec() } else { vec![thin::LINE[1], thin::LINE[0]] };
-                c.rag_wipe(&mut r, &pts, &[0.9], 40 + k);
-            }
-            let taken = (start - on_canvas(&c)) / cap;
-            assert!(r.load > 0.999, "the face fills: {}", r.load);
-            assert!(taken < 1.0 + 1e-5 && (taken - r.load as f64).abs() < 1e-5, "canvas lost {taken} faces, face holds {}", r.load);
-        }
-
-        /// A dirty face carries the wet paint at its surface to its next
-        /// wipe, and smears some on clean ground; a blot (no slide) smears
-        /// none of it; a refolded face holds its load but no wet paint, and
-        /// lays nothing.
-        #[test]
-        fn a_dirty_face_carries_wet_paint_and_a_refolded_one_none() {
-            let mut c0 = ground_e(false, 3, 480);
-            set_film_of(&mut c0, 3.0, (PAINTED.0, PAINTED.1, 480.0, PAINTED.3), tube("raw umber"));
-            let mut r0 = Rag::new(100.0, 7);
-            c0.rag_wipe(&mut r0, &[(250.0, 340.0), (450.0, 340.0)], &[0.8], 3);
-            assert!(r0.mobile.mm3 > 0.0);
-            let clean = |c: &Canvas| c.wet.vol.iter().enumerate().filter(|&(i, _)| c.f.ux(i % c.f.w) > 560.0).map(|(_, &v)| v as f64).sum::<f64>();
-            assert_eq!(clean(&c0), 0.0);
-            let over = [(600.0, 340.0), (800.0, 340.0)];
-            // the same face, lifted and set down on clean ground
-            let (mut c, mut r) = (c0.clone(), r0);
-            c.rag_wipe(&mut r, &over, &[0.8], 4);
-            assert!(clean(&c) > 0.0, "a dirty face smears its wet paint");
-            // a blot doesn't slide
-            let (mut c, mut r) = (c0.clone(), r0);
-            c.rag_blot(&mut r, 700.0, 340.0, 0.8, 4);
-            assert_eq!(clean(&c), 0.0, "a blot smears nothing");
-            assert!(r.mobile.mm3 > 0.0 && r.mobile.mm3 < r0.mobile.mm3, "the pressed face's paint soaks in");
-            // refolded
-            let (mut c, mut r) = (c0.clone(), r0);
-            r.refold(&mut c.tally);
-            assert!(r.mobile == Mobile::default() && r.load == r.soaked && r.load > 0.0);
-            let before = on_canvas(&c);
-            c.rag_wipe(&mut r, &over, &[0.8], 4);
-            assert!(clean(&c) == 0.0 && on_canvas(&c) == before, "a refolded face lays nothing");
         }
     }
 }

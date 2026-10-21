@@ -212,21 +212,28 @@ pub(crate) fn box_blur_into(src: &[f32], w: usize, h: usize, r: usize, out: &mut
     // vertical: running sums per column, processed in column blocks
     columns.resize_with(w.div_ceil(64), Vec::new);
     columns.par_iter_mut().enumerate().for_each(|(bi, res)| {
-            let x0 = bi * 64;
-            let nc = (w - x0).min(64);
-            res.resize(nc * h, 0.0);
+        let x0 = bi * 64;
+        let nc = (w - x0).min(64);
+        res.resize(nc * h, 0.0);
+        let mut sums = [0.0f32; 64];
+        for k in 0..=2 * r {
+            let start = k.saturating_sub(r).min(h - 1) * w + x0;
+            let row = &tmp[start..start + nc];
             for ci in 0..nc {
-                let x = x0 + ci;
-                let mut acc = 0.0f32;
-                for k in 0..=2 * r {
-                    acc += tmp[k.saturating_sub(r).min(h - 1) * w + x];
-                }
-                for y in 0..h {
-                    res[y * nc + ci] = acc / n;
-                    acc += tmp[(y + r + 1).min(h - 1) * w + x] - tmp[y.saturating_sub(r) * w + x];
-                }
+                sums[ci] += row[ci];
             }
-        });
+        }
+        for (y, row) in res.chunks_exact_mut(nc).enumerate() {
+            let top = y.saturating_sub(r) * w + x0;
+            let bottom = (y + r + 1).min(h - 1) * w + x0;
+            let top = &tmp[top..top + nc];
+            let bottom = &tmp[bottom..bottom + nc];
+            for ci in 0..nc {
+                row[ci] = sums[ci] / n;
+                sums[ci] += bottom[ci] - top[ci];
+            }
+        }
+    });
     out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
         for (bi, block) in columns.iter().enumerate() {
             let x0 = bi * 64;
@@ -243,9 +250,18 @@ impl Canvas {
         self.mm_per_unit / self.f.scale
     }
 
-    /// Lay the bare support: woven linen height in µm, averaged over each
-    /// pixel's footprint so threads finer than a pixel don't alias.
+    /// Lay the bare support: a sheet of paper (`paper::lay`), or woven linen
+    /// height in µm, averaged over each pixel's footprint so threads finer
+    /// than a pixel don't alias.
     pub(crate) fn build_support(&mut self) {
+        if let Some(p) = self.paper {
+            let f = self.f;
+            let s = crate::paper::lay(&p, f.x0, f.y0, f.w, f.h, self.px_mm());
+            self.height = s.height;
+            self.micro = s.micro;
+            self.surf_gen += 1;
+            return;
+        }
         let Some(l) = self.linen else { return };
         let (w, h) = (self.f.w, self.f.h);
         let (ox, oy) = (self.f.x0, self.f.y0);
@@ -275,18 +291,31 @@ impl Canvas {
     /// thin fluid paint gathers in the valleys and thins on the peaks.
     pub(crate) fn settle(&mut self, rect: (usize, usize, usize, usize), add: &[f32], stiff: &[f32]) -> Vec<f32> {
         let sets = vec![SET_TIME; add.len()];
-        self.settle_for(rect, add, stiff, &sets, false)
+        self.settle_for(rect, add, stiff, &sets, false, None)
     }
 
     /// The surface with the wet paint on it, as the painter's raking light
     /// sees it (`seen_lit`): the dry height plus each wet film's paint and solvent thickness.
-    /// Paint bridges the fine relief under it as a set film does (engine 4,
-    /// `BRIDGE_UM`); clear solvent adds height without changing the underlying relief.
+    /// The liquid film, paint and the solvent in it alike, bridges the fine
+    /// relief under it (engine 4, `BRIDGE_UM`): a liquid's surface levels as
+    /// surface tension pulls it flat, the thinner the liquid the sooner, so a
+    /// thinned film is no less level than its paint alone would be.
+    /// With the drain switch only the paint still liquid bridges it: a
+    /// packed layer follows the relief (`settle_for`).
     pub(crate) fn wet_surface(&self) -> Vec<f32> {
         let (w, h) = (self.f.w, self.f.h);
         let wet: Vec<f32> = self.wet.vol.par_iter().enumerate().map(|(i, v)| v * COAT_UM + self.wet.solv.get(i).copied().unwrap_or(0.0)).collect();
+        // (the drain switch: the paint still liquid, above a packed layer)
+        let liquid = |i: usize| {
+            let paint = self.wet.vol[i] * COAT_UM;
+            if self.drain { paint - paint * self.wet.hide[i][7].clamp(0.0, 1.0) } else { paint }
+        };
         if self.engine < 4 {
             return self.height.par_iter().zip(&wet).map(|(a, b)| a + b).collect();
+        }
+        // (no wet paint anywhere: every pixel is its dry height, without the blurs)
+        if wet.par_iter().all(|&a| a <= 0.0) {
+            return self.height.clone();
         }
         let Bands { r1, .. } = Bands::at(self.px_mm());
         let fine = box_blur(&box_blur(&self.height, w, h, r1), w, h, r1);
@@ -297,15 +326,24 @@ impl Canvas {
                 if a <= 0.0 {
                     return self.height[i];
                 }
-                let keep = (-self.wet.vol[i] * COAT_UM / BRIDGE_UM).exp();
+                let bridge = if self.liquid_film_levels { liquid(i) + self.wet.solv.get(i).copied().unwrap_or(0.0) } else { liquid(i) };
+                let keep = (-bridge / BRIDGE_UM).exp();
                 fine[i] + (self.height[i] - fine[i]) * keep + a
             })
             .collect()
     }
 
     /// `settle`, with each pixel's paint leveling for its own time `sets`
-    /// (s): how long it stayed fluid (see `drying`).
-    pub(crate) fn settle_for(&mut self, rect: (usize, usize, usize, usize), add: &[f32], stiff: &[f32], sets: &[f32], bridge: bool) -> Vec<f32> {
+    /// (s): how long it stayed fluid (see `drying`). With `fluid`, only that
+    /// share of each pixel's film flows (the drain switch: the rest has
+    /// packed on an absorbent ground, `bristle::ground_drain`). The packed
+    /// layer is a filter cake bonded to the ground: it follows the relief
+    /// and keeps its thickness, and the liquid above it levels over its top,
+    /// its depth setting how fast (as depth cubed) and how much of the relief
+    /// under it it bridges. Only the liquid is rescaled and conserved, so no
+    /// pixel ends below its packed layer, and the film returned is the two's.
+    /// Where nothing has packed (`fluid` 1) it is as without `fluid`.
+    pub(crate) fn settle_for(&mut self, rect: (usize, usize, usize, usize), add: &[f32], stiff: &[f32], sets: &[f32], bridge: bool, fluid: Option<&[f32]>) -> Vec<f32> {
         // far below any film is nothing at all (see ADD_EPS_UM): zero it so
         // float residue can't pose as paint in the ratios below
         let clean: Vec<f32>;
@@ -314,6 +352,18 @@ impl Canvas {
             &clean[..]
         } else {
             add
+        };
+        // (the drain switch: each pixel's packed layer, which stays as it
+        // is, and the liquid above it, which levels; a liquid far below any
+        // film is none, see ADD_EPS_UM: that pixel is packed through)
+        let split: Option<(Vec<f32>, Vec<f32>)> = fluid.map(|f| {
+            let liquid: Vec<f32> = add.iter().zip(f).map(|(&a, &f)| if a * f < ADD_EPS_UM { 0.0 } else { a * f }).collect();
+            let packed = add.iter().zip(&liquid).map(|(&a, &l)| a - l).collect();
+            (packed, liquid)
+        });
+        let (liq, under): (&[f32], Option<&[f32]>) = match &split {
+            Some((p, l)) => (&l[..], Some(&p[..])),
+            None => (add, None),
         };
         let (x0, y0, x1, y1) = rect;
         let (rw, rh) = (x1 - x0, y1 - y0);
@@ -342,7 +392,7 @@ impl Canvas {
         out.par_chunks_mut(rw).enumerate().for_each(|(y, row)| {
             for x in 0..rw {
                 let i = y * rw + x;
-                let a = add[i];
+                let a = liq[i];
                 if a <= 0.0 {
                     row[x] = 0.0;
                     continue;
@@ -354,15 +404,22 @@ impl Canvas {
                 let d1 = shrink(s[i] - l1[i], k1, c1);
                 let d2 = shrink(l1[i] - l2[i], k2, c2);
                 let lev = l2[i] + d1 + d2;
-                // the wet film can move sideways but not dig into what's under it
-                row[x] = (lev - old[i]).max(0.0);
+                // the wet film can move sideways but not dig into what's
+                // under it (with the drain switch, the liquid levels over
+                // the packed layer's top)
+                let base = match under {
+                    Some(p) if p[i] > 0.0 => old[i] + p[i],
+                    _ => old[i],
+                };
+                row[x] = (lev - base).max(0.0);
             }
         });
         // conserve paint: the leveled shape says where the wet film gathers,
         // but only the paint that was put down can move, and only nearby.
         // Rescale by the ratio of paint laid to paint kept, both averaged
         // over the leveling distance, so each neighborhood keeps its volume.
-        box_blur_into(add, rw, rh, r2, mid);
+        // (With the drain switch only the liquid is laid, kept and moved.)
+        box_blur_into(liq, rw, rh, r2, mid);
         box_blur_into(mid, rw, rh, r2, laid);
         box_blur_into(&out, rw, rh, r2, mid);
         box_blur_into(mid, rw, rh, r2, kept);
@@ -370,16 +427,27 @@ impl Canvas {
             // (a ratio of blur residues is not a ratio: it can overflow and
             // turn 0 × ∞ into NaN, which then paints full masstone)
             let r = laid[i] / kept[i];
-            if add[i] <= 0.0 {
+            if liq[i] <= 0.0 {
                 *o = 0.0;
             } else if kept[i] > laid[i] * 1e-3 && r.is_finite() && (*o * r).is_finite() {
                 *o *= r;
             } else {
                 // everything drained away: nowhere to pool, keep it in place
-                *o = add[i];
+                *o = liq[i];
             }
         });
-        conserve_total(add, &mut out, |_| f32::NEG_INFINITY, |_| f32::INFINITY);
+        conserve_total(liq, &mut out, |_| f32::NEG_INFINITY, |_| f32::INFINITY);
+        // (the drain switch: the liquid, which bridges the relief, and the
+        // film, the packed layer under it plus the liquid)
+        let liquid = under.map(|p| {
+            let l = out.clone();
+            out.par_iter_mut().zip(p).for_each(|(o, &p)| {
+                if p > 0.0 {
+                    *o += p;
+                }
+            });
+            l
+        });
         self.raise(rect, &old, add, &out);
         // engine 4: a thick film bridges the fine relief under it (the weave,
         // the ground's brush marks): its top is shaped by the brush, not by
@@ -393,8 +461,10 @@ impl Canvas {
                 for x in 0..rw {
                     let i = y * rw + x;
                     if add[i] > 0.0 {
-                        // (by the film as it leveled here: thin on a peak it drained from)
-                        let keep = (-out[i].max(0.0) / BRIDGE_UM).exp();
+                        // (by the film as it leveled here: thin on a peak it
+                        // drained from; with the drain switch its liquid)
+                        let depth = liquid.as_ref().map_or(out[i], |l| l[i]);
+                        let keep = (-depth.max(0.0) / BRIDGE_UM).exp();
                         self.height[(y0 + y) * w + x0 + x] -= (old[i] - fine[i]) * (1.0 - keep);
                     }
                 }
@@ -572,75 +642,123 @@ fn linen_um(xm: f32, ym: f32, l: &Linen) -> f32 {
 }
 
 #[cfg(test)]
-mod tests {
+mod box_blur_tests {
     use super::*;
-    use crate::color::hex;
 
-    fn total(v: &[f32]) -> f64 {
-        v.iter().map(|&x| x as f64).sum()
-    }
-
-    /// The exact global correction stops each pixel at its bound (the peak
-    /// film when it scales down, the pool cap when it scales up) and the
-    /// others make up the difference, so the total is still exact.
-    #[test]
-    fn the_total_is_made_exact_within_the_bounds() {
-        // scaling down: pixel 0 is at its floor
-        let add = [1.0f32, 1.0, 1.0, 1.0];
-        let mut out = [0.5f32, 2.0, 1.0, 1.0];
-        conserve_total(&add, &mut out, |_| 0.5, |_| f32::INFINITY);
-        assert_eq!(out[0], 0.5, "{out:?}");
-        assert!((total(&out) - 4.0).abs() < 1e-6, "{out:?}");
-        // scaling up: pixel 1 is at its cap
-        let mut out = [0.5f32, 2.0, 0.5, 0.5];
-        conserve_total(&add, &mut out, |_| 0.0, |_| 2.0);
-        assert_eq!(out[1], 2.0, "{out:?}");
-        assert!((total(&out) - 4.0).abs() < 1e-6, "{out:?}");
-        // no bound in the way: one factor for all
-        let mut out = [0.5f32, 2.0, 1.0, 1.0];
-        conserve_total(&add, &mut out, |_| 0.0, |_| f32::INFINITY);
-        let k = (4.0f64 / 4.5) as f32;
-        assert_eq!(out, [0.5 * k, 2.0 * k, k, k]);
-    }
-
-    /// A cascade that needs many pinning rounds (each round's stronger
-    /// factor carries a few more pixels to the floor) still ends inside
-    /// the bounds: no pixel ends below the floor.
-    #[test]
-    fn a_long_pinning_cascade_keeps_the_bounds() {
-        let n = 1024usize;
-        let add = vec![0.5f32; n];
-        let mut out: Vec<f32> = (0..n).map(|i| 0.5 + 0.5 * i as f32 / (n - 1) as f32).collect();
-        conserve_total(&add, &mut out, |_| 0.5, |_| 1.0);
-        let min = out.iter().cloned().fold(f32::INFINITY, f32::min);
-        assert!(min >= 0.5, "a pixel below the floor: {min}");
-        assert!((total(&out) - 512.0).abs() < 1e-3, "total {}", total(&out));
-    }
-
-    /// A varnish over tall dry impasto at 3200px (0.094 mm/px) keeps its
-    /// peak film and pool cap exactly, not to within the global correction.
-    #[test]
-    fn a_film_over_impasto_keeps_its_bounds_exactly() {
-        let (w, h) = (240usize, 240usize);
-        let mut c = Canvas::new(w, 1.0, hex("#808080")).with_size_mm(w as f32 * 0.094);
-        for y in 0..h {
-            for x in 0..w {
-                let (xf, yf) = (x as f32, y as f32);
-                let mut z = 20.0 * ((xf * 0.9).sin() * (yf * 0.8).sin()).abs();
-                for k in 0..9 {
-                    let (cx, cy) = (30.0 + 80.0 * (k % 3) as f32, 30.0 + 80.0 * (k / 3) as f32);
-                    if ((xf - cx) / 22.0).powi(2) + ((yf - cy) / 12.0).powi(2) < 1.0 {
-                        z += 100.0 + 25.0 * k as f32;
-                    }
-                }
-                c.height[y * w + x] = z;
+    fn reference(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
+        if r == 0 {
+            return src.to_vec();
+        }
+        let n = (2 * r + 1) as f32;
+        let mut tmp = vec![0.0; w * h];
+        for (y, row) in tmp.chunks_exact_mut(w).enumerate() {
+            let s = &src[y * w..(y + 1) * w];
+            let mut acc = 0.0f32;
+            for k in 0..=2 * r {
+                acc += s[k.saturating_sub(r).min(w - 1)];
+            }
+            for (x, o) in row.iter_mut().enumerate() {
+                *o = acc / n;
+                acc += s[(x + r + 1).min(w - 1)] - s[x.saturating_sub(r)];
             }
         }
-        let add = vec![2.25f32; w * h];
-        let t = c.settle_film(&add, 0.05);
-        assert!((total(&t) - total(&add)).abs() < total(&add) * 1e-6, "volume {} -> {}", total(&add), total(&t));
-        let (lo, hi) = t.iter().fold((f32::MAX, 0.0f32), |(l, m), &v| (l.min(v), m.max(v)));
-        assert!(lo >= PEAK_FILM_UM, "a peak thinned past the peak film: {lo} µm");
-        assert!(hi <= POOL_MAX * 2.25, "a hollow pooled past the cap: {hi} µm");
+        let mut out = vec![0.0; w * h];
+        for x in 0..w {
+            let mut acc = 0.0f32;
+            for k in 0..=2 * r {
+                acc += tmp[k.saturating_sub(r).min(h - 1) * w + x];
+            }
+            for y in 0..h {
+                out[y * w + x] = acc / n;
+                acc += tmp[(y + r + 1).min(h - 1) * w + x] - tmp[y.saturating_sub(r) * w + x];
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn row_major_columns_preserve_reference_bits() {
+        let values = [0.0, -0.0, f32::from_bits(1), -f32::from_bits(1), f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE, 1.0, -1.0, f32::from_bits(0x3f800001), 1e20, -1e20];
+        for threads in [1, 4] {
+            rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap().install(|| {
+                let mut actual = vec![f32::NAN; 10000];
+                let mut check = |src: &[f32], w, h, r| {
+                    let expected = reference(src, w, h, r);
+                    box_blur_into(src, w, h, r, &mut actual);
+                    assert_eq!(actual.len(), expected.len());
+                    for (i, (&a, &b)) in actual.iter().zip(&expected).enumerate() {
+                        assert_eq!(a.to_bits(), b.to_bits(), "{w}x{h} r={r}, pixel {i}, threads={threads}");
+                    }
+                };
+                for w in [129, 1, 2, 63, 64, 65, 127] {
+                    for h in [1, 2, 5, 65] {
+                        for pattern in 0..3 {
+                            let src: Vec<f32> = (0..w * h).map(|i| match pattern {
+                                0 => -0.0,
+                                1 => values[i % values.len()],
+                                _ => f32::from_bits(((i as u32).wrapping_mul(1664525).wrapping_add(1013904223) & 0x807fffff) | 0x3f000000),
+                            }).collect();
+                            for r in [0, 1, 3, w.max(h) + 1] {
+                                check(&src, w, h, r);
+                            }
+                        }
+                    }
+                }
+                for paper in [false, true] {
+                    let c = Canvas::new(65, 1.3, crate::hex("#a8966f")).with_size_mm(13.0);
+                    let c = if paper { c.with_paper(crate::paper::Paper::drawing(7)) } else { c.with_linen(Linen::fine(7)) };
+                    for r in [0, 1, 3, 67] {
+                        check(&c.height, c.f.w, c.f.h, r);
+                    }
+                }
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod liquid_film_tests {
+    use super::*;
+
+    #[test]
+    fn absent_switch_keeps_the_old_surface_and_lighting_through_checkpoints() {
+        for engine in [4, 5, 7, 8] {
+            let mut c = crate::Style::oil().prepare(80, 1.0, 3).with_engine(engine);
+            c.wet.solv = vec![0.0; c.height.len()];
+            for i in 0..c.height.len() {
+                c.wet.vol[i] = (i % 7) as f32 * 0.3;
+                c.wet.solv[i] = (i % 11) as f32 * 30.0;
+            }
+            assert!(!c.liquid_film_levels());
+            let (w, h) = (c.f.w, c.f.h);
+            let Bands { r1, .. } = Bands::at(c.px_mm());
+            let fine = box_blur(&box_blur(&c.height, w, h, r1), w, h, r1);
+            let expected: Vec<f32> = (0..w * h).map(|i| {
+                let a = c.wet.vol[i] * COAT_UM + c.wet.solv[i];
+                if a <= 0.0 {
+                    return c.height[i];
+                }
+                let keep = (-c.wet.vol[i] * COAT_UM / BRIDGE_UM).exp();
+                fine[i] + (c.height[i] - fine[i]) * keep + a
+            }).collect();
+            crate::tests::image_tolerance::assert_fields_close(c.wet_surface(), expected.iter().copied());
+            let old_lit = c.seen_lit(315.0, 55.0, 1.0);
+            for levels in [false, true] {
+                let c = c.clone().with_liquid_film_levels(levels);
+                let mut saved = Vec::new();
+                c.write_state(&mut saved, "").unwrap();
+                let restored = Canvas::read_state(&mut &saved[..]).unwrap().0;
+                assert_eq!(restored.liquid_film_levels(), levels);
+                assert_eq!(restored.wet_surface(), c.wet_surface());
+                assert_eq!(restored.seen_lit(315.0, 55.0, 1.0), c.seen_lit(315.0, 55.0, 1.0));
+                if levels {
+                    assert_ne!(restored.seen_lit(315.0, 55.0, 1.0), old_lit);
+                } else {
+                    crate::tests::image_tolerance::assert_fields_close(restored.wet_surface(), expected.iter().copied());
+                    crate::tests::image_tolerance::assert_fields_close(restored.seen_lit(315.0, 55.0, 1.0).into_iter().flatten(), old_lit.iter().flatten().copied());
+                }
+            }
+        }
     }
 }

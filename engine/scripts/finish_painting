@@ -4,7 +4,7 @@
 # finish`, seconds), or, with no save, by replaying its log. The Friedrich
 # studio gets varnish and cracks; every other studio keeps its final state.
 # The log's box records the artist profile selected by export_r16_studio.
-# Painters don't finish their own pictures (the painter build has no
+# Painters don't finish their own pictures (painter mode has no
 # varnish{}, cracks{} or relief()),
 # so that varnishing can't become their way of ending.
 #
@@ -16,7 +16,7 @@
 #   --no-cracks   skip the cracks
 #   --relief      also light the surface's relief (the easel's default strength)
 #
-# Writes <out.png> (2400 px, like `easel save`) and, beside it, <out>.lua:
+# Writes <out.png> (at the painting's width, like `easel save`) and, beside it, <out>.lua:
 # the painter's log, with a finishing chunk only for Friedrich, which `easel run`
 # replays to the same picture. Uses the replay build (default features:
 # `replay` and `finish`), built from this checkout. A save that isn't of
@@ -66,19 +66,25 @@ opts=(--coats "$coats")
 [ $relief = 1 ] && opts+=(--relief)
 finishing=$("$easel" finish --print-chunk "${opts[@]}")
 
-mkdir -p "$(dirname "$out")"
-finished=${out%.png}.lua
-# the finished log goes next to the PNG: never over the log being finished
-if [ "$finished" -ef "$log" ]; then
-  echo "finish_painting: $finished is the log itself; write the PNG under another name or folder" >&2
-  exit 1
-fi
-{ cat "$log"; [ -z "$finishing" ] || printf '\n--@ chunk (finishing)\n%s\n' "$finishing"; } > "$finished.part"
-mv "$finished.part" "$finished"
-
 # the save the painter's session wrote when it closed: <studio>/out/easel/<name>/live.ckpt
 name=$(basename "$log" .lua)
 save=$(cd "$(dirname "$log")/../.." && pwd)/out/easel/$name/live.ckpt
+finished=${out%.png}.lua
+for destination in "$out" "$finished"; do
+  for source in "$log" "$save" "$save.zst" "$save.gz"; do
+    if [ "$destination" -ef "$source" ]; then
+      echo "finish_painting: output must differ from the save and source log" >&2
+      exit 1
+    fi
+  done
+done
+mkdir -p "$(dirname "$out")"
+finished_part=$(mktemp "$finished.XXXXXX")
+trap 'rm -f "$finished_part"' EXIT
+{ cat "$log"; [ -z "$finishing" ] || printf '\n--@ chunk (finishing)\n%s\n' "$finishing"; } > "$finished_part"
+mv "$finished_part" "$finished"
+trap - EXIT
+
 for candidate in "$save" "$save.zst" "$save.gz"; do
   [ -f "$candidate" ] || continue
   input=$candidate
@@ -106,5 +112,6 @@ for candidate in "$save" "$save.zst" "$save.gz"; do
   echo "finish_painting: saved end state $candidate didn't match or couldn't finish; trying the next save" >&2
 done
 echo "finish_painting: no usable matching saved end state; replaying the full log $log" >&2
-"$easel" run "$finished" --out "$out"
+"$easel" run "$finished" --out "$out" --replay-checkpoint "$out.replay.ckpt"
+rm -f "$out.replay.ckpt"
 echo "finished: $out (log: $finished)"
