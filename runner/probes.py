@@ -9,7 +9,7 @@ as DATA/run/probe-ok-<harness fingerprint>.json, which `atelier birth` requires.
 
   context    the model is asked to report everything it was given; transcript and reply must be clean
   tools      exactly the eight easel tools; paint, status, look, read of a folder, write of the notebook
-  long       a chunk that runs about 25 minutes at 4800 px (the tool timeouts must not cut it)
+  long       a chunk that runs about 12 minutes at 4800 px (the tool timeouts must not cut it)
 A usage limit can't be forced; its handling is covered by runner/tests (fake Claude Code) and is watched for in
 the first real limit (RUN-6).
 """
@@ -49,10 +49,12 @@ PROBES = {
     "tools": (f"Use the tools in this order, one call per turn: paint with this chunk exactly: {CANVAS} ; then status; "
               "then look; then read with path \".\"; then read with path \"walls\"; then read with path \"easel guide\" (the first part is enough); then write notebook with the text "
               "\"probe\"; then reply with the word done.", "low"),
-    # a real painting pass that takes about 25 minutes (a bare counting loop tripped a safety classifier)
+    # a real painting pass that takes about 12 minutes (a bare counting loop tripped a safety classifier): coverage 9
+    # on engine 8, 738 s; coverage 28 took 24 minutes on engine 5 and 81 on engine 8, so the time grows faster than
+    # the coverage (2026-10-21)
     "long": (f"Call paint with this chunk exactly: {CANVAS.replace('size=300', 'size=600')} ; then call paint with this "
              "chunk exactly: p = pile{{\"raw umber\", 1}, {\"lead white\", 2}} work(everywhere(), {hand=\"detail\", "
-             "pile=p, coverage=28}) ; then reply with the word done.", "low"),
+             "pile=p, coverage=9}) ; then reply with the word done.", "low"),
 }
 
 
