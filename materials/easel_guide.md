@@ -701,7 +701,7 @@ The reply lists the remaining tile paths; read them one at a time to inspect
 the rest of the canvas.
 
 A whole view defaults to 1000 pixels on its long side (`size` up to 1600),
-about 42% of a 2400-pixel canvas's width: small marks, beads of paint and
+about 21% of a 4800-pixel canvas's width: small marks, beads of paint and
 stray strokes can be hard to see in it. Survey the canvas after
 each campaign, and compare before and after.
 
@@ -749,13 +749,13 @@ with `scratch: true`; without it they work on the painting.
 - The first chunk painted on it sets it up as the painting's canvas was set up: the same
   size, linen and ground. The painting needs its own `canvas{}` first.
 - It is a separate canvas: its own palette, brushes, knives, rags and variables (a pile
-  knifed for the painting has to be knifed again here), and its own log,
-  `paintings/lua/scratch.lua`. Nothing done on it reaches the painting.
+  knifed for the painting has to be knifed again here), and its own log (`log` with
+  `scratch: true`). Nothing done on it reaches the painting.
 - It keeps its own clock. Time spent or waited there (`wait`, `dry()`, `glaze()`) doesn't
   pass for the painting, and the painting's time doesn't pass for it.
 - To use what worked, paint it on the painting: the same pile, the same handling.
-- `new_scratch: true` (with `scratch: true`) puts the scratch canvas aside and starts a
-  fresh one before the chunk runs. The old log stays, as `paintings/lua/scratch-1.lua`, and so on.
+- `new_scratch: true` (with `scratch: true`) puts the scratch canvas aside, with its log, and
+  starts a fresh one before the chunk runs.
 - A trial judges a passage only as far as it repeats that passage's conditions: lay the
   underlayer you mean to work over, and let it dry as long as it has on the painting.
 

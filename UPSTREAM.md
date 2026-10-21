@@ -47,6 +47,8 @@ She develops actively; this is routine. In a worktree of its own (the runner pai
 
 - `engine/crates/easel/src/main.rs`: `ATELIER` (on when `tools/build-engine.sh` builds: `ATELIER_BUILD`): a new
   painting at `NEW_WIDTH` 4800 px, the journal named `journal`. Off in a plain `cargo test`, so her tests hold.
+  Its help names "the journal" and "the easel guide" (not her paths), `run` replays "at the log's width", and the
+  width errors give `NEW_WIDTH` (2026-10-21; these go with the width code at the sync that takes her 76bedb8).
 - `engine/crates/easel/src/session.rs`: `WIDTH_MARK` (`--@ width 4800` in a log's head), `logged_width`,
   `chunk_limit_for` (the chunk limit scaled with the pixel count); her `width_for` (main.rs) reads it. Test
   `the_log_names_its_width`; `the_guide_shows_the_painters_box` (the guide's table is the every box's).
@@ -59,14 +61,19 @@ She develops actively; this is routine. In a worktree of its own (the runner pai
   incremental one left work i-010 unverified (2026-10-18). Test `engine/scripts/tests/release_profile.sh`.
 - `materials/easel_guide.md`: the tube table is the every box's (`easel tubes --markdown`; each studio's copy has its
   own box's, runner/studio.py); "close up" for crops; the journal and the log without file paths; two lines
-  reworded for the white room ("as dirty as a working palette gets", "as many tiles as one reply holds").
+  reworded for the white room ("as dirty as a working palette gets", "as many tiles as one reply holds"); the
+  scratch canvas's log without its paths (`log` with `scratch: true`; put aside "with its log"), and a whole view
+  "about 21% of a 4800-pixel canvas's width" (hers: 42% of 2400) (2026-10-21).
 - `materials/easel_guide.md`, since 693f49f (the owner, 2026-10-13): without her section "Color, planes and open
   coverage" (warm and cool space, tilted planes, facets, multiple viewpoints: a way of painting, unnamed but
   recognisable, offered to every painter). The guide documents tools; a manner is the painter's to find. On a merge
   that brings the section back or changes it, take it out again.
 - `easel-mcp/src/server.ts`: her painter tools over MCP, with the atelier's read/write/edit; the log without its
   box line (a box may be named after a painter); its own survey reply (hers speaks of a budget).
-- `easel-mcp/src/upstream/easel-client.ts`: `WAIT_MS` raised for 4800 px (see below).
+- `easel-mcp/src/upstream/easel-client.ts`: `WAIT_MS` raised for 4800 px (`do` 48 minutes, `rebuild` 120; see below);
+  `tail()`'s default note points to `log` with an offset, not to the painting's file.
+- `easel-mcp/src/upstream/journal.ts`: `JOURNAL` is `journal` (hers `notes/journal.md`). server.ts names it so in
+  `note`'s reply (`noted in journal`, `revised in journal`), where the easel and journal.ts give its absolute path.
 
 Known, hers: `rag::tests::a_dry_rag_leaves_a_pale_tint_and_spirits_lift_nearly_to_the_ground` fails here at 78c86ce
 and 693f49f alike (0.8993 against its 0.9); the paint crate is hers unchanged.
@@ -79,6 +86,13 @@ runs after `tools.ts`, in the same studio: it needs the canvas `tools.ts` paints
 ## Changes
 
 Engine changes are atelier events (requirements ENG-5), listed here with their date and reason.
+
+- 2026-10-21 after a dead-code audit (the owner): the easel's help and two width errors say what the atelier's
+  build does (the journal, the easel guide, the log's width, `NEW_WIDTH`), and `logged_width`'s fallbacks name
+  `LEGACY_WIDTH`; the painting engine is unchanged. The painters' tools: `note` answers "noted in journal" /
+  "revised in journal", not the journal's absolute path; the easel guide's scratch canvas section gives no file
+  paths, and a whole view is about 21% of a 4800-pixel canvas. Checked: the easel's tests, the runner's, the easel
+  tools (tools.ts, upstream.ts), the white room, and ii-010 replayed byte for byte with the new replay easel.
 
 - 2026-10-13 claude-paint 693f49f merged (the owner: "start with the upstream sync"; 158 commits): painter names and
   stray references out of the easel guide, its wording plainer; faster replay (reused buffers, less memory traffic,

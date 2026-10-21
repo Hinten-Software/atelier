@@ -174,16 +174,20 @@ server.registerTool("look", {
 	return sent({ content: [{ type: "text", text: said }, ...images] as Content[] });
 }));
 
+// the easel and journal.ts say where an entry went as an absolute path ("noted in /Users/Shared/<xx>/studio/journal"):
+// the studio names its journal without one (owner, 2026-10-21)
+const journalNamed = (t: string) => t.replace(/^(noted|revised) in \/.*\/journal$/m, "$1 in journal");
+
 server.registerTool("note", {
 	description: "Add an entry to your journal, stamped with the painting's time. " +
 		"To revise what is already there, give the exact passage to change as `replaces`: `text` takes its place.",
 	inputSchema: { text: z.string(), replaces: z.string().optional() },
 }, serial(async (p: { text: string; replaces?: string }) => {
 	try {
-		if (p.replaces !== undefined) return say(reviseJournal(studio, p.replaces, p.text));
-		return say(await atEasel(studio, ["note", "-"], p.text));
+		if (p.replaces !== undefined) return say(journalNamed(reviseJournal(studio, p.replaces, p.text)));
+		return say(journalNamed(await atEasel(studio, ["note", "-"], p.text)));
 	} catch (e) {
-		return fail((e as Error).message);
+		return fail((e as Error).message.replaceAll(`${studio}/`, ""));  // an easel error names the journal by its path
 	}
 }));
 

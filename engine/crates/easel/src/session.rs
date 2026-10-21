@@ -53,7 +53,7 @@ pub const CHUNK_LIMIT: Duration = Duration::from_secs(600);
 pub const WIDTH_MARK: &str = "--@ width";
 pub const LEGACY_WIDTH: usize = crate::LIVE_WIDTH;
 /// The widths a painting may name.
-pub const WIDTHS: [usize; 2] = [2400, 4800];
+pub const WIDTHS: [usize; 2] = [LEGACY_WIDTH, 4800];
 
 /// A chunk's limit at a width: `CHUNK_LIMIT` at the legacy width, scaled with the pixel count
 /// above it (atelier change, 2026-10-06), so a chunk that fit at 2400 px still fits at 4800.

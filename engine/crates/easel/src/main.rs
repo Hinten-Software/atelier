@@ -5,7 +5,7 @@
 //!   easel look [--crop x0,y0,x1,y1] [--mode value|squint|mirror] [--grid [step]] [--size N]
 //!   easel log | status | globals | save [path] | frames on|off | close
 //!   easel check                                    (replay build) replay the log, compare
-//!   easel note '<text>' | -                        append to notes/journal.md
+//!   easel note '<text>' | -                        append to the journal
 //!   easel run paintings/lua/<name>.lua [--out path] [--look] [--state-digest digests.txt]
 //!
 //! Two builds (see `USAGE`). The replay build (feature `replay`, on by
@@ -73,7 +73,7 @@ const NEW_WIDTH: usize = if ATELIER { 4800 } else { LIVE_WIDTH };
 fn width_for(name: &str, log: Option<&str>) -> usize {
     match log {
         Some(text) if session::logged_sketch(text) => session::SKETCH_WIDTH,
-        Some(text) => session::logged_width(text).unwrap_or(LIVE_WIDTH),
+        Some(text) => session::logged_width(text).unwrap_or(session::LEGACY_WIDTH),
         None if name.starts_with("sketch") => session::SKETCH_WIDTH,
         None => NEW_WIDTH,
     }
@@ -84,7 +84,7 @@ fn width_for(name: &str, log: Option<&str>) -> usize {
 const PAINTING: &str = "painting";
 
 #[cfg(not(feature = "replay"))]
-const USAGE: &str = "easel: a live painting session (see notes/easel_guide.md)
+const USAGE: &str = "easel: a live painting session (see the easel guide)
 
   easel open          start or reattach; replays paintings/lua/painting.lua if it exists
   easel do '<lua>'  |  easel do -f chunk.lua  |  easel do - (stdin)     [--look] also looks afterwards
@@ -99,11 +99,11 @@ const USAGE: &str = "easel: a live painting session (see notes/easel_guide.md)
   easel save [path] [--light az,el | --gallery]   the canvas as a PNG (default out/easel/painting/painting.png), lit on its relief if asked
   easel frames on|off save a look after every chunk
   easel close         end the session (the log stays)
-  easel note '<text>' | easel note - (stdin)    append a dated entry to notes/journal.md
+  easel note '<text>' | easel note - (stdin)    append a dated entry to the journal
   easel tubes [--markdown]   the tubes in the box (--markdown: as a table)";
 
 #[cfg(feature = "replay")]
-const USAGE: &str = "easel: a live painting session (see notes/easel_guide.md)
+const USAGE: &str = "easel: a live painting session (see the easel guide)
 
   easel open <name>    start or reattach; replays paintings/lua/<name>.lua if it exists
   easel do '<lua>'  |  easel do -f chunk.lua  |  easel do - (stdin)     [--look] also looks afterwards
@@ -119,8 +119,8 @@ const USAGE: &str = "easel: a live painting session (see notes/easel_guide.md)
   easel frames on|off save a look after every chunk
   easel check         replay the log from scratch and compare with the live canvas
   easel close         end the session (the log stays)
-  easel note '<text>' | easel note - (stdin)    append a dated entry to notes/journal.md
-  easel run <file.lua> [--out path.png] [--look] [--state-digest digests.txt]    replay at 2400px and write the PNG
+  easel note '<text>' | easel note - (stdin)    append a dated entry to the journal
+  easel run <file.lua> [--out path.png] [--look] [--state-digest digests.txt]    replay at the log's width and write the PNG
       [--checkpoint-out path.ckpt]   export the final finishable state after success
       [--frames-every <s> --frames-dir <dir> [--frame-width 1000]]   and a frame per <s> of hand time
       [--width <px>]   replay narrower, a preview for development (not the painting)
@@ -493,7 +493,7 @@ fn open_name(args: &[String]) -> Result<String, String> {
     let name = args.first().filter(|a| !a.starts_with('-')).ok_or("open <name>")?.clone();
     valid_name(&name)?;
     if args.len() != 1 {
-        return Err("open: live sessions are fixed at 2400px; no width option".into());
+        return Err(format!("open: live sessions are fixed at {NEW_WIDTH}px; no width option"));
     }
     Ok(name)
 }
@@ -559,7 +559,7 @@ fn open(args: &[String]) -> Result<(), String> {
     let mut last_progress = Instant::now();
     // a chunk may take its whole limit to replay (session::chunk_limit_for, by the width its log
     // names): no progress for that long, and ten minutes more, is a stall
-    let width = std::fs::read_to_string(log_path(&name)).ok().and_then(|t| session::logged_width(&t).ok()).unwrap_or(LIVE_WIDTH);
+    let width = std::fs::read_to_string(log_path(&name)).ok().and_then(|t| session::logged_width(&t).ok()).unwrap_or(session::LEGACY_WIDTH);
     let stall = session::chunk_limit_for(width) + Duration::from_secs(600);
     loop {
         if let Some(lock) = try_lock(&name)? {
@@ -695,7 +695,7 @@ fn serve(args: &[String]) -> Result<(), String> {
         return Err(format!("easel: fatal: this studio has one painting, {PAINTING:?}"));
     }
     if args.len() != 1 {
-        return Err("easel: fatal: live sessions are fixed at 2400px".into());
+        return Err(format!("easel: fatal: live sessions are fixed at {NEW_WIDTH}px"));
     }
     let _lock = serve_lock(&name).map_err(|e| format!("easel: fatal: {e}"))?;
     let mut srv = Server::resume(name.clone()).map_err(|e| format!("easel: fatal: {e}"))?;
@@ -1634,7 +1634,7 @@ fn run(args: &[String]) -> Result<(), String> {
     let stem = Path::new(file).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or("easel".into());
     // a development preview may replay narrower (kernel radii are in mm, so it is not the
     // painting at a smaller size: see notes/workflow.md); the painting is the width it was
-    // painted at (LIVE_WIDTH, a sketch's SKETCH_WIDTH)
+    // painted at (its log's width line, else LEGACY_WIDTH; a sketch's SKETCH_WIDTH)
     let width = match flag(args, "--width") {
         None => width_for(&stem, Some(&text)),
         Some(w) => w.parse::<usize>().ok().filter(|w| (16..=LIVE_WIDTH * 4).contains(w)).ok_or_else(|| format!("--width {w}: want px, 16 to {}", LIVE_WIDTH * 4))?,
