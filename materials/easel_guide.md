@@ -51,7 +51,14 @@ canvas{size=<mm>, aspect=<width / height>, linen={<warp>, <weft>}, seed=<seed>,
                ...}}
 ```
 
-- `size`: the canvas's width in mm (50 to 5000).
+- `size`: the canvas's width in mm (50 to 5000). The painting is 4800 pixels
+  wide whatever its size, so one pixel covers `size ÷ 4800` mm of cloth (0.125 mm
+  on a 600 mm canvas). A thread of the weave shows only where it spans at least two
+  pixels: with `linen` of n threads per cm, up to a canvas width of 24000 ÷ n mm
+  (1333 mm at 18 threads per cm, 2400 mm at 10). On a wider canvas the weave, and
+  paint texture as fine as it, are lost. Brushes and everything placed on the
+  canvas are in canvas units, so a larger canvas holds the same picture at a
+  larger scale, not more of it.
 - `aspect`: width / height.
 - `linen`: plain-weave linen, threads per cm, one number or `{warp, weft}`
   (4 to 60).

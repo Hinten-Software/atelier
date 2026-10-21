@@ -79,7 +79,9 @@ She develops actively; this is routine. In a worktree of its own (the runner pai
   own box's, runner/studio.py); "close up" for crops; the journal and the log without file paths; two lines
   reworded for the white room ("as dirty as a working palette gets", "as many tiles as one reply holds"); the
   scratch canvas's log without its paths (`log` with `scratch: true`; put aside "with its log"), and a whole view
-  "about 21% of a 4800-pixel canvas's width" (hers: 42% of 2400) (2026-10-21).
+  "about 21% of a 4800-pixel canvas's width" (hers: 42% of 2400) (2026-10-21); under `size`, what the fixed width
+  of 4800 pixels means for a canvas's size: where the weave stops showing (24000 ÷ threads per cm, in mm) and that
+  a larger canvas holds the same picture at a larger scale (the owner, 2026-10-21).
 - `materials/easel_guide.md`, since fea9aa6 (the owner, 2026-10-21): without paper and pastel (the `paper` canvas
   option, the section "Paper", pastel in "Drawing" with the sheet, the dry brush, the knife over pastel, the puff and
   the tap; the pastel stick held up), without `probe`, `reference`/`reference_list` and look's `edges` mode (not
