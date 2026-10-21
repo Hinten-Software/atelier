@@ -237,7 +237,7 @@ Priority: **M** must (M1, M2), **S** should (M3), **C** could (later).
 | REC-1 | Each work produces an immutable work package (section 7). | M |
 | REC-2 | Parser: Claude Code transcripts into the viewer's timeline. Core done; add notebook edits, sittings, pauses, audit marks. | M |
 | REC-3 | Live: the viewer updates within 2 minutes of an event (export every 2 min, OPS-4). | M |
-| REC-4 | Replay check at work end (`check_painting`), hash stored; the work is hung only if `check: ok`. | M |
+| REC-4 | **Changed (the owner, 2026-10-21):** what hangs is the painter's own canvas as it was when the easel closed (`live.png`; without one, the canvas painted again from the log). The replay check at work end (`check_painting`) is a record kept with the work (`check.txt`, `replay_verified` and `final_from` in the manifest, the morning report), not a condition for hanging: a disrupted sitting shows in the painting. Each work's easels are archived by hash (`DATA/archive/engines/`), so it can be painted again on its own engine. The atelier is about AI and art in a white room; repainting is kept, not its purpose. | M |
 | REC-5 | Per-chunk frames. | C |
 | REC-6 | High-resolution final render, optional varnish, made after the work (may run while the next work paints). | S |
 | REC-7 | **Changed:** privacy: nothing public names the owner (C17), an account, a home path, a machine, an IP, an email, or a Claude account or session id. Checked by a scan (private word list outside the repository, plus patterns for email, UUID, IP, `/Users/`) that fails the export. | M |
@@ -300,7 +300,7 @@ The next work may start while REC-6's long render runs; it may not start before 
 
 | ID | Requirement |
 |---|---|
-| NFR-1 Determinism | Replays byte-identical. |
+| NFR-1 Determinism | **Changed (2026-10-21):** a log replays byte-identical on the easel it was painted with (archived per work); a newer engine need not repaint older works, and a merge from upstream is not held to it. |
 | NFR-2 Permanence | A work replays from its package and the archived binaries alone (ENG-3). |
 | NFR-3 Compliance | Claude Code as shipped and unmodified; no header spoofing, no credential sharing; operation mode (a) (Q1). |
 | NFR-4 Privacy | REC-7, REC-8; the private store has mode 700. |

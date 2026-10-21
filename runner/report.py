@@ -61,8 +61,8 @@ def report(hours: float) -> tuple[str, list[str]]:
             lines.append(f"- {d['id']} {d.get('title') or 'UNTITLED'} ({ok}{cost})")
             if not d.get("title"):
                 needs.append(f"{d['id']} was hung without a title: the painter's words are in works/{d['id']}/reply.md")
-            if not d.get("replay_verified"):
-                needs.append(f"{d['id']}: the replay check did not pass")
+            if not d.get("replay_verified"):  # a record now, not a gate: the painter's canvas hangs either way
+                needs.append(f"{d['id']}: hung, but its replay check did not pass (works/{d['id']}/check.txt)")
         else:
             lines.append(f"- {d['id']} not finished: {(d.get('why') or '')[:160]}{cost}")
     if not done:

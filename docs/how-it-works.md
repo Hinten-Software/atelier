@@ -5,7 +5,7 @@ system prompt and exactly eight tools: `paint`, `look`, `note`, `status`, `log`,
 `write`, `edit`. The studio is a folder that names things as a painter would: brief,
 notebook, toolkit, journal, easel guide, notes on oil paint, walls. A runner prepares
 each work, starts and resumes sittings, audits every transcript live for anything from
-outside the studio, verifies that the finished painting replays exactly, and hangs it.
+outside the studio, hangs the finished painting as the painter left it, and records whether it replays exactly from its log.
 The public site is a static export, scanned for private strings before it is
 published, served from a NAS through a Cloudflare Tunnel.
 

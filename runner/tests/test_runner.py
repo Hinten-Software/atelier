@@ -86,6 +86,10 @@ def main():
         check("the work is finished", s["state"] == "finished", s["state"])
         m = json.loads((DATA / "works/i-001/manifest.json").read_text())
         check("replay verified", m["replay_verified"], m["replay"])
+        live = root / "studio/out/easel/painting/live.png"
+        check("what hangs is the painter's canvas at close", m["final_from"] == "live"
+              and (DATA / "works/i-001/final.png").read_bytes() == live.read_bytes(), m.get("final_from"))
+        check("the replay check is kept with the work", "check:" in (DATA / "works/i-001/check.txt").read_text())
         check("title from the reply", m["title"] == "Test Study", m["title"])
         check("date shown is recorded", all(x["date_shown"] for x in m["sittings"]), m["sittings"])
         walls = root / "studio/walls"
@@ -246,10 +250,12 @@ def main():
         check("'resets 9am' read at 13:55 is tomorrow", 18 * 3600 < works.reset_time("resets 9am", ref) - ref.timestamp() < 20 * 3600)
         check("'resets Mon 9am' is Monday", 1.7 * 86400 < works.reset_time("resets Mon 9am", ref) - ref.timestamp() < 1.9 * 86400)
         check("a 429 is not a usage limit", not works.is_limit("429 rate_limit_error"))
-        # 9. a work whose replay check fails says so as its reason (i-010's report read "not finished: ,")
+        # 9. why a work isn't hung, for the morning report (i-010's read "not finished: ,"); a failed replay check is a
+        # record, not a reason (the owner, 2026-10-21): the painter's canvas hangs
         differs = "check: DIFFERS from the live canvas: the replay DIFFERS from the live canvas saved at close"
-        check("a failed check is the reason", works.unfinished_why({"verified": False, "verdict": differs}, True) == differs)
-        check("no voluntary end is a reason", "own accord" in works.unfinished_why({"verified": True, "verdict": "check: ok"}, False))
+        check("a failed check alone is no reason", works.unfinished_why({"verified": False, "verdict": differs, "final_from": "live"}, True) == "not finished")
+        check("no picture is a reason, with the check", works.unfinished_why({"verdict": differs}, True).startswith("no picture") and differs in works.unfinished_why({"verdict": differs}, True))
+        check("no voluntary end is a reason", "own accord" in works.unfinished_why({"verified": True, "verdict": "check: ok", "final_from": "live"}, False))
     finally:
         if os.environ.get("KEEP"):
             print(f"kept {DATA} and {roots}")

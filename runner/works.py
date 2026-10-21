@@ -347,8 +347,11 @@ class Work:
 
     # -- finishing ----------------------------------------------------------------------------------------------
     def finish(self):
-        """Close the easel, verify the replay, write the work package, hang it (REC-1, REC-4, ART-10). Safe to run
-        again after a failure midway (QA Q8): every step either repeats harmlessly or is skipped once done."""
+        """Close the easel, check the replay, write the work package, hang it (REC-1, REC-4, ART-10). Safe to run
+        again after a failure midway (QA Q8): every step either repeats harmlessly or is skipped once done.
+        What hangs is the painter's own canvas as it was when the easel closed (the owner, 2026-10-21): whatever
+        happened in the room is part of it. The replay check is a record kept with the work, not a condition for
+        hanging; the work's easels are archived (archive_engines), so it can be painted again on its own engine."""
         a, pkg, s = self.artist, self.pkg, self.artist.studio
         done = self.state.setdefault("finish_done", [])
         if "check" not in done:
@@ -367,8 +370,17 @@ class Work:
             if swapped:
                 self.state["replay_easel_swapped"] = swapped
             self.state.update(verdict=verdict, verified=verdict.startswith("check: ok"))
-            if (check / "replayed.png").exists():
-                shutil.copy2(check / "replayed.png", pkg / "final.png")
+            # the painter's canvas, saved when the easel closed, if it holds every chunk of the log (a close that never
+            # came leaves an earlier one's); else the canvas painted again from the log
+            live = s / "out" / "easel" / "painting" / "live.png"
+            log = s / "paintings" / "lua" / "painting.lua"
+            held = re.search(r"^chunks (\d+)$", (live.with_suffix(".txt").read_text() if live.with_suffix(".txt").exists() else ""), re.M)
+            whole = held and log.exists() and int(held[1]) == len(re.findall(r"^--@ chunk", log.read_text(), re.M))
+            for src, origin in ((live if whole else None, "live"), (check / "replayed.png", "replay")):
+                if src and src.exists():
+                    shutil.copy2(src, pkg / "final.png")
+                    self.state["final_from"] = origin
+                    break
             done.append("check")
             self.save()
         if "package" not in done:
@@ -387,6 +399,8 @@ class Work:
                     if p.exists():
                         shutil.copy2(p, sessions / p.name)
             write_timeline(pkg, [Path(r["transcript"]) for r in self.state["sittings"]])
+            if (self.run / "check.txt").exists():  # the replay check, kept with the work (REC-4)
+                shutil.copy2(self.run / "check.txt", pkg / "check.txt")
             (pkg / "reply.md").write_text(self.state.get("reply", ""))
             hist = a.home / "history"
             hist.mkdir(parents=True, exist_ok=True)
@@ -398,7 +412,7 @@ class Work:
         reply = self.state.get("reply", "")
         title = viewer.title_of(reply)
         voluntary = any(r["how"] == "voluntary" for r in self.state["sittings"])
-        finished = self.state.get("verified", False) and voluntary and not self.state.get("contaminated")
+        finished = (pkg / "final.png").exists() and voluntary and not self.state.get("contaminated")
         why = None if finished else unfinished_why(self.state, voluntary)
         if finished and "hung" not in done:
             hang(a, next_wall_number(a), pkg / "final.png", title, reply)
@@ -413,7 +427,8 @@ class Work:
             "model": a_model(a), "model_seen": model_seen(self.state["sittings"]), "effort": a_effort(a),
             "claude_code": CLAUDE_VERSION, "hashes": self.state["hashes"], "audit_hits": self.state["hits"],
             "contaminated": bool(self.state.get("contaminated")), "restarted": self.state.get("restarted", []), "replay": self.state.get("verdict"),
-            "replay_verified": self.state.get("verified", False),
+            "replay_verified": self.state.get("verified", False),  # a record (REC-4), not what hangs it
+            "final_from": self.state.get("final_from"),  # "live": the painter's canvas at close; "replay": from the log
             "final_sha256": sha256(pkg / "final.png") if (pkg / "final.png").exists() else None,
             "finished": finished,  # written last: only once it hangs (QA Q8)
         }
@@ -434,12 +449,12 @@ class Work:
 
 
 def unfinished_why(state: dict, voluntary: bool) -> str:
-    """Why a work that went through finish() isn't hung: the first that holds of contamination, the replay
-    check's verdict, and no sitting that ended of the painter's own accord."""
+    """Why a work that went through finish() isn't hung: the first that holds of contamination, no picture of the
+    canvas (neither the painter's at close nor a replay), and no sitting that ended of the painter's own accord."""
     if state.get("contaminated"):
         return "contaminated: the white-room audit stopped a sitting"
-    if not state.get("verified", False):
-        return state.get("verdict") or "check: no verdict"
+    if not state.get("final_from"):
+        return f"no picture of the canvas ({state.get('verdict') or 'check: no verdict'})"
     if not voluntary:
         return "no sitting ended of the painter's own accord"
     return "not finished"

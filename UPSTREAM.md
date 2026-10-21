@@ -42,9 +42,9 @@ She develops actively; this is routine. In a worktree of its own (the runner pai
 5. Her painter tools: compare `easel-mcp/src/upstream/easel-tools.ts` (her current version) with what
    `easel-mcp/src/server.ts` serves, and port what is new (its header says what was last ported).
 6. `uv run tools/whiteroom.py` - every new text a painter reads, clean or allowed with a reason.
-7. `bash tools/upstream/live-check.sh` - a painting made with the newest tools replays byte for byte: the gate.
-   `bash tools/upstream/verify.sh` reports whether the finished paintings still replay (a report: their PNGs hang
-   either way, the owner 2026-10-10).
+7. `bash tools/upstream/live-check.sh` - a painting made with the newest tools replays byte for byte (a smoke test
+   of the new easels). Finished paintings are not repainted on the new engine: each is kept with the easel it was
+   painted on (REC-4, NFR-1; the owner, 2026-10-21). `bash tools/upstream/verify.sh` is optional, a report only.
 8. `python3 runner/probes.py` - the production setup with the new tools, audited.
 9. Merge into `main` between works (a work in progress keeps its own easel, but each sitting loads the painter
    tools from `main`), then the About page if the painters' tools changed, and an atelier event in history.md.
@@ -62,7 +62,8 @@ She develops actively; this is routine. In a worktree of its own (the runner pai
 - `engine/scripts/check_painting` and `engine/scripts/compare_images.py`: ours, not hers. Since her #166 (b04d78a6)
   her check says "check: ok" when the replay meets an image tolerance (±2 levels a channel), and her compare_images.py
   applies that tolerance on the same platform too. Ours ask for the replay to equal the live canvas byte for byte on
-  the same platform, as REC-4 does (the tolerance only across platforms), `EASEL_NO_BUILD=1` uses the replay easel
+  the same platform (the tolerance only across platforms): REC-4 keeps the verdict as a record of the work (the
+  painter's canvas hangs either way since 2026-10-21), so it should say exactly what it found, `EASEL_NO_BUILD=1` uses the replay easel
   already built, and check_painting clears every `PAINT_*` variable first (hers change engine 5's and later output:
   `PAINT_SMALL_TILES`, `PAINT_COARSE_AGING`). On every merge, keep ours. Her tests of hers
   (`engine/scripts/tests/check_painting_test.py`, the image tolerance tests) then fail here: known, see below.
