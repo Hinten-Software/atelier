@@ -32,7 +32,7 @@ const finalImg = (w, small) => `/studio/data/${w.viewer}/${small ? "final-t.jpg"
 const fullImg = (w) => `/studio/data/${w.viewer}/final-f.jpg`;  // the whole painting, every pixel
 // a zoomed page or a dense screen takes the full-size copy by itself; the plain one serves everyone else
 const srcsetOf = (w) => w.px ? `${finalImg(w)} 1600w, ${fullImg(w)} ${w.px}w` : "";
-const closeUp = (w) => ({ src: finalImg(w), srcset: srcsetOf(w), full: w.px ? fullImg(w) : null, px: w.px, title: w.title || "Untitled", href: workHref(w) });
+const closeUp = (w) => ({ src: finalImg(w), srcset: srcsetOf(w), full: w.px ? fullImg(w) : null, px: w.px, title: w.title || "Untitled", href: workHref(w), measure: measure(w) });
 const workHref = (w) => `/work/?w=${encodeURIComponent(w.id)}`;
 
 async function data() {
@@ -68,6 +68,7 @@ function lightbox(items, start) {  // items: [{src, srcset, full, title, href}]
     img.src = it.src; img.alt = it.title || "";
     img.style.cursor = it.full ? "zoom-in" : "zoom-out";
     cap.replaceChildren(it.href ? el("a", { href: it.href, textContent: it.title || "Untitled" }) : it.title || "");
+    if (it.measure) cap.append(el("span", { class: "state", textContent: ` · ${it.measure}` }));
     if (items.length > 1) cap.append(el("span", { class: "state", textContent: `  ${i + 1} of ${items.length}` }));
   };
   const go = (d) => { i = (i + d + items.length) % items.length; show(); };
@@ -139,10 +140,15 @@ function steady(box, blocks) {  // blocks: [key, sig, make]
   nodes.forEach((n, i) => { const s = n.querySelector(".scroll"); if (s && at[i]) s.scrollTop = at[i]; });
 }
 
+// the painting's size and support, as a museum label gives them (ATL-14): "oil on linen, 60 × 37.5 cm"
+const cm = (n) => String(n).replace(/\.0$/, "");
+const measure = (w) => (w.cm ? `oil on ${w.support === "linen" || !w.support ? "linen" : w.support}, ${cm(w.cm[0])} × ${cm(w.cm[1])} cm` : "");
+
 function label(w) {
   return el("p", { class: "label" },
     el("span", { class: "title", textContent: w.title || "Untitled" }),
-    `${studioName(artistOf(w.id))} · work ${w.number} · ${MODELS[w.model] || w.model || ""}${w.date ? " · " + day(w.date) : ""}`);
+    `${studioName(artistOf(w.id))} · work ${w.number} · ${MODELS[w.model] || w.model || ""}${w.date ? " · " + day(w.date) : ""}`,
+    ...(w.cm ? [el("span", { class: "measure", textContent: measure(w) })] : []));
 }
 
 async function door() {
@@ -222,7 +228,7 @@ async function walls() {
   const figs = done.map((w, k) => el("figure", {},
     el("img", { src: finalImg(w, true), alt: w.title || "Untitled", loading: "lazy", onclick: () => lightbox(all, k) }),
     el("figcaption", {}, el("a", { href: workHref(w), class: "t", textContent: w.title || "Untitled" }),
-      el("div", { class: "state", textContent: `work ${w.number}${w.date ? " · " + day(w.date) : ""}` }))));
+      el("div", { class: "state", textContent: `work ${w.number}${w.date ? " · " + day(w.date) : ""}${w.cm ? " · " + cm(w.cm[0]) + " × " + cm(w.cm[1]) + " cm" : ""}` }))));
   // a year of paintings stays easy to walk through: the current season on the wall, each earlier one folded under its
   // name (2026-10-13). While everything is from one season, the wall is as it always was.
   const seasons = [];
@@ -305,7 +311,7 @@ async function essaysPage() {
   const w = e.frontispiece && d.works.find((x) => x.id === e.frontispiece && x.finished);
   if (w) box.append(el("figure", { class: "frontispiece" },
     el("a", { href: workHref(w) }, el("img", { src: finalImg(w), alt: w.title || "Untitled" })),
-    el("figcaption", { class: "state", textContent: `${w.title || "Untitled"}, ${studioName(artistOf(w.id))}, work ${w.number}` })));
+    el("figcaption", { class: "state", textContent: `${w.title || "Untitled"}, ${studioName(artistOf(w.id))}, work ${w.number}${w.cm ? ", " + measure(w) : ""}` })));
   box.append(el("h1", { textContent: e.title }), el("p", { class: "state", textContent: day(e.published) }));
   for (const b of e.blocks) box.append(b.h ? el("h2", {}, ...prose(b.h)) : el("p", {}, ...prose(b.p)));
 }

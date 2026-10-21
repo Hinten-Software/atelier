@@ -71,6 +71,21 @@ def farm():
     return works
 
 
+def canvas_of(w: Path) -> dict:
+    """The canvas the painter set up, as the replay check's reopen line reports it ("size=600, aspect=1.3333334,
+    linen={16, 16}"): width and height in cm (one decimal) and what the paint lies on. Nothing when there is no check."""
+    for check in (w / "check.txt", DATA / "run" / w.name / "check.txt"):
+        if check.exists():
+            m = re.search(r"· size=([\d.]+), aspect=([\d.]+), (\w+)=(\S+)", check.read_text())
+            if m:
+                cm = lambda mm: float(f"{mm / 10:.1f}")
+                size, aspect = float(m[1]), float(m[2])
+                raw = re.search(r'raw="([^"]+)"', check.read_text()) if m[3] == "raw" else None
+                support = raw[1] if raw else "linen"  # primed linen, or the bare cloth: "cotton duck" or "linen"
+                return {"cm": [cm(size), cm(size / aspect)], "support": support}
+    return {}
+
+
 def works_json(works):
     out = []
     for w in works:
@@ -84,6 +99,8 @@ def works_json(works):
             pub["notebook"] = (w / "notebook.after.md").read_text() if (w / "notebook.after.md").exists() else ""
             # the date of the painting as the atelier's calendar has it (the last sitting's day), not a visitor's
             pub["date"] = (man.get("sittings") or [{}])[-1].get("date_shown")
+            # its physical size and support, as a museum label gives them (ATL-14)
+            pub.update(canvas_of(w))
             # its width in pixels, so a browser knows what the full-size copy holds (srcset)
             if (w / "final.png").exists():
                 from PIL import Image

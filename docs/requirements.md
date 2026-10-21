@@ -261,6 +261,8 @@ Priority: **M** must (M1, M2), **S** should (M3), **C** could (later).
 | ATL-11 | Thinking labeled as the provider's summary. | M |
 | ATL-12 | **Visitor privacy (new):** no analytics, or cookie-free aggregate counts only; a short privacy note. Legal notice obligations for the operator "Hinten Software" checked before M2 (Q8). | M |
 | ATL-13 | All artist-written text is rendered as text (escaped, never as HTML); a strict Content-Security-Policy. | M |
+| ATL-14 | **New (the owner, 2026-10-21):** each finished painting's physical size and support are stated where it is shown (walls, work page, close-up view), as a museum label does: width × height in cm, oil on linen or on the bare cloth. | M |
+| ATL-15 | **Open (the owner, 2026-10-21), to be designed:** an atelier that conveys scale and proportion. A painting's size is the painter's choice (50 to 5000 mm), but every painting is shown at the same screen size: a visitor can't tell a Guernica from a postage stamp, can't see paintings in proportion to each other or to another object (a notional standing figure, for example), and can't come close the way one can in a studio, nose almost to the canvas (the browser's zoom stops short of the painting's own detail). The design has to scale to the sizes and proportions painters choose and to the number of works the studios will make over the years. | S |
 
 ### 5.9 Operations and hosting (OPS)
 
