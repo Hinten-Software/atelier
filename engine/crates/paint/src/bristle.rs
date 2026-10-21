@@ -27,7 +27,7 @@ use crate::wet::{LAT, Latent, Paint, Prop, mix_into};
 
 /// Relief (µm) that spans a bristle's contact range: a bristle pressed
 /// lightly touches only peaks this much above their surroundings.
-const TOOTH_UM: f32 = 60.0;
+pub(crate) const TOOTH_UM: f32 = 60.0;
 /// The level a brush rests on around each pixel: the median height within
 /// about `r` px either side (a running median along the rows, then along the
 /// columns, over ±1.5 r), smoothed a little (a box blur of radius r/3).
@@ -87,9 +87,10 @@ fn transpose(src: &[f32], w: usize, h: usize) -> Vec<f32> {
 
 /// How far into the tooth's range the paint a fully loaded hair carries
 /// reaches ahead of the hair (see `exchange`).
-const WET_REACH: f32 = 0.5;
+pub(crate) const WET_REACH: f32 = 0.5;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(feature = "replay-effects", derive(serde::Serialize, serde::Deserialize))]
 pub enum Kind {
     Round,
     Flat,
@@ -100,6 +101,7 @@ pub enum Kind {
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "replay-effects", derive(serde::Serialize, serde::Deserialize))]
 pub struct Tool {
     pub kind: Kind,
     /// Footprint width at full pressure (units).
@@ -333,22 +335,23 @@ impl Tool {
 }
 
 #[derive(Clone)]
+#[cfg_attr(feature = "replay-effects", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct Bristle {
     /// Root offset in the brush frame (x along the wide axis), roughly −1..1.
-    rx: f32,
-    ry: f32,
-    len: f32,
+    pub(crate) rx: f32,
+    pub(crate) ry: f32,
+    pub(crate) len: f32,
     /// Pressure needed before this bristle touches.
-    thresh: f32,
-    bend: (f32, f32),
-    seed: u64,
-    prev: [Option<(f32, f32)>; 2],
+    pub(crate) thresh: f32,
+    pub(crate) bend: (f32, f32),
+    pub(crate) seed: u64,
+    pub(crate) prev: [Option<(f32, f32)>; 2],
     pub(crate) vol: f32,
-    lat: Latent,
-    hide: Prop,
+    pub(crate) lat: Latent,
+    pub(crate) hide: Prop,
     /// Cure of the paint in it (0 fresh from the palette; paint lifted off
     /// a drying film brings the film's).
-    cure: f32,
+    pub(crate) cure: f32,
     /// Solvent it carries beside its paint (`vol`), in the same units
     /// (`crate::thinner`; engine 3): from a thinned pile, or lifted with
     /// the paint off a solvent-wet film. 0 for unthinned paint.
@@ -358,6 +361,7 @@ pub(crate) struct Bristle {
 /// A brush in the hand, with paint in its bristles. (`Debug` is part of
 /// `easel run --state-digest`: see its impl.)
 #[derive(Clone)]
+#[cfg_attr(feature = "replay-effects", derive(serde::Serialize, serde::Deserialize))]
 pub struct Held {
     pub tool: Tool,
     pub(crate) bristles: Vec<Bristle>,
@@ -367,17 +371,27 @@ pub struct Held {
     /// Painting with engine 4 or later: its `Debug` gives each bristle's
     /// paint its solvent and oil too. Not printed itself.
     shows_oil: bool,
+    /// Painting on a canvas that drains (`Canvas::with_drain`): and the
+    /// pigment's packing, `Prop`'s last five (`with_packing`).
+    shows_packing: bool,
+    /// Dry pastel held in the bristles, mg (`Canvas::dust_pastel`, the
+    /// paper-and-pastel switch's `b:dust`); a wipe takes its share off.
+    /// Printed only when there is some, so a brush that never brushed pastel
+    /// prints (and digests) as it did before.
+    pub pastel_mg: f32,
 }
 
 /// A bristle's `Debug`, as `#[derive(Debug)]` printed it before the
 /// thinner, field for field, plus `solvent` when `show` (engine 3); the
-/// paint's properties without solvent and oil unless `oil` (engine 4).
-struct BristleText<'a>(&'a Bristle, bool, bool);
+/// paint's properties without solvent and oil unless `oil` (engine 4), and
+/// without the pigment's packing (`Prop`'s last five) unless `packing` (the
+/// drain switch, `Canvas::with_drain`).
+struct BristleText<'a>(&'a Bristle, bool, bool, bool);
 
 impl std::fmt::Debug for BristleText<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let b = self.0;
-        let hide: &[f32] = if self.2 { &b.hide } else { &b.hide[..3] };
+        let hide: &[f32] = if self.3 { &b.hide } else if self.2 { &b.hide[..5] } else { &b.hide[..3] };
         let mut d = f.debug_struct("Bristle");
         d.field("rx", &b.rx)
             .field("ry", &b.ry)
@@ -399,23 +413,31 @@ impl std::fmt::Debug for BristleText<'_> {
 
 impl std::fmt::Debug for Bristle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        BristleText(self, true, true).fmt(f)
+        BristleText(self, true, true, true).fmt(f)
     }
 }
 
 /// The text of a brush (`easel run --state-digest` hashes it, and the
 /// state dump keeps it): exactly what `#[derive(Debug)]` printed before the
 /// thinner, so a painting from an engine before 3 digests as it did; an
-/// engine-3 brush (`with_engine`) names each bristle's `solvent` too.
+/// engine-3 brush (`with_engine`) names each bristle's `solvent` too. The
+/// pastel a dry brush holds (`pastel_mg`) is named only when there is some:
+/// only `b:dust` gives a brush any, and only the paper-and-pastel switch
+/// brings `b:dust`, so a painting without the switch digests as it did.
 impl std::fmt::Debug for Held {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        struct List<'a>(&'a [Bristle], bool, bool);
+        struct List<'a>(&'a [Bristle], bool, bool, bool);
         impl std::fmt::Debug for List<'_> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.debug_list().entries(self.0.iter().map(|b| BristleText(b, self.1, self.2))).finish()
+                f.debug_list().entries(self.0.iter().map(|b| BristleText(b, self.1, self.2, self.3))).finish()
             }
         }
-        f.debug_struct("Held").field("tool", &self.tool).field("bristles", &List(&self.bristles, self.shows_solvent, self.shows_oil)).finish()
+        let mut d = f.debug_struct("Held");
+        d.field("tool", &self.tool).field("bristles", &List(&self.bristles, self.shows_solvent, self.shows_oil, self.shows_packing));
+        if self.pastel_mg > 0.0 {
+            d.field("pastel_mg", &self.pastel_mg);
+        }
+        d.finish()
     }
 }
 
@@ -477,14 +499,14 @@ impl Held {
                     seed: i as u64 * 7919 + seed,
                     prev: [None, None],
                     vol: 0.0,
-                    lat: [0.0; LAT],
-                    hide: [0.5, 0.5, 1.0, 0.0, 1.0],
+                    lat: Latent::default(),
+                    hide: [0.5, 0.5, 1.0, 0.0, 1.0, crate::wet::PACKED_OIL, crate::wet::DRAINED_FLOOR, 0.0, crate::wet::OIL_VOLUME, 0.0],
                     cure: 0.0,
                     solvent: 0.0,
                 }
             })
             .collect();
-        Held { tool, bristles, shows_solvent: false, shows_oil: false }
+        Held { tool, bristles, shows_solvent: false, shows_oil: false, shows_packing: false, pastel_mg: 0.0 }
     }
 
     /// The brush of a painting with engine `v`: from engine 3 its `Debug`
@@ -493,6 +515,13 @@ impl Held {
     pub fn with_engine(mut self, v: u32) -> Self {
         self.shows_solvent = v >= 3;
         self.shows_oil = v >= 4;
+        self
+    }
+
+    /// The brush of a painting whose canvas drains (`Canvas::with_drain`):
+    /// its `Debug` gives each bristle's paint the pigment's packing too.
+    pub fn with_packing(mut self, on: bool) -> Self {
+        self.shows_packing = on;
         self
     }
 
@@ -527,12 +556,12 @@ impl Held {
                 let v = amount * full * k * if crate::thinner::exchange() { (1.0 - t).powf(crate::thinner::exchange_kj().1) } else { 1.0 };
                 let vp = v * (1.0 - t);
                 b.cure = mix_cure(b.cure, b.vol, 0.0, vp);
-                mix_into(&mut b.vol, &mut b.lat, &mut b.hide, vp, &lat, [scatter, paint.stiff, paint.drying, paint.solvent, paint.oil]);
+                mix_into(&mut b.vol, &mut b.lat, &mut b.hide, vp, &lat, [scatter, paint.stiff, paint.drying, paint.solvent, paint.oil, paint.packed, paint.floor, 0.0, paint.oil_volume, 0.0]);
                 b.solvent += v * t;
                 continue;
             }
             b.cure = mix_cure(b.cure, b.vol, 0.0, amount * full * k);
-            mix_into(&mut b.vol, &mut b.lat, &mut b.hide, amount * full * k, &lat, [scatter, paint.stiff, paint.drying, paint.solvent, paint.oil]);
+            mix_into(&mut b.vol, &mut b.lat, &mut b.hide, amount * full * k, &lat, [scatter, paint.stiff, paint.drying, paint.solvent, paint.oil, paint.packed, paint.floor, 0.0, paint.oil_volume, 0.0]);
         }
     }
 
@@ -557,17 +586,19 @@ impl Held {
                 let v = amount * full * k;
                 let vp = v * (1.0 - paint.thinner);
                 b.cure = mix_cure(b.cure, b.vol, 0.0, vp);
-                mix_into(&mut b.vol, &mut b.lat, &mut b.hide, vp, &lat, [scatter, paint.stiff, paint.drying, paint.solvent, paint.oil]);
+                mix_into(&mut b.vol, &mut b.lat, &mut b.hide, vp, &lat, [scatter, paint.stiff, paint.drying, paint.solvent, paint.oil, paint.packed, paint.floor, 0.0, paint.oil_volume, 0.0]);
                 b.solvent += v * paint.thinner;
                 continue;
             }
             b.cure = mix_cure(b.cure, b.vol, 0.0, amount * full * k);
-            mix_into(&mut b.vol, &mut b.lat, &mut b.hide, amount * full * k, &lat, [scatter, paint.stiff, paint.drying, paint.solvent, paint.oil]);
+            mix_into(&mut b.vol, &mut b.lat, &mut b.hide, amount * full * k, &lat, [scatter, paint.stiff, paint.drying, paint.solvent, paint.oil, paint.packed, paint.floor, 0.0, paint.oil_volume, 0.0]);
         }
     }
 
-    /// Wipe the brush on a rag: remove `frac` of the paint in it.
+    /// Wipe the brush on a rag: remove `frac` of the paint in it (and of the
+    /// dry pastel it holds).
     pub fn wipe(&mut self, frac: f32) {
+        self.pastel_mg *= 1.0 - frac.clamp(0.0, 1.0);
         for b in &mut self.bristles {
             b.vol *= 1.0 - frac.clamp(0.0, 1.0);
             b.solvent *= 1.0 - frac.clamp(0.0, 1.0);
@@ -591,6 +622,19 @@ impl Held {
     /// `Canvas::wet_total` (coats × square units).
     pub fn carried(&self) -> (f64, f64) {
         self.bristles.iter().fold((0.0, 0.0), |(p, s), b| (p + b.vol as f64, s + b.solvent as f64))
+    }
+
+    pub fn carried_parts(&self) -> Vec<(usize, f32)> {
+        let mut paint = Latent::default();
+        let mut volume = 0.0;
+        for b in &self.bristles {
+            if b.vol > 0.0 {
+                paint.add_parts(&b.lat, b.vol);
+                volume += b.vol;
+            }
+        }
+        paint.scale_parts(1.0 / volume.max(1e-9));
+        paint.parts
     }
 }
 
@@ -729,42 +773,64 @@ pub(crate) struct Surf {
     /// The buffers' pixels: a window (origin `ox`, `oy`, size `w` × `h`) of
     /// the whole `fw` × `fh` canvas. Brush geometry works in whole-canvas
     /// pixels; only buffer indices are translated.
-    w: usize,
-    h: usize,
-    ox: usize,
-    oy: usize,
-    fw: usize,
-    fh: usize,
-    scale: f32,
-    vol: *mut f32,
-    lat: *mut Latent,
-    hide: *mut Prop,
-    stroke: *mut u32,
-    touched: *mut u32,
-    floor: *mut f32,
-    cover: *mut f32,
-    base: *const f32,
+    pub(crate) w: usize,
+    pub(crate) h: usize,
+    pub(crate) ox: usize,
+    pub(crate) oy: usize,
+    pub(crate) fw: usize,
+    pub(crate) fh: usize,
+    pub(crate) scale: f32,
+    pub(crate) vol: *mut f32,
+    pub(crate) lat: *mut Latent,
+    pub(crate) hide: *mut Prop,
+    pub(crate) stroke: *mut u32,
+    pub(crate) touched: *mut u32,
+    pub(crate) floor: *mut f32,
+    pub(crate) cover: *mut f32,
+    pub(crate) base: *const f32,
     /// Drying state (null until the canvas has waited): how open or tacky
     /// the paint under a bristle is (see `drying::feel`).
-    dry: *mut crate::drying::Px,
+    pub(crate) dry: *mut crate::drying::Px,
     /// Paint laid or moved updates the film's cure at once (see `add`;
     /// engine 2). Engine 1 left it to the next `wait`.
-    cure_now: bool,
+    pub(crate) cure_now: bool,
     /// Engine 4: bristles in stiff paint gather into clumps that lay it in
     /// ridges and furrows and plough it aside a clump's width (`exchange`).
-    clump: bool,
+    pub(crate) clump: bool,
     /// Engine 4: paint laid loses its solvent at once (it evaporates in
     /// minutes), and an absorbent ground draws oil out of it (`add`).
-    lean: bool,
+    pub(crate) lean: bool,
     /// The ground's remaining absorbency per pixel (coats of oil; null when
     /// none of it is absorbent or before engine 4).
-    absorb: *mut f32,
+    pub(crate) absorb: *mut f32,
+    /// The drain switch (`Canvas::with_drain`): the ground drains the film
+    /// as its pigment packs (`ground_drain`), and paint is taken from the
+    /// top down (`take_from`); without it, it draws from the paint just laid
+    /// (`ground_draw`).
+    pub(crate) drain: bool,
     /// Solvent in the open film, and each pixel's wet film laid by the
     /// stroke `laid_id` against its ceiling (`Wet::solv`, `Wet::laid`):
     /// null before engine 3.
-    solv: *mut f32,
-    laid: *mut f32,
-    laid_id: *mut u32,
+    pub(crate) solv: *mut f32,
+    pub(crate) laid: *mut f32,
+    pub(crate) laid_id: *mut u32,
+    pub(crate) sweep_spacing: Option<f32>,
+    pub(crate) adaptive_sweep: bool,
+    /// A pass with a film ceiling (`Canvas::film_pass`): the most wet film
+    /// (coats) its strokes together lay on a pixel, and its first stroke id.
+    pub(crate) film: Option<(f32, u32)>,
+    /// While a blender pass runs on a canvas with the blend feather
+    /// (`Canvas::receptive`): the share (0..1) of the paint a bristle lays or
+    /// ploughs onto each pixel that the pixel takes. Null: all of it.
+    pub(crate) receptive: *const f32,
+    /// How much (coats) of the wet paint under it a brush's paint laid on it
+    /// mixes with (`BRUSH_SKIM_COATS`); 0: all of it.
+    pub(crate) skim: f32,
+    /// Engine 7 (`crate::engine7`): brushes exchange paint with its kernel.
+    pub(crate) e7: bool,
+    /// Engine 8 (`crate::REACH_END`): a stroke's mark reaches its path's
+    /// end (`drag_on`).
+    pub(crate) reach_end: bool,
 }
 // SAFETY: callers only run brushes concurrently on pixel sets that cannot
 // overlap (tiles separated by more than the largest stroke extent).
@@ -774,7 +840,7 @@ unsafe impl Sync for Surf {}
 /// Dirty pixel bounds collected by a drag.
 pub(crate) type Bounds = Option<(usize, usize, usize, usize)>;
 
-fn grow(b: &mut Bounds, x0: usize, y0: usize, x1: usize, y1: usize) {
+pub(crate) fn grow(b: &mut Bounds, x0: usize, y0: usize, x1: usize, y1: usize) {
     *b = Some(match *b {
         None => (x0, y0, x1, y1),
         Some((a, c, d, e)) => (a.min(x0), c.min(y0), d.max(x1), e.max(y1)),
@@ -786,7 +852,7 @@ impl Surf {
     /// mixes by volume into the color and into the film's cure, so the next
     /// bristle feels the film as it now is, not as it was at the last wait.
     #[inline]
-    unsafe fn add(&self, i: usize, v: f32, lat: &Latent, hide: Prop, cure: f32) {
+    pub(crate) unsafe fn add(&self, i: usize, v: f32, lat: &Latent, hide: Prop, cure: f32) {
         unsafe {
             if v <= 0.0 {
                 return;
@@ -809,6 +875,11 @@ impl Surf {
             for k in 0..LAT {
                 l[k] += (lat[k] - l[k]) * a;
             }
+            l.blend_parts(lat, a);
+            // (the drain switch: paint laid is fluid however packed it was
+            // where the brush took it up; the film's packed share, by
+            // volume, thins)
+            let hide = if self.drain { fluid_of(hide) } else { hide };
             for k in 0..hd.len() {
                 hd[k] += (hide[k] - hd[k]) * a;
             }
@@ -820,36 +891,101 @@ impl Surf {
             *vol = t;
             // engine 4: an absorbent ground under the film draws oil out of
             // the paint just laid, until its pores are full: a thin wash goes
-            // lean (stiff, matte, quick to set), thick paint barely notices
+            // lean (stiff, matte, quick to set), thick paint barely notices.
+            // With the drain switch it drains the film as its pigment packs,
+            // from the ground up (`ground_drain`)
             if !self.absorb.is_null() {
-                let cap = &mut *self.absorb.add(i);
-                if *cap > 0.0 {
-                    let oil_in = v * OIL_SHARE * hd[4].max(0.0);
-                    let take = (*cap).min(0.8 * oil_in);
-                    if take > 0.0 {
-                        *cap -= take;
-                        let film_oil = (t * OIL_SHARE * hd[4].max(0.0)).max(1e-9);
-                        let lean = (take / film_oil).min(0.9);
-                        hd[4] *= 1.0 - lean;
-                        hd[1] = (hd[1] * (1.0 + lean) * (1.0 + lean)).min(1.0);
-                        *vol = (t - take).max(0.0);
-                    }
-                }
+                *vol = if self.drain { ground_drain(&mut *self.absorb.add(i), t, hd) } else { ground_draw(&mut *self.absorb.add(i), v, t, hd) };
             }
         }
     }
 
-    /// Lift `v` coats off pixel `i`. The paint left keeps its cure; a pixel
-    /// left bare (as `wait` judges it) holds no film to have one.
+    /// `add`, for paint a brush lays from its load: with `skim` it mixes
+    /// with only the top `skim` coats of the wet paint there, and the paint
+    /// below lies buried under it, out of sight.
     #[inline]
-    unsafe fn take(&self, i: usize, v: f32) {
+    pub(crate) unsafe fn lay(&self, i: usize, v: f32, lat: &Latent, hide: Prop, cure: f32) {
+        if self.drain && v <= 0.0 {
+            return;
+        }
+        if self.skim <= 0.0 {
+            return unsafe { self.add(i, v, lat, hide, cure) };
+        }
         unsafe {
+            let buried = (*self.vol.add(i) - self.skim).max(0.0);
+            let below = (self.drain && buried > 0.0).then(|| skim_top(&mut *self.hide.add(i), *self.vol.add(i), buried));
+            *self.vol.add(i) -= buried;
+            self.add(i, v, lat, hide, cure);
+            *self.vol.add(i) += buried;
+            if let Some(below) = below {
+                restore_buried(&mut *self.hide.add(i), &below, buried / *self.vol.add(i));
+            }
+        }
+    }
+
+    /// The share (0..1) of what a bristle lays or ploughs that pixel `i`
+    /// takes (`Surf::receptive`).
+    #[inline(always)]
+    pub(crate) unsafe fn takes(&self, i: usize) -> f32 {
+        if self.receptive.is_null() { 1.0 } else { unsafe { *self.receptive.add(i) } }
+    }
+
+    /// Lift `v` coats off pixel `i`, and return the properties of the paint
+    /// lifted (with the drain switch from the top down, `take_from`;
+    /// without, the film's). The paint left keeps its cure; a pixel left
+    /// bare (as `wait` judges it) holds no film to have one.
+    #[inline]
+    pub(crate) unsafe fn take(&self, i: usize, v: f32) -> Prop {
+        unsafe {
+            self.film_give(i, v);
             let vol = &mut *self.vol.add(i);
+            let got = if self.drain { take_from(&mut *self.hide.add(i), *vol, v) } else { *self.hide.add(i) };
             *vol -= v;
             if self.cure_now && *vol < 1e-5 && !self.dry.is_null() {
                 (*self.dry.add(i)).cure = 0.0;
             }
+            got
         }
+    }
+
+    /// A pass with a film ceiling (`film_lay`) gets back the `coats` of
+    /// liquid (paint or solvent) a stroke takes up from pixel `i`, where the
+    /// pass has laid paint.
+    #[inline]
+    pub(crate) unsafe fn film_give(&self, i: usize, coats: f32) {
+        unsafe {
+            if let Some((_, from)) = self.film.filter(|_| !self.laid.is_null())
+                && *self.laid_id.add(i) >= from
+            {
+                let laid = &mut *self.laid.add(i);
+                *laid = (*laid - coats).max(0.0);
+            }
+        }
+    }
+}
+
+/// The share (0 to 1) of `liquid` (coats of paint and solvent) a pass with
+/// a film ceiling (`Surf::film`) may lay at pixel `k`, booked to the pass at
+/// once: `Wet::laid` keeps the net liquid the pass has added there (reset
+/// when it first reaches the pixel, from stroke `from` on), `Surf::take`
+/// gives back what a later stroke picks up, and paint setting during the pass
+/// leaves it as it is. The ceiling `cap` is scaled by the caller to the
+/// clip's weight there, so a soft mask lays a thinner film.
+///
+/// # Safety
+/// `k` is inside `sf`'s window, its ceiling buffers are allocated, and no
+/// other thread touches the pixel.
+pub(crate) unsafe fn film_lay(sf: &Surf, k: usize, from: u32, cap: f32, id: u32, liquid: f32) -> f32 {
+    unsafe {
+        let laid = &mut *sf.laid.add(k);
+        if *sf.laid_id.add(k) < from {
+            *laid = 0.0;
+        }
+        *sf.laid_id.add(k) = id;
+        let room = (cap - *laid).max(0.0);
+        let f = if liquid > room { room / liquid } else { 1.0 };
+        *laid += liquid * f;
+        f
     }
 }
 
@@ -865,7 +1001,7 @@ impl Canvas {
             [self.height.len(), self.px.len(), self.film.len(), wt.vol.len(), wt.lat.len(), wt.hide.len(), wt.stroke.len(), wt.touched.len(), wt.floor.len(), wt.cover.len()].iter().all(|&l| l == n),
             "canvas buffers out of sync with frame"
         );
-        if self.base.as_ref().map(|b| b.0) != Some(self.surf_gen) {
+        if !crate::engine7::active(self.engine) && self.base.as_ref().map(|b| b.0) != Some(self.surf_gen) {
             let mut base = self.base.take().map(|b| b.1).unwrap_or_default();
             base.resize(self.height.len(), 0.0);
             use rayon::prelude::*;
@@ -880,6 +1016,12 @@ impl Canvas {
             });
             self.base = Some((self.surf_gen, base));
         }
+        let base = if crate::engine7::active(self.engine) {
+            let px_mm = self.px_mm();
+            self.e7_contact.refresh(&self.height, self.surf_gen, self.f.w, self.f.h, px_mm).as_ptr()
+        } else {
+            self.base.as_ref().unwrap().1.as_ptr()
+        };
         Surf {
             w: self.f.w,
             h: self.f.h,
@@ -895,15 +1037,23 @@ impl Canvas {
             touched: self.wet.touched.as_mut_ptr(),
             floor: self.wet.floor.as_mut_ptr(),
             cover: self.wet.cover.as_mut_ptr(),
-            base: self.base.as_ref().unwrap().1.as_ptr(),
+            base,
             dry: if self.wet.clock.px.len() == n { self.wet.clock.px.as_mut_ptr() } else { std::ptr::null_mut() },
             cure_now: self.engine >= 2,
             clump: self.engine >= 4,
             lean: self.engine >= 4,
             absorb: if self.engine >= 4 && self.absorb_any { self.absorb.as_mut_ptr() } else { std::ptr::null_mut() },
+            drain: self.drain,
             solv: if self.wet.solv.len() == n { self.wet.solv.as_mut_ptr() } else { std::ptr::null_mut() },
             laid: if self.wet.laid.len() == n { self.wet.laid.as_mut_ptr() } else { std::ptr::null_mut() },
             laid_id: if self.wet.laid_id.len() == n { self.wet.laid_id.as_mut_ptr() } else { std::ptr::null_mut() },
+            sweep_spacing: None,
+            adaptive_sweep: self.adaptive_sweep,
+            film: self.film_pass,
+            receptive: self.receptive.as_ref().map_or(std::ptr::null(), |r| r.as_ptr()),
+            skim: if self.brush_skim { BRUSH_SKIM_COATS } else { 0.0 },
+            e7: crate::engine7::active(self.engine),
+            reach_end: self.engine >= crate::REACH_END,
         }
     }
 
@@ -977,11 +1127,18 @@ impl Clip<'_> {
     }
 }
 
+/// How deep (coats; about 6 µm) a brush's paint laid on wet paint mixes into
+/// it on a canvas with the brush skim (`Canvas::with_brush_skim`): the
+/// hairs lay the paint on the film, so only the film where the two meet
+/// blends, and a thin stroke keeps its own color. The brush still lifts wet
+/// paint into its load as it goes (`exchange`), so it gets dirty as before.
+pub(crate) const BRUSH_SKIM_COATS: f32 = 0.25;
+
 /// Pressure at which a pointed tuft's whole belly is down.
-const P_FULL: f32 = 0.85;
+pub(crate) const P_FULL: f32 = 0.85;
 /// Distance (in tool widths) over which paint runs down from the belly of a
 /// pointed tuft to its tip (e-folding): capillary feed.
-const FEED_WIDTHS: f32 = 2.0;
+pub(crate) const FEED_WIDTHS: f32 = 2.0;
 
 fn lerp_f(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
@@ -992,7 +1149,7 @@ fn lerp_f(a: f32, b: f32, t: f32) -> f32 {
 /// (wet) tuft is a cone, so the spread goes with the square root of the
 /// pressure and, with the graded hair lengths, the mark's width with the
 /// pressure itself; a dry tuft (`coh` → 0) no longer holds its point.
-fn cone(tool: &Tool, p: f32, coh: f32) -> f32 {
+pub(crate) fn cone(tool: &Tool, p: f32, coh: f32) -> f32 {
     if tool.point <= 0.0 {
         return 1.0;
     }
@@ -1001,7 +1158,7 @@ fn cone(tool: &Tool, p: f32, coh: f32) -> f32 {
 
 /// Cohesion of a pointed tuft from its load: wet hairs cling into a point,
 /// hairs run dry spring apart (the point splits).
-fn cohesion(held: &Held, full: f32) -> f32 {
+pub(crate) fn cohesion(held: &Held, full: f32) -> f32 {
     if held.tool.point <= 0.0 {
         return 1.0;
     }
@@ -1013,7 +1170,7 @@ fn cohesion(held: &Held, full: f32) -> f32 {
 /// Cure of `v` coats of paint of cure `c` mixed into `vol` coats of cure
 /// `cure`.
 #[inline]
-fn mix_cure(cure: f32, vol: f32, c: f32, v: f32) -> f32 {
+pub(crate) fn mix_cure(cure: f32, vol: f32, c: f32, v: f32) -> f32 {
     if v <= 0.0 { cure } else { cure + (c - cure) * v / (vol + v) }
 }
 
@@ -1021,16 +1178,17 @@ fn mix_cure(cure: f32, vol: f32, c: f32, v: f32) -> f32 {
 /// (the belly feeds the tip). Moves the share `k` of every hair's paint into
 /// a common pool and shares it out evenly; volume is conserved exactly and
 /// colors mix through the tuft.
-fn feed(bristles: &mut [Bristle], k: f32) {
+pub(crate) fn feed(bristles: &mut [Bristle], k: f32) {
     if k <= 0.0 || bristles.is_empty() {
         return;
     }
-    let (mut tv, mut lat, mut hide, mut cure, mut ts) = (0.0f32, [0.0f32; LAT], [0.0f32; 5], 0.0f32, 0.0f32);
+    let (mut tv, mut lat, mut hide, mut cure, mut ts) = (0.0f32, Latent::default(), [0.0f32; 10], 0.0f32, 0.0f32);
     for b in bristles.iter() {
         tv += b.vol;
+        lat.add_parts(&b.lat, b.vol);
         ts += b.solvent;
         cure += b.cure * b.vol;
-        for (l, bl) in lat.iter_mut().zip(&b.lat) {
+        for (l, bl) in lat.iter_mut().zip(b.lat.iter()) {
             *l += bl * b.vol;
         }
         for (h, bh) in hide.iter_mut().zip(&b.hide) {
@@ -1040,10 +1198,11 @@ fn feed(bristles: &mut [Bristle], k: f32) {
     if tv <= 1e-12 {
         return;
     }
-    for l in &mut lat {
+    for l in lat.iter_mut() {
         *l /= tv;
     }
-    hide = [hide[0] / tv, hide[1] / tv, hide[2] / tv, hide[3] / tv, hide[4] / tv];
+    lat.scale_parts(1.0 / tv);
+    hide = hide.map(|h| h / tv);
     cure /= tv;
     let share = k * tv / bristles.len() as f32;
     let share_s = k * ts / bristles.len() as f32;
@@ -1058,9 +1217,9 @@ fn feed(bristles: &mut [Bristle], k: f32) {
 }
 
 /// Bristle roots never sit farther than this (in half-widths) from the axis.
-const ROOT_MAX: f32 = 1.2;
+pub(crate) const ROOT_MAX: f32 = 1.2;
 /// Longest bristle relative to the tool's length.
-const LEN_MAX: f32 = 1.6;
+pub(crate) const LEN_MAX: f32 = 1.6;
 
 /// A pixel rectangle (x0, y0, x1, y1), end-exclusive.
 pub(crate) type Rect = (usize, usize, usize, usize);
@@ -1076,7 +1235,7 @@ pub(crate) fn footprint(tool: &Tool, pts: &[(f32, f32)], shake: f32, scale: f32,
 }
 
 /// `footprint`, or None if it isn't finite.
-fn footprint_checked(tool: &Tool, pts: &[(f32, f32)], shake: f32, scale: f32, w: usize, h: usize) -> Option<Option<Rect>> {
+pub(crate) fn footprint_checked(tool: &Tool, pts: &[(f32, f32)], shake: f32, scale: f32, w: usize, h: usize) -> Option<Option<Rect>> {
     if pts.is_empty() {
         return Some(None);
     }
@@ -1116,6 +1275,49 @@ fn limit(r: Option<Option<Rect>>) -> Rect {
     r.flatten().unwrap_or((0, 0, 0, 0))
 }
 
+fn sweep_step(tool: &Tool, g: &Gesture, path: &[(f32, f32)], arc: &[f32], scale: f32, base: f32, adaptive: bool) -> f32 {
+    if !adaptive || tool.width * scale <= 4.0 * base {
+        return base;
+    }
+    let total = arc.last().copied().unwrap_or(0.0);
+    if total <= 0.0 {
+        return base;
+    }
+    let mut curvature = 0.0f32;
+    let mut previous: Option<((f32, f32), f32)> = None;
+    for (i, pair) in path.windows(2).enumerate() {
+        let len = arc[i + 1] - arc[i];
+        if len <= 1e-3 {
+            continue;
+        }
+        let dir = ((pair[1].0 - pair[0].0) / len, (pair[1].1 - pair[0].1) / len);
+        if let Some((last, last_len)) = previous {
+            let turn = ((dir.0 - last.0).powi(2) + (dir.1 - last.1).powi(2)).sqrt();
+            curvature = curvature.max(turn / (0.5 * (len + last_len)));
+        }
+        previous = Some((dir, len));
+    }
+    let samples = ((total / base).ceil() as usize).max(1);
+    let mut pressure_change = 0.0f32;
+    let mut previous_pressure = g.pressure_at(0.0).clamp(0.0, 1.0);
+    let mut peak_pressure = previous_pressure;
+    for i in 1..=samples {
+        let pressure = g.pressure_at((i as f32 * base).min(total) / total).clamp(0.0, 1.0);
+        pressure_change = pressure_change.max((pressure - previous_pressure).abs());
+        peak_pressure = peak_pressure.max(pressure);
+        previous_pressure = pressure;
+    }
+    let width_limit = tool.width * scale / (2.0 * base);
+    let curve_limit = 0.25 / (curvature * base).max(1e-6);
+    let pressure_limit = 0.08 / pressure_change.max(1e-6);
+    let step = base * width_limit.min(curve_limit).min(pressure_limit).clamp(2.0, 4.0);
+    let contacts = ((total / step).ceil() as usize).max(1);
+    let sampled_peak = (0..=contacts)
+        .map(|i| g.pressure_at((i as f32 * step).min(total) / total).clamp(0.0, 1.0))
+        .fold(0.0f32, f32::max);
+    if sampled_peak < 0.5 * peak_pressure { base } else { step }
+}
+
 /// SAFETY: no other thread may touch pixels in `footprint(..)` of `g`, and
 /// `held.tool` must pass `Tool::validate`. (Defense in depth: every pixel
 /// access is clamped to that footprint, and debug builds assert that the
@@ -1129,6 +1331,7 @@ pub(crate) unsafe fn drag_on(
     scratch: &mut Vec<f32>,
 ) -> Bounds {
     g.assert_valid();
+    let mut sf = sf;
     let mut bounds: Bounds = None;
     if g.pts.is_empty() {
         return bounds;
@@ -1147,7 +1350,8 @@ pub(crate) unsafe fn drag_on(
     // below a pixel (see `strip_cover`)
     let rb = (tool.hair_radius() * s).max(if tool.point > 0.0 { FINE_RB } else { 0.55 });
     let full = held.full();
-    let step = rb.max(1.25);
+    let step = sweep_step(&tool, g, &path, &arc, s, rb.max(1.25), !sf.e7 && sf.adaptive_sweep);
+    sf.sweep_spacing = if step > rb.max(1.25) { Some(rb.max(1.25)) } else { None };
     let nsteps = ((total / step).ceil() as usize).max(1);
     let bend_len = tool.length * (0.25 + 0.75 * (1.0 - tool.stiffness));
     let lim = limit(footprint_checked(&tool, &g.pts, g.shake, s, sf.fw, sf.fh));
@@ -1224,8 +1428,12 @@ pub(crate) unsafe fn drag_on(
             let target = (-dir.0 * trail + (ox * ct - oy * st) * spread, -dir.1 * trail + (ox * st + oy * ct) * spread);
             b.bend.0 += (target.0 - b.bend.0) * rate;
             b.bend.1 += (target.1 - b.bend.1) * rate;
-            // one contact point: the belly-to-tip region of the bent bristle
-            contact[bi] = Some(((root.0 + b.bend.0 * 0.6, root.1 + b.bend.1 * 0.6), reach.max(0.0)));
+            // one contact point: the belly-to-tip region of the bent bristle.
+            // At the path's end the hand lifts and the hairs straighten under
+            // it as they leave, so the last step draws the trailing tips up
+            // to the end (engine 8; before it the mark stopped short by the trail)
+            let lag = if k == nsteps && sf.reach_end { 0.0 } else { 0.6 };
+            contact[bi] = Some(((root.0 + b.bend.0 * lag, root.1 + b.bend.1 * lag), reach.max(0.0)));
         }
         // the track each hair of a pointed tuft lays (see `exchange`): the
         // touching hairs lie over and beside each other, so each covers its
@@ -1263,7 +1471,12 @@ pub(crate) unsafe fn drag_on(
             let prev = b.prev[0].unwrap_or(if tool.point > 0.0 && k > 0 { (cur.0 - dir.0 * step, cur.1 - dir.1 * step) } else { cur });
             let (rk, sh) = if tool.point > 0.0 { (excl[bi], shift[bi]) } else { (rb, 0.0) };
             let (sx, sy) = (-dir.1 * sh, dir.0 * sh);
-            unsafe { exchange(sf, b, &tool, (prev.0 + sx, prev.1 + sy), (cur.0 + sx, cur.1 + sy), rk, reach, full, None, 1.0, clip, id, scratch, &mut bounds, lim) };
+            let (a, c) = ((prev.0 + sx, prev.1 + sy), (cur.0 + sx, cur.1 + sy));
+            if sf.e7 {
+                unsafe { crate::engine7::exchange::exchange(sf, b, &tool, a, c, rk, reach, full, None, 1.0, clip, id, scratch, &mut bounds, lim) };
+            } else {
+                unsafe { exchange(sf, b, &tool, a, c, rk, reach, full, None, 1.0, clip, id, scratch, &mut bounds, lim) };
+            }
             b.prev[0] = Some(cur);
         }
         feed(&mut held.bristles, feed_k);
@@ -1274,11 +1487,11 @@ pub(crate) unsafe fn drag_on(
 
 /// How much of a capsule's contact a bristle is assumed to make outside a
 /// crop window (where there is no canvas to feel).
-const GHOST_TOUCH: f32 = 0.8;
+pub(crate) const GHOST_TOUCH: f32 = 0.8;
 
 /// Summed coverage of the capsule a–b (radius rb, pixels) over rect `r`:
 /// its geometric footprint, whatever the canvas under it.
-fn capsule_cover(a: (f32, f32), b: (f32, f32), rb: f32, fine: bool, r: (usize, usize, usize, usize)) -> f32 {
+pub(crate) fn capsule_cover(a: (f32, f32), b: (f32, f32), rb: f32, fine: bool, r: (usize, usize, usize, usize)) -> f32 {
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
     let seg2 = dx * dx + dy * dy;
     let mut sum = 0.0f32;
@@ -1299,7 +1512,7 @@ fn capsule_cover(a: (f32, f32), b: (f32, f32), rb: f32, fine: bool, r: (usize, u
 }
 
 /// Smallest hair radius (pixels) a pointed tool is drawn with.
-const FINE_RB: f32 = 0.02;
+pub(crate) const FINE_RB: f32 = 0.02;
 
 /// Share of a pixel covered by a hair's track of radius `rb` (pixels) whose
 /// center line passes `dist` from the pixel center: the overlap of the
@@ -1307,7 +1520,7 @@ const FINE_RB: f32 = 0.02;
 /// is its width, wherever the track falls between pixel centers, so a track
 /// finer than a pixel lays the same paint per length on any grid (no dark
 /// dots where it happens to hit a pixel center, no beads at full size).
-fn strip_cover(dist: f32, rb: f32) -> f32 {
+pub(crate) fn strip_cover(dist: f32, rb: f32) -> f32 {
     ((dist + 0.5).min(rb) - (dist - 0.5).max(-rb)).clamp(0.0, 1.0)
 }
 
@@ -1319,7 +1532,7 @@ fn strip_cover(dist: f32, rb: f32) -> f32 {
 /// and a hair's successive steps tile its path without overlapping: the
 /// paint a step lays and the area it darkens don't depend on where the
 /// pixel centers fall. A hair that doesn't move covers a square 2·`rb` wide.
-fn fine_cover(a: (f32, f32), b: (f32, f32), rb: f32, px: f32, py: f32) -> f32 {
+pub(crate) fn fine_cover(a: (f32, f32), b: (f32, f32), rb: f32, px: f32, py: f32) -> f32 {
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
     let seg = (dx * dx + dy * dy).sqrt();
     let (ux, uy, lo, hi) = if seg > 1e-4 { (dx / seg, dy / seg, 0.0, seg) } else { (1.0, 0.0, -rb, rb) };
@@ -1377,7 +1590,7 @@ fn fine_cover(a: (f32, f32), b: (f32, f32), rb: f32, px: f32, py: f32) -> f32 {
 }
 
 /// Smooth 1-D value noise, −1..1.
-fn wander(t: f32, seed: u64) -> f32 {
+pub(crate) fn wander(t: f32, seed: u64) -> f32 {
     let i = t.floor();
     let f = t - i;
     let f = f * f * (3.0 - 2.0 * f);
@@ -1386,12 +1599,17 @@ fn wander(t: f32, seed: u64) -> f32 {
     (a + (b - a) * f) * 2.0 - 1.0
 }
 
+fn pickup_fraction(rate: f32, passes: f32) -> f32 {
+    let rate = rate.clamp(0.0, 1.0);
+    if passes <= 1.0 { rate } else { 1.0 - (1.0 - rate).powf(passes) }
+}
+
 /// Paint exchange between one bristle and the canvas along the capsule
 /// swept from `a` to `b` (pixels). A moving bristle deposits in proportion
 /// to the distance it travels; `dep` instead fixes the volume (units² ×
 /// coats) it would lay on full contact (a touch: film splitting).
 #[allow(clippy::too_many_arguments)]
-unsafe fn exchange(
+pub(crate) unsafe fn exchange(
     sf: Surf,
     br: &mut Bristle,
     tool: &Tool,
@@ -1425,6 +1643,7 @@ unsafe fn exchange(
         let (dx, dy) = (b.0 - a.0, b.1 - a.1);
         let seg2 = dx * dx + dy * dy;
         let seg = seg2.sqrt();
+        let pickup_passes = sf.sweep_spacing.map_or(1.0, |spacing| (seg / spacing).max(1.0));
         // a crop render holds only a window of the canvas: clip to it
         let (x0, y0, x1, y1) = (cx0.max(ox), cy0.max(oy), cx1.min(ox + sf.w), cy1.min(oy + sf.h));
         let windowed = (x0, y0, x1, y1) != (cx0, cy0, cx1, cy1);
@@ -1488,8 +1707,14 @@ unsafe fn exchange(
         // (the exchange experiment drops the ceiling and the per-stroke
         // allowance for a thinned hair, `crate::thinner::set_exchange`)
         let exch = phi > 0.0 && !sf.laid.is_null() && crate::thinner::exchange();
-        let capped = phi > 0.0 && !sf.laid.is_null() && !exch;
-        let cap = if capped { crate::thinner::stroke_limit_um(phi) / COAT_UM } else { f32::INFINITY };
+        // a pass that lays a thin film (`Handling::film`): all its strokes
+        // together add no more than its ceiling to a pixel, and what the hair
+        // can't lay stays on it, as a thinned load's does (with both, the
+        // lower ceiling, for the whole pass)
+        let pass_film = sf.film.filter(|_| !sf.laid.is_null());
+        let thinned = phi > 0.0 && !sf.laid.is_null() && !exch;
+        let capped = thinned || pass_film.is_some();
+        let cap = pass_film.map_or(f32::INFINITY, |f| f.0).min(if thinned { crate::thinner::stroke_limit_um(phi) / COAT_UM } else { f32::INFINITY });
         let wet = smoothstep(0.1, 0.8, liquid / full);
         let wick = if tool.point > 0.0 { tool.point * smoothstep(0.02, 0.25, liquid / full) } else { 0.0 }.max(WET_REACH * wet);
         let th = 1.0 - reach.max(wick) * 1.6;
@@ -1503,6 +1728,8 @@ unsafe fn exchange(
         let mut sum_tack = 0.0f32;
         // past a fence a lifting brush lays a thinner film too (see `Clip`)
         let mut sum_k = 0.0f32;
+        // the contact weight on pixels that take what the bristle lays
+        let mut sum_r = 0.0f32;
         for y in y0..y1 {
             for x in x0..x1 {
                 let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
@@ -1544,6 +1771,7 @@ unsafe fn exchange(
                 };
                 wts[(y - y0) * bw + (x - x0)] = wt;
                 sum_w += wt;
+                sum_r += wt * sf.takes(i);
                 if !sf.dry.is_null() {
                     let p = *sf.dry.add(i);
                     sum_tack += wt * crate::drying::feel(*sf.vol.add(i), p.cure, p.sub).1;
@@ -1636,13 +1864,13 @@ unsafe fn exchange(
         let spread = dep.is_none();
 
         let mut got_v = 0.0f32;
-        let mut got_l = [0.0f32; LAT];
-        let mut got_h: Prop = [0.0; 5];
+        let mut got_l = Latent::default();
+        let mut got_h: Prop = [0.0; 10];
         let mut got_c = 0.0f32;
         // solvent lifted with the paint, and wet film (paint + solvent) laid
         let mut got_s = 0.0f32;
         let mut laid_liq = 0.0f32;
-        let (blat, bhide, bcure) = (br.lat, br.hide, br.cure);
+        let (blat, bhide, bcure) = (br.lat.clone(), br.hide, br.cure);
         for y in y0..y1 {
             for x in x0..x1 {
                 let wt = wts[(y - y0) * bw + (x - x0)];
@@ -1659,7 +1887,12 @@ unsafe fn exchange(
                     *sf.floor.add(i) = v * (1.0 - tool.pickup * fl);
                 }
                 if v > 1e-6 {
-                    let take = if exch {
+                    let take = if pickup_passes > 1.0 {
+                        let own = if !exch && *sf.stroke.add(i) == id { 0.15 } else { 1.0 };
+                        let rate = tool.pickup * wt * hunger * own * fl;
+                        let take = v * pickup_fraction(rate, pickup_passes);
+                        if exch { take.min(v) } else { take.min((v - *sf.floor.add(i)).max(0.0)) }
+                    } else if exch {
                         (v * tool.pickup * wt * hunger * fl).min(v)
                     } else {
                         let own = if *sf.stroke.add(i) == id { 0.15 } else { 1.0 };
@@ -1668,13 +1901,10 @@ unsafe fn exchange(
                     if take > 0.0 {
                         let tv = take * px_area;
                         got_v += tv;
+                        got_l.add_parts(&*sf.lat.add(i), tv);
                         let l = &*sf.lat.add(i);
                         for k in 0..LAT {
                             got_l[k] += l[k] * tv;
-                        }
-                        let hp = *sf.hide.add(i);
-                        for k in 0..hp.len() {
-                            got_h[k] += hp[k] * tv;
                         }
                         if !sf.dry.is_null() {
                             got_c += (*sf.dry.add(i)).cure * tv;
@@ -1687,26 +1917,33 @@ unsafe fn exchange(
                             if *sv > 0.0 {
                                 let ts = (*sv * take / v).min(*sv);
                                 *sv -= ts;
+                                sf.film_give(i, ts / COAT_UM);
                                 got_s += ts / COAT_UM * px_area;
                             }
                         }
-                        sf.take(i, take);
+                        let hp = sf.take(i, take);
+                        for k in 0..hp.len() {
+                            got_h[k] += hp[k] * tv;
+                        }
                     }
                 }
+                let takes = sf.takes(i);
                 if dep_per_w > 0.0 && !capped && phi <= 0.0 {
                     // the share of the pixel this paint covers: its contact
                     // (a fine hair's own share of the tuft's width, where
                     // the hairs of a gathered point lie over each other)
                     let cv = &mut *sf.cover.add(i);
                     *cv = if fine { ((if *sf.vol.add(i) < 1e-6 { 0.0 } else { *cv }) + wt * excl).min(1.0) } else { 1.0 };
-                    sf.add(i, dep_per_w * wt, &blat, bhide, bcure);
+                    sf.lay(i, dep_per_w * wt * takes, &blat, bhide, bcure);
                     *sf.stroke.add(i) = id;
                 } else if dep_per_w > 0.0 {
                     // a thinned load lays liquid: no more than what is left
                     // of this pixel's ceiling for this stroke, shared by all
                     // its hairs (crate::thinner); the rest stays on the hair
-                    let mut d = dep_per_w * wt;
-                    if capped {
+                    let mut d = dep_per_w * wt * takes;
+                    if let Some((_, from)) = pass_film {
+                        d *= film_lay(&sf, i, from, cap * clip.map_or(1.0, |c| c.at(y * w + x).0), id, d);
+                    } else if capped {
                         let used = if *sf.laid_id.add(i) == id { *sf.laid.add(i) } else { 0.0 };
                         d = d.min((cap - used).max(0.0));
                         *sf.laid_id.add(i) = id;
@@ -1715,7 +1952,7 @@ unsafe fn exchange(
                     if d > 0.0 {
                         let cv = &mut *sf.cover.add(i);
                         *cv = if fine { ((if *sf.vol.add(i) < 1e-6 { 0.0 } else { *cv }) + wt * excl).min(1.0) } else { 1.0 };
-                        sf.add(i, d * (1.0 - phi), &blat, bhide, bcure);
+                        sf.lay(i, d * (1.0 - phi), &blat, bhide, bcure);
                         if !sf.solv.is_null() {
                             *sf.solv.add(i) += d * phi * COAT_UM;
                         }
@@ -1749,11 +1986,12 @@ unsafe fn exchange(
                             1
                         };
                         // the source's paint, read once: nothing below writes
-                        // lat or hide at `i` (`take` lowers its volume, `add`
-                        // writes `j != i`). Its cure is read per destination:
-                        // `take` zeroes it when the film goes bare (see the
-                        // kernel_traps tests)
-                        let (l, hd) = (*sf.lat.add(i), *sf.hide.add(i));
+                        // lat at `i` (`take` lowers its volume and, with the
+                        // drain switch, its packed share, and returns the
+                        // paint it lifts; `add` writes `j != i`). Its cure is
+                        // read per destination: `take` zeroes it when the
+                        // film goes bare (see the kernel_traps tests)
+                        let l = (*sf.lat.add(i)).clone();
                         for &(tx, ty, share) in &to[..n_to] {
                             if share <= 0.0 {
                                 continue;
@@ -1766,7 +2004,7 @@ unsafe fn exchange(
                                 let j = (ty - oy) * bw_buf + tx - ox;
                                 // a clipped stroke can't push paint past its mask:
                                 // only the accepted share moves, the rest stays
-                                let m = m * share * clip.map_or(1.0, |c| c.at(ty * w + tx).0);
+                                let m = m * share * clip.map_or(1.0, |c| c.at(ty * w + tx).0) * sf.takes(j);
                                 // a thinned stroke adds no more wet film to the
                                 // pixel it ploughs into than its ceiling there
                                 // allows; the solvent goes with the paint
@@ -1774,7 +2012,10 @@ unsafe fn exchange(
                                 let sol = if sf.solv.is_null() { 0.0 } else { *sf.solv.add(i) / COAT_UM };
                                 let vi = *sf.vol.add(i);
                                 let ms = if sol > 0.0 && vi > 0.0 { (sol * m / vi).min(sol) } else { 0.0 };
-                                let (m, ms) = if capped && j != i && m > 0.0 {
+                                let (m, ms) = if let Some((_, from)) = pass_film.filter(|_| j != i && m > 0.0) {
+                                    let f = film_lay(&sf, j, from, cap * clip.map_or(1.0, |c| c.at(ty * w + tx).0), id, m + ms);
+                                    (m * f, ms * f)
+                                } else if capped && j != i && m > 0.0 {
                                     let used = if *sf.laid_id.add(j) == id { *sf.laid.add(j) } else { 0.0 };
                                     let room = (cap - used).max(0.0);
                                     let f = if m + ms > room { room / (m + ms) } else { 1.0 };
@@ -1789,6 +2030,7 @@ unsafe fn exchange(
                                         let si = &mut *sf.solv.add(i);
                                         let mu = (ms * COAT_UM).min(*si);
                                         *si -= mu;
+                                        sf.film_give(i, mu / COAT_UM);
                                         *sf.solv.add(j) += mu;
                                     }
                                     let cure = if sf.dry.is_null() { 0.0 } else { (*sf.dry.add(i)).cure };
@@ -1797,7 +2039,7 @@ unsafe fn exchange(
                                     // (its film there thins but still covers it)
                                     let cj = &mut *sf.cover.add(j);
                                     *cj = if fine { ((if *sf.vol.add(j) < 1e-6 { 0.0 } else { *cj }) + (m / v.max(1e-9)).min(1.0) * *sf.cover.add(i)).min(1.0) } else { 1.0 };
-                                    sf.take(i, m);
+                                    let hd = sf.take(i, m);
                                     sf.add(j, m, &l, hd, cure);
                                 }
                             }
@@ -1806,20 +2048,24 @@ unsafe fn exchange(
                 }
             }
         }
-        if phi > 0.0 {
+        if phi > 0.0 || pass_film.is_some() {
             // the hair loses what it laid (and in a crop, the share laid
             // outside the window), paint and solvent in its proportions
             let gone = (laid_liq + dep_total * (1.0 - share.min(1.0))).min(liquid);
             br.vol = (br.vol - gone * (1.0 - phi)).max(0.0);
             br.solvent = (br.solvent - gone * phi).max(0.0);
-        } else {
+        } else if sf.receptive.is_null() {
             br.vol = (br.vol - dep_total).max(0.0);
+        } else {
+            // (what the pixels it touched didn't take stays on the hair)
+            br.vol = (br.vol - dep_total * (sum_r / sum_w).min(1.0)).max(0.0);
         }
         br.solvent += got_s;
         if got_v > 0.0 {
             for k in 0..LAT {
                 got_l[k] /= got_v;
             }
+            got_l.scale_parts(1.0 / got_v);
             for g in &mut got_h {
                 *g /= got_v;
             }
@@ -1889,7 +2135,7 @@ const TOUCH_FILM: f32 = 1.0;
 const TOUCH_STEPS: usize = 4;
 
 /// Area of the bristle roots' layout in the brush frame (half-width units²).
-fn root_area(kind: Kind) -> f32 {
+pub(crate) fn root_area(kind: Kind) -> f32 {
     use std::f32::consts::PI;
     match kind {
         Kind::Round | Kind::Rigger | Kind::Blender => PI,
@@ -1901,7 +2147,7 @@ fn root_area(kind: Kind) -> f32 {
 
 /// Half-width of the pressed tip (pixels) at pressure `p`.
 /// A pointed tip gathers toward its point (see `cone`).
-fn touch_half(tool: &Tool, p: f32, s: f32) -> f32 {
+pub(crate) fn touch_half(tool: &Tool, p: f32, s: f32) -> f32 {
     tool.width * 0.5 * s * (0.45 + 0.55 * p) * (1.0 + tool.splay * (p - 0.5)) * cone(tool, p, 1.0)
 }
 
@@ -1909,7 +2155,7 @@ fn touch_half(tool: &Tool, p: f32, s: f32) -> f32 {
 /// and wide enough that the fading contacts of neighbors overlap (paint
 /// bridges the gaps). The floor is only as wide as a pixel needs to be
 /// sampled: a coarse render must not make small marks bigger (and fainter).
-fn touch_rb(tool: &Tool, p: f32, s: f32) -> f32 {
+pub(crate) fn touch_rb(tool: &Tool, p: f32, s: f32) -> f32 {
     let spacing = touch_half(tool, p, s) * (root_area(tool.kind) / tool.bristles.max(1) as f32).sqrt();
     (tool.hair_radius() * s).max(1.4 * spacing).max(0.75)
 }
@@ -1921,7 +2167,7 @@ pub(crate) fn touch_footprint(tool: &Tool, t: &Touch, scale: f32, w: usize, h: u
 }
 
 /// `touch_footprint`, or None if it isn't finite.
-fn touch_footprint_checked(tool: &Tool, t: &Touch, scale: f32, w: usize, h: usize) -> Option<Option<Rect>> {
+pub(crate) fn touch_footprint_checked(tool: &Tool, t: &Touch, scale: f32, w: usize, h: usize) -> Option<Option<Rect>> {
     let s = scale;
     let p = t.pressure.clamp(0.0, 1.0);
     let half = tool.width * 0.5 * s * (1.0 + tool.splay.abs() * 0.5);
@@ -2013,7 +2259,11 @@ pub(crate) unsafe fn touch_on(sf: Surf, held: &mut Held, t: &Touch, clip: Option
             let prev = b.prev[0].unwrap_or(cur);
             let fill = ((b.vol + b.solvent) / full).min(1.0);
             let v = film * fill * reach / sums[bi].max(1e-6);
-            unsafe { exchange(sf, b, &tool, prev, cur, rb, reach, full, Some(v), 1.0, clip, id, scratch, &mut bounds, lim) };
+            if sf.e7 {
+                unsafe { crate::engine7::exchange::exchange(sf, b, &tool, prev, cur, rb, reach, full, Some(v), 1.0, clip, id, scratch, &mut bounds, lim) };
+            } else {
+                unsafe { exchange(sf, b, &tool, prev, cur, rb, reach, full, Some(v), 1.0, clip, id, scratch, &mut bounds, lim) };
+            }
             b.prev[0] = Some(cur);
         }
     }
@@ -2103,8 +2353,12 @@ impl Spatter {
 
 impl Canvas {
     /// Flick a held brush (see `Spatter`); returns how many droplets landed.
+    ///
+    /// Panics if a number in `sp` is not finite, or if the brush holds
+    /// solvent and the canvas's engine is before 3 (as `drag`).
     pub fn spatter(&mut self, held: &mut Held, sp: &Spatter, clip: Option<&Mask>) -> usize {
         held.tool.assert_valid();
+        // (before any paint leaves the brush)
         sp.assert_valid();
         if self.engine < 3 {
             self.assert_thinner_supported(held.holds_solvent(), "Canvas::spatter");
@@ -2193,7 +2447,7 @@ impl Canvas {
             let ext = ra.max(rb) + 1.0;
             let (x0, x1) = ((px - ext).floor() as i64, (px + ext).ceil() as i64);
             let (y0, y1) = ((py - ext).floor() as i64, (py + ext).ceil() as i64);
-            let lat = b.lat;
+            let lat = b.lat.clone();
             let hide = b.hide;
             let cure = b.cure;
             // dome-shaped: thickest in the middle; weights normalised so the droplet's volume lands
@@ -2280,267 +2534,6 @@ impl Canvas {
     }
 }
 
-#[cfg(test)]
-mod tip_tests {
-    use super::*;
-    use crate::color::hex;
-
-    /// The pointed tip is opt-in: these tests use it explicitly.
-    fn sable(w: f32) -> Tool {
-        Tool { point: 1.0, ..Tool::round_sable(w) }
-    }
-    fn rigger(w: f32) -> Tool {
-        Tool { point: 1.0, ..Tool::rigger(w) }
-    }
-
-    const BG: &str = "#e8e0d0";
-    const INK: &str = "#1a1612";
-
-    /// A narrow strip of a 440 mm wide canvas with one
-    /// mark of dark body paint on it, dried.
-    fn canvas(px: usize, linen: bool, tool: Tool, g: &Gesture) -> Canvas {
-        let mut c = Canvas::new(px, 4.0, hex(BG)).with_size_mm(440.0);
-        if linen {
-            c = c.with_linen(crate::surface::Linen::fine(3));
-        }
-        let mut h = Held::new(tool, 3);
-        h.load(Paint::body(hex(INK)), 1.0);
-        c.drag(&mut h, g, None);
-        c.dry();
-        c
-    }
-
-    /// Darkness of pixel (x, y): 0 = ground, 1 = the paint's masstone.
-    fn dark(c: &Canvas, x: usize, y: usize) -> f32 {
-        let lum = |p: [f32; 3]| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
-        let (lb, ld) = (lum(hex(BG)), lum(hex(INK)));
-        (lb - lum(c.px[y * c.f.w + x])) / (lb - ld)
-    }
-
-    /// Ink across the mark (units: the width of a fully dark track) between
-    /// x0 and x1 (units), averaged along it.
-    fn ink(c: &Canvas, x0: f32, x1: f32) -> f32 {
-        let s = c.f.scale;
-        let (a, b) = ((x0 * s) as usize, (x1 * s) as usize);
-        let mut sum = 0.0;
-        for y in 0..c.f.h {
-            for x in a..b {
-                sum += dark(c, x, y);
-            }
-        }
-        sum / s / (b - a) as f32
-    }
-
-    /// Paint (coats) one stroke of `tool` lays across its mark over a dry
-    /// layer on a strip of a 440 mm wide canvas, `px` wide: the mean film at each
-    /// pixel row from 2 widths above the stroke's line to 2 below, over the
-    /// middle of its length, as (offset from the line in units, coats).
-    #[cfg(tube_box)]
-    fn film_across_over_dry(px: usize, tool: Tool, pressure: f32) -> Vec<(f32, f32)> {
-        let mut c = Canvas::new(px, 4.0, hex(BG)).with_size_mm(440.0).with_linen(crate::surface::Linen::fine(3));
-        // a light layer, laid in overlapping bands and let dry
-        for (k, y) in [95.0, 110.0, 125.0, 140.0, 155.0].into_iter().enumerate() {
-            let mut h = Held::new(Tool::filbert(40.0), 10 + k as u64);
-            h.load(Paint::body(hex("#b8c4d0")), 1.0);
-            c.drag(&mut h, &Gesture::line((100.0, y), (900.0, y)).pressure(0.9, 0.9), None);
-        }
-        c.dry();
-        let mut h = Held::new(tool.clone(), 5);
-        h.load(Paint::body(hex("#50586a")), 0.8);
-        c.drag(&mut h, &Gesture::line((300.0, 125.0), (700.0, 125.0)).pressure(pressure, pressure), None);
-        let f = c.f;
-        let (x0, x1) = ((400.0 * f.scale) as usize, (600.0 * f.scale) as usize);
-        let (y0, y1) = (((125.0 - 2.0 * tool.width) * f.scale) as usize, ((125.0 + 2.0 * tool.width) * f.scale) as usize);
-        (y0..=y1).map(|y| (f.uy(y) - 125.0, (x0..x1).map(|x| c.wet.vol[y * f.w + x]).sum::<f32>() / (x1 - x0) as f32)).collect()
-    }
-
-    /// A body stroke over dry paint lays a covering film, thickest about
-    /// where the brush pressed, not a ring: across the middle half of the
-    /// mark the film is at least 0.6 of the thickest paint at its edges,
-    /// also for brushes whose hairs are finer than a pixel (the filbert 5
-    /// and filbert 2 at 1000px).
-    #[test]
-    #[cfg(tube_box)]
-    fn a_stroke_over_dry_paint_covers_its_middle() {
-        let st = crate::style::Style::oil();
-        for (name, tool) in [("filbert 5", Tool::filbert(5.0)), ("filbert 2", Tool { lay: 0.5, stiffness: 0.3, ..Tool::filbert(2.0) }), ("body", st.body.clone())] {
-            let prof = film_across_over_dry(1000, tool, 0.8);
-            let peak = prof.iter().map(|p| p.1).fold(0.0f32, f32::max);
-            // the mark: where it laid a tenth of its peak or more
-            let on: Vec<f32> = prof.iter().filter(|p| p.1 >= 0.1 * peak).map(|p| p.0).collect();
-            let (a, b) = (on[0], on[on.len() - 1]);
-            let mid: Vec<f32> = prof.iter().filter(|p| p.0 >= a + 0.25 * (b - a) && p.0 <= b - 0.25 * (b - a)).map(|p| p.1).collect();
-            let middle = mid.iter().sum::<f32>() / mid.len() as f32;
-            assert!(middle >= 0.6 * peak, "{name}: {middle:.2} coats in the middle of the mark, {peak:.2} at its thickest: {prof:.2?}");
-        }
-    }
-
-    #[test]
-    fn pointed_marks_are_resolution_independent() {
-        let g = Gesture::line((50.0, 120.0), (450.0, 122.0)).pressure(0.4, 0.4).ramps(0.05, 0.1).shake(0.0);
-        for tool in [rigger(0.5), sable(1.6)] {
-            let lo = ink(&canvas(500, false, tool.clone(), &g), 100.0, 400.0);
-            let hi = ink(&canvas(1600, false, tool.clone(), &g), 100.0, 400.0);
-            assert!((lo / hi - 1.0).abs() < 0.2, "{:?}: ink width {lo} at 500px, {hi} at 1600px", tool.kind);
-            // and about as wide as the brush says
-            let w = tool.mark_width(0.4);
-            assert!(hi > 0.6 * w && hi < 2.0 * w, "{:?}: ink width {hi}, mark_width {w}", tool.kind);
-        }
-    }
-
-    /// The presets are blunt, so a round, a rigger, a line or a detail brush
-    /// lays the width asked for; the pointed tip (a hairline at light
-    /// pressure) is opt-in.
-    #[test]
-    #[cfg(tube_box)]
-    fn presets_are_blunt_and_lay_their_width() {
-        let st = crate::style::Style::oil();
-        for t in [Tool::round_sable(1.6), Tool::rigger(0.5), st.detail.clone(), st.line_tool(0.8)] {
-            assert_eq!(t.point, 0.0, "{:?} is pointed by default", t.kind);
-        }
-        let g = Gesture::line((50.0, 120.0), (450.0, 122.0)).pressure(0.4, 0.4).ramps(0.05, 0.1).shake(0.0);
-        let blunt = ink(&canvas(1600, false, Tool::round_sable(1.6), &g), 100.0, 400.0);
-        let pointed = ink(&canvas(1600, false, sable(1.6), &g), 100.0, 400.0);
-        // a blunt sable 1.6 at a light pressure lays most of its width; the
-        // pointed one only its point
-        assert!(blunt > 0.5 * 1.6 && blunt > 1.5 * pointed, "ink width at p 0.4: blunt {blunt}, pointed {pointed}");
-    }
-
-    #[test]
-    fn pointed_width_follows_pressure_and_tapers() {
-        let t = sable(3.0);
-        assert!(t.mark_width(0.1) < 0.25 * t.mark_width(0.9), "{} vs {}", t.mark_width(0.1), t.mark_width(0.9));
-        assert!((t.mark_width(t.pressure_for(1.5)) - 1.5).abs() < 0.01);
-        let at = |p: f32| ink(&canvas(800, false, t.clone(), &Gesture::line((50.0, 120.0), (450.0, 120.0)).pressure(p, p).shake(0.0)), 150.0, 350.0);
-        let (a, b, c) = (at(0.1), at(0.4), at(0.8));
-        assert!(a < 0.5 * b && b < 0.7 * c, "ink width at pressure .1/.4/.8: {a} {b} {c}");
-        // a flick lifted off draws down to a point
-        let f = canvas(800, false, t.clone(), &Gesture::line((50.0, 120.0), (450.0, 120.0)).pressure(0.8, 0.0).ramps(0.05, 0.8).shake(0.0));
-        let (root, mid, tip) = (ink(&f, 80.0, 120.0), ink(&f, 230.0, 270.0), ink(&f, 400.0, 430.0));
-        assert!(root > mid && mid > tip && tip < 0.3 * root, "flick ink root {root}, middle {mid}, tip {tip}");
-        // the stippler is blunt too
-        assert_eq!(Tool::stippler(2.0).point, 0.0);
-    }
-
-    /// A lifting brush deposits paint through the end of its path, even
-    /// where the pressure falls below its first hair's threshold: every
-    /// column up to the last pixel before the end has paint. Blunt and
-    /// pointed brushes, a flick lifted to zero and a stroke lifted to 0.36.
-    #[test]
-    fn a_lifted_stroke_paints_to_the_end_of_its_path() {
-        let tools = [("blunt sable 3", Tool::round_sable(3.0)), ("blunt rigger 1", Tool::rigger(1.0)), ("pointed rigger 1.4", Tool { point: 0.9, ..Tool::rigger(1.4) }), ("pointed sable 3", sable(3.0))];
-        let strokes = [("flick", (0.75, 0.0), (0.1, 0.75)), ("lifted to 0.36", (0.8, 0.36), (0.03, 0.35))];
-        for (tn, tool) in &tools {
-            for (gn, p, r) in strokes {
-                // 80 units, within one load of every brush here
-                let g = Gesture::line((100.0, 120.0), (180.0, 120.0)).pressure(p.0, p.1).ramps(r.0, r.1).shake(0.0);
-                let c = canvas(1000, false, tool.clone(), &g);
-                let s = c.f.scale;
-                let col = |x: usize| (0..c.f.h).map(|y| dark(&c, x, y)).sum::<f32>() / s;
-                // every column from just past the start to the last pixel
-                // before the end has paint on it
-                let bare: Vec<f32> = ((101.0 * s) as usize..(179.0 * s) as usize).filter(|&x| col(x) < 0.02).map(|x| x as f32 / s).collect();
-                assert!(bare.is_empty(), "{tn}, {gn}: path ends at 180, mark stops at {:?} ({} bare columns)", bare.first(), bare.len());
-            }
-        }
-    }
-
-    /// A hair's track covers its own area of the pixel lattice, however it
-    /// lies across the pixels: diagonal and oblique tracks keep their area
-    /// under sub-pixel translation.
-    #[test]
-    fn fine_cover_conserves_area_on_the_lattice() {
-        let total = |a: (f32, f32), b: (f32, f32), rb: f32| {
-            let mut s = 0.0f64;
-            for y in 0..240 {
-                for x in 0..240 {
-                    s += fine_cover(a, b, rb, x as f32 + 0.5, y as f32 + 0.5) as f64;
-                }
-            }
-            s as f32
-        };
-        for rb in [0.02f32, 0.15, 0.6] {
-            for deg in [0.0f32, 17.0, 30.0, 45.0, 71.0, 90.0, 135.0] {
-                let (c, s) = (deg.to_radians().cos(), deg.to_radians().sin());
-                for len in [0.3f32, 3.7, 100.0] {
-                    let want = 2.0 * rb * len;
-                    for off in [(0.0f32, 0.0f32), (0.0, 0.5), (0.25, 0.1), (0.5, 0.5), (0.37, 0.81)] {
-                        let a = (100.0 + off.0, 20.0 + off.1);
-                        let b = (a.0 + c * len, a.1 + s * len);
-                        let got = total(a, b, rb);
-                        assert!((got / want - 1.0).abs() < 2e-3, "rb {rb}, {deg}°, length {len}, offset {off:?}: covers {got}, track area {want}");
-                    }
-                }
-            }
-            // a hair that doesn't move covers its square
-            let got = total((30.3, 30.6), (30.3, 30.6), rb);
-            assert!((got / (4.0 * rb * rb) - 1.0).abs() < 2e-3, "still hair rb {rb}: {got}");
-        }
-    }
-
-    /// The same diagonal or oblique pointed mark, shifted by part of a pixel,
-    /// darkens the canvas by the same amount (its look follows its paint,
-    /// not where it falls between pixel centers).
-    #[test]
-    fn translated_pointed_marks_look_alike() {
-        for (tool, p) in [(rigger(0.5), 0.3), (sable(1.6), 0.15)] {
-            for (dx, dy) in [(200.0f32, 200.0f32), (240.0, 90.0)] {
-                let total = |off: (f32, f32)| {
-                    let (a, b) = ((100.0 + off.0, 10.0 + off.1), (100.0 + dx + off.0, 10.0 + dy + off.1));
-                    let c = canvas(500, false, tool.clone(), &Gesture::line(a, b).pressure(p, p).ramps(0.05, 0.1).shake(0.0));
-                    (0..c.f.h).flat_map(|y| (0..c.f.w).map(move |x| (x, y))).map(|(x, y)| dark(&c, x, y)).sum::<f32>()
-                };
-                let base = total((0.0, 0.0));
-                // (a pixel is 2 units here)
-                for off in [(0.0, 1.0), (0.5, 0.2), (1.0, 1.0), (0.74, 1.62)] {
-                    let got = total(off);
-                    assert!((got / base - 1.0).abs() < 0.05, "{:?} along ({dx}, {dy}) shifted {off:?}: darkness {got} vs {base}", tool.kind);
-                }
-            }
-        }
-    }
-
-    /// A light hairline on linen at full size is a line, not a row of beads
-    /// on the weave's peaks.
-    #[test]
-    fn hairline_on_linen_is_continuous() {
-        let c = canvas(1600, true, rigger(0.5), &Gesture::line((50.0, 120.0), (450.0, 120.0)).pressure(0.25, 0.25).ramps(0.05, 0.1).shake(0.0));
-        let s = c.f.scale;
-        let (y0, y1) = (((120.0 - 2.0) * s) as usize, ((120.0 + 2.0) * s) as usize);
-        let cols: Vec<f32> = ((150.0 * s) as usize..(350.0 * s) as usize).map(|x| (y0..y1).map(|y| dark(&c, x, y)).sum::<f32>()).collect();
-        let mean = cols.iter().sum::<f32>() / cols.len() as f32;
-        let gaps = cols.iter().filter(|&&v| v < 0.3 * mean).count();
-        assert!(mean > 0.1 && gaps == 0, "mean column ink {mean}, {gaps} gaps of {}", cols.len());
-    }
-
-    /// Ink width (units) of straight marks at two resolutions, for tuning.
-    #[test]
-    #[ignore]
-    fn probe_ink_width() {
-        for (name, tool) in [("rigger .5", rigger(0.5)), ("sable 1.6", sable(1.6)), ("sable 3", sable(3.0))] {
-            for p in [0.1, 0.4, 0.7, 0.9] {
-                let g = Gesture::line((50.0, 120.0), (450.0, 122.0)).pressure(p, p).ramps(0.05, 0.1).shake(0.0);
-                let lo = ink(&canvas(1000, false, tool.clone(), &g), 100.0, 400.0);
-                let hi = ink(&canvas(3200, false, tool.clone(), &g), 100.0, 400.0);
-                println!("{name:10} p {p:.1}: ink width {lo:.3} at 1000px, {hi:.3} at 3200px; mark_width {:.3}", tool.mark_width(p));
-            }
-        }
-    }
-
-    #[test]
-    fn feed_conserves_paint() {
-        let mut h = Held::new(sable(2.0), 1);
-        h.load(Paint::body(hex(INK)), 1.0);
-        for (i, b) in h.bristles.iter_mut().enumerate() {
-            b.vol *= (i % 5) as f32 / 4.0;
-        }
-        let before: f64 = h.bristles.iter().map(|b| b.vol as f64).sum();
-        feed(&mut h.bristles, 0.3);
-        let after: f64 = h.bristles.iter().map(|b| b.vol as f64).sum();
-        assert!((after - before).abs() < before * 1e-5);
-    }
-}
-
 
 impl Gesture {
     /// Check that every number in the gesture is finite: a NaN point would
@@ -2587,174 +2580,18 @@ impl Touch {
 }
 
 // every test here paints on the default box's style
-#[cfg(all(test, tube_box))]
-mod cover_tests {
-    use crate::canvas::Canvas;
-    use crate::color::hex;
-    use crate::handling::Handling;
-    use crate::mask::Mask;
-    use crate::style::Style;
 
-    fn lum(p: [f32; 3]) -> f32 {
-        0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]
-    }
-
-    /// Paint a dark square (units 350..650) with `hd`, dry it, and return
-    /// (share of interior pixels whose wet film is under 0.15 coat before
-    /// drying, share that shows the ground after: closer to the ground's
-    /// value than to the paint's).
-    pub(crate) fn bare_share(w: usize, hd: &Handling, seed: u64) -> (f32, f32) {
-        let st = Style::oil_red_ground();
-        let mut c: Canvas = st.prepare(w, 1.0, seed);
-        let m = Mask::from_fn(c.frame(), |x, y| if (350.0..650.0).contains(&x) && (350.0..650.0).contains(&y) { 1.0 } else { 0.0 });
-        let ground = c.px.clone();
-        c.work(&m, hd, seed);
-        let f = c.f;
-        let inner: Vec<usize> = (0..f.w * f.h).filter(|&i| {
-            let (x, y) = (f.ux(i % f.w), f.uy(i / f.w));
-            (380.0..620.0).contains(&x) && (380.0..620.0).contains(&y)
-        }).collect();
-        let thin = inner.iter().filter(|&&i| c.wet.vol[i] < 0.15).count() as f32 / inner.len() as f32;
-        let untouched = inner.iter().filter(|&&i| c.wet.vol[i] < 0.15 && c.wet.touched[i] == 0).count() as f32 / inner.len() as f32;
-
-        if std::env::var_os("PROBE_VERBOSE").is_some() {
-            println!("    thin {:.2}%, of it never touched by a bristle {:.2}%", 100.0 * thin, 100.0 * untouched);
-        }
-        c.dry();
-        let mut ls: Vec<f32> = inner.iter().map(|&i| lum(c.px[i])).collect();
-        ls.sort_by(f32::total_cmp);
-        let paint = ls[ls.len() / 2];
-        if let Ok(out) = std::env::var("PROBE_OUT") {
-            c.save(std::path::Path::new(&format!("{out}_{}.png", hd.tool.width))).unwrap();
-        }
-        let bare = inner.iter().filter(|&&i| lum(c.px[i]) - paint > 0.5 * (lum(ground[i]) - paint)).count() as f32 / inner.len() as f32;
-        (thin, bare)
-    }
-
-    /// With look and fill, a loaded brush at coverage 2.5 leaves under 0.2%
-    /// of a dark body or broad passage showing the ground; with fill off
-    /// the strokes leave more than 0.5% as gaps; a nearly dry brush at
-    /// light pressure breaks up (more than 10% bare).
-    #[test]
-    fn loaded_passage_covers() {
-        let st = Style::oil_red_ground();
-        let dark = |_: f32, _: f32| hex("#2c2925");
-        let body = || st.body().color(dark).clip(true).threshold(0.5).coverage(2.5);
-        let broad = || st.broad().color(dark).clip(true).threshold(0.5).coverage(2.5);
-        let (_, bare) = bare_share(500, &body().fill(true), 5);
-        let (_, bare_broad) = bare_share(500, &broad().fill(true), 5);
-        let (_, gaps) = bare_share(500, &broad().fill(false), 5);
-        let h = body().pressure(0.15, 0.3);
-        let (_, dry) = bare_share(500, &Handling { load: 0.1, ..h }, 5);
-        println!("bare: body {:.2}%, broad {:.2}% ({:.2}% without looking), dry brush {:.1}%", 100.0 * bare, 100.0 * bare_broad, 100.0 * gaps, 100.0 * dry);
-        assert!(bare < 0.002 && bare_broad < 0.002, "a loaded passage at coverage 2.5 shows bare ground: body {:.2}%, broad {:.2}%", 100.0 * bare, 100.0 * bare_broad);
-        assert!(gaps > 0.005, "without looking the strokes leave gaps: {gaps}");
-        assert!(dry > 0.1, "dry brush at light pressure should break up: {dry}");
-    }
-
-    /// Where do bare flecks in a dark body passage come from?
-    /// `cargo test --release -p paint probe_bare -- --ignored --nocapture`
-    #[test]
-    #[ignore]
-    fn probe_bare() {
-        let st = Style::oil_red_ground();
-        let w: usize = std::env::var("PROBE_W").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);
-        let dark = |_: f32, _: f32| hex("#2c2925");
-        let names: Vec<String> = std::env::var("PROBE").map(|s| s.split(',').map(String::from).collect()).unwrap_or(vec!["body".into(), "broad".into(), "detail".into()]);
-        let covs: Vec<f32> = std::env::var("PROBE_COV").map(|s| s.split(',').map(|v| v.parse().unwrap()).collect()).unwrap_or(vec![1.0, 2.5, 4.0]);
-        let vars = std::env::var("PROBE_VARS").unwrap_or("base,nofill".into());
-        for name in names.iter().map(|s| s.as_str()) {
-            for &cov in &covs {
-                let base = || match name {
-                    "body" => st.body(),
-                    "broad" => st.broad(),
-                    _ => st.detail(),
-                }
-                .color(dark)
-                .clip(true)
-                .threshold(0.5)
-                .coverage(cov);
-                let mut line = format!("{name:6} cov {cov:.1}:");
-                for (var, hd) in [
-                    ("base", base()),
-                    ("push0", { let h = base(); let t = crate::bristle::Tool { push: 0.0, ..h.tool.clone() }; Handling { tool: t, ..h } }),
-                    ("pick0", { let h = base(); let t = crate::bristle::Tool { pickup: 0.0, ..h.tool.clone() }; Handling { tool: t, ..h } }),
-                    ("unbroken", { let h = base(); Handling { broken: 0.0, ..h } }),
-                    ("full", { let h = base(); Handling { load: 1.0, dip_every: 1, ..h } }),
-                    ("nofill", base().fill(false)),
-                    ("load.1", { let h = base(); Handling { load: 0.1, ..h } }),
-                    ("load.2", { let h = base(); Handling { load: 0.2, ..h } }),
-                    ("load.4", { let h = base(); Handling { load: 0.4, ..h } }),
-                    ("light", base().pressure(0.15, 0.3)),
-                    ("light.1", { let h = base().pressure(0.15, 0.3); Handling { load: 0.1, ..h } }),
-                ] {
-                    if !vars.split(',').any(|v| v == var) {
-                        continue;
-                    }
-                    let seeds: Vec<u64> = std::env::var("PROBE_SEEDS").unwrap_or("5,6,7".into()).split(',').map(|v| v.parse().unwrap()).collect();
-                    let (mut thin, mut bare) = (0.0, 0.0);
-                    for &sd in &seeds {
-                        let (t, b) = bare_share(w, &hd, sd);
-                        thin += t / seeds.len() as f32;
-                        bare += b / seeds.len() as f32;
-                    }
-                    line += &format!("  {var} thin {:.2}% bare {:.2}%", 100.0 * thin, 100.0 * bare);
-                }
-                println!("{line}");
-            }
-        }
-    }
-
-    /// Area a single stroke covers (film ≥ 0.15 coat) against its nominal
-    /// width × length.
-    #[test]
-    #[ignore]
-    fn probe_mark_area() {
-        use crate::bristle::{Gesture, Held};
-        use crate::wet::Paint;
-        let st = Style::oil_red_ground();
-        for (name, tool, len, p, ramps, load) in [
-            ("broad", st.broad.clone(), 150.0f32, 0.675f32, (0.12f32, 0.4f32), 0.4f32),
-            ("body", st.body.clone(), 40.0, 0.75, (0.08, 0.15), 0.56),
-            ("detail", st.detail.clone(), 9.0, 0.82, (0.08, 0.15), 0.72),
-        ] {
-            let mut tot = (0.0, 0.0);
-            for sd in 0..6u64 {
-                let mut c: Canvas = st.prepare(1000, 1.0, sd);
-                let mut h = Held::new(tool.clone(), sd);
-                h.load(Paint::body(hex("#2c2925")), load);
-                let y = 500.0;
-                c.drag(&mut h, &Gesture::new(vec![(500.0 - len / 2.0, y), (500.0 + len / 2.0, y)]).pressure(p, p * 0.9).ramps(ramps.0, ramps.1), None);
-                let a = |t: f32| c.wet.vol.iter().filter(|&&v| v >= t).count() as f32 / (c.f.scale * c.f.scale);
-                tot.0 += a(0.15) / 6.0;
-                tot.1 += a(1e-4) / 6.0;
-            }
-            println!("{name:6}: area {:.0} (any paint {:.0}) of nominal {:.0}: {:.2}; mark_width {:.2} of {:.2}", tot.0, tot.1, tool.width * len, tot.0 / (tool.width * len), tool.mark_width(p), tool.width);
-        }
-    }
-}
-
-/// Two arithmetic traps for exact (bit-identical) speedups of the brush
-/// kernel and its contact surface. Each pins what the code on main does, so
-/// a faster version that changes a bit fails here before it reaches a replay.
+/// A numeric regression check for the brush kernel's paint volume and cure.
 #[cfg(test)]
 mod kernel_traps {
     use super::*;
     use crate::color::hex;
-
-    fn fnv(h: &mut u64, bits: u32) {
-        for b in bits.to_le_bytes() {
-            *h ^= b as u64;
-            *h = h.wrapping_mul(0x100_0000_01b3);
-        }
-    }
 
     /// An engine-2 canvas that has waited (drying state allocated), wet all
     /// over: every other pixel (at random) a film just over the 1e-5 coats
     /// `wait` counts as a film (up to 1.05e-5), with cure 0.1, the rest
     /// thick wet paint with cure 0.05.
     fn thin_and_thick() -> Canvas {
-        // (the recorded hashes are engine 2's)
         let mut c = Canvas::new(600, 2.0, hex("#e8e0d0")).with_size_mm(440.0).with_engine(2);
         c.wait(1.0);
         let n = c.f.w * c.f.h;
@@ -2764,62 +2601,16 @@ mod kernel_traps {
         for i in 0..n {
             let thin = rng.f() < 0.5;
             c.wet.vol[i] = if thin { 1.0e-5 * (1.0 + 0.05 * rng.f()) } else { 2e-3 };
-            c.wet.lat[i] = lat;
+            c.wet.lat[i] = lat.clone();
             c.wet.clock.px[i].cure = if thin { 0.1 } else { 0.05 };
         }
         c.wet.dirty = Some((0, 0, c.f.w, c.f.h));
         c
     }
 
-    /// Trap A, the transfer: a plough transfer lifts paint off the source
-    /// (`Surf::take`), which zeroes the source's cure once its film falls
-    /// under 1e-5 coats (engine 2, drying state allocated), then lays it on
-    /// the destination (`Surf::add`) with the cure it read. The plough reads
-    /// the source's cure again for every destination it shares paint with,
-    /// so the destinations after the crossing get cure 0, not the cure the
-    /// source had before the first transfer.
-    #[test]
-    fn a_plough_transfer_rereads_the_source_cure_after_each_take() {
-        let mut c = thin_and_thick();
-        let w = c.f.w;
-        let i = 50 * w + 50;
-        let js = [49 * w + 50, 50 * w + 49, 50 * w + 51, 51 * w + 50];
-        c.wet.vol[i] = 1.03e-5;
-        c.wet.clock.px[i].cure = 0.1;
-        for &j in &js {
-            c.wet.vol[j] = 1e-3;
-            c.wet.clock.px[j].cure = 0.0;
-        }
-        let sf = c.surf();
-        let m = 1.44e-6f32 * 0.25;
-        let mut carried = Vec::new();
-        for &j in &js {
-            // as the plough block in `exchange` does, per accepted destination
-            unsafe {
-                let l = *sf.lat.add(i);
-                let hd = *sf.hide.add(i);
-                let cure = (*sf.dry.add(i)).cure;
-                carried.push(cure);
-                sf.take(i, m);
-                sf.add(j, m, &l, hd, cure);
-            }
-        }
-        // the first take crossed the threshold: only the first destination
-        // got the source's cure
-        assert_eq!(carried, [0.1, 0.0, 0.0, 0.0]);
-        assert!(c.wet.vol[i] < 1e-5 && c.wet.clock.px[i].cure == 0.0);
-        let got: Vec<u32> = js.iter().map(|&j| c.wet.clock.px[j].cure.to_bits()).collect();
-        let t = 1e-3f32 + m;
-        let first = (0.0 + (0.1f32 - 0.0) * (m / t)).to_bits();
-        assert_eq!(got, [first, 0, 0, 0], "destination cures {:?}", js.iter().map(|&j| c.wet.clock.px[j].cure).collect::<Vec<_>>());
-        // (a cure read once before the loop would have given every
-        // destination the first one's cure: 3.6e-5, not 0)
-        assert!(f32::from_bits(first) > 3e-5);
-    }
-
     /// Trap A, the kernel: an empty filbert that doesn't pick up (so it only
     /// ploughs, sharing each pixel's paint bilinearly among four
-    /// destinations) dragged through films at the threshold leaves exactly
+    /// destinations) dragged through films at the threshold leaves approximately
     /// the wet volume and cure recorded from main (4ec3169). A plough that
     /// hoisted the source's cure out of its destination loop fails this.
     #[test]
@@ -2834,128 +2625,141 @@ mod kernel_traps {
         }
         let n = c.f.w * c.f.h;
         let zeroed = (0..n).filter(|&i| before[i] > 0.0 && c.wet.clock.px[i].cure == 0.0).count();
-        let (mut hv, mut hc) = (0xcbf2_9ce4_8422_2325u64, 0xcbf2_9ce4_8422_2325u64);
-        for i in 0..n {
-            fnv(&mut hv, c.wet.vol[i].to_bits());
-            fnv(&mut hc, c.wet.clock.px[i].cure.to_bits());
-        }
         // the strokes did plough thin films under the threshold
         assert!(zeroed > 1000, "{zeroed} films ploughed bare");
-        let expected = if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-            "vol=1c120f17ecd81763 cure=7c833caca2cc5c60 zeroed=7536"
-        } else {
-            "vol=216de608ff085476 cure=322c7a06e7dcb3f4 zeroed=7536"
-        };
-        assert_eq!(format!("vol={hv:016x} cure={hc:016x} zeroed={zeroed}"), expected, "the plough no longer moves paint and cure as main did");
-    }
-
-    /// Trap B, the medians: the contact level's running median of a pixel
-    /// is the median of the pixels within its window, whatever else is in
-    /// the row, so recomputing it over a crop that holds each output's
-    /// whole window (or reaches the row's own ends) gives the full row's
-    /// result bit for bit.
-    #[test]
-    fn a_running_median_over_a_crop_with_its_window_is_bit_identical() {
-        let mut rng = Rng::new(20260930);
-        let row: Vec<f32> = (0..400).map(|_| rng.range(-80.0, 200.0)).collect();
-        let r = 23;
-        let mut full = vec![0.0; row.len()];
-        running_median(&row, r, &mut full);
-        for (a, b) in [(100usize, 180usize), (0, 60), (350, 400), (0, 400)] {
-            let (ca, cb) = (a.saturating_sub(r), (b + r).min(row.len()));
-            let mut local = vec![0.0; cb - ca];
-            running_median(&row[ca..cb], r, &mut local);
-            let same = (a..b).all(|x| full[x].to_bits() == local[x - ca].to_bits());
-            assert!(same, "median over [{ca}, {cb}) differs from the full row in [{a}, {b})");
-        }
-    }
-
-    /// Trap B, the blur: `surface::box_blur` keeps a running sum from the
-    /// start of each row and column. The same blur over a crop, even one
-    /// holding every output's whole window, restarts that sum and rounds
-    /// differently: it is NOT bit-identical to the full frame. Recomputing
-    /// only part of the contact level must keep the full rows' and columns'
-    /// sums (or recompute the blur in full).
-    #[test]
-    fn a_box_blur_over_a_crop_is_not_bit_identical() {
-        let (w, h, r) = (160, 120, 3);
-        let mut rng = Rng::new(20260930);
-        let src: Vec<f32> = (0..w * h).map(|_| rng.range(0.0, 200.0)).collect();
-        let full = crate::surface::box_blur(&src, w, h, r);
-        // the interior [60, 100) × [40, 80), cropped with a halo of r
-        let (x0, y0, x1, y1) = (60 - r, 40 - r, 100 + r, 80 + r);
-        let crop: Vec<f32> = (y0..y1).flat_map(|y| src[y * w + x0..y * w + x1].to_vec()).collect();
-        let local = crate::surface::box_blur(&crop, x1 - x0, y1 - y0, r);
-        let (mut differ, mut max) = (0, 0.0f32);
-        for y in 40..80 {
-            for x in 60..100 {
-                let (a, b) = (full[y * w + x], local[(y - y0) * (x1 - x0) + x - x0]);
-                if a.to_bits() != b.to_bits() {
-                    differ += 1;
-                    max = max.max((a - b).abs());
-                }
-                // the same value, but for rounding
-                assert!((a - b).abs() <= 1e-3, "{a} vs {b} at ({x}, {y})");
+        let expected = image::open(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/plough_volume_cure.png")).unwrap().to_rgb16();
+        assert_eq!(expected.dimensions(), (c.f.w as u32, c.f.h as u32));
+        for (i, pixel) in expected.pixels().enumerate() {
+            for (channel, (value, scale)) in [(c.wet.vol[i], 0.01), (c.wet.clock.px[i].cure, 0.1)].into_iter().enumerate() {
+                assert!(value.is_finite() && (0.0..=scale).contains(&value), "field {channel} at pixel {i}: {value}");
+                let actual = (value / scale * 65535.0).round() as u16;
+                assert!(actual.abs_diff(pixel[channel]) <= 2, "field {channel} at pixel {i}: {value} exceeds two 16-bit reference levels");
             }
         }
-        assert!(differ > 0, "the cropped blur is bit-identical here: box_blur no longer keeps a running sum?");
-        eprintln!("cropped box blur: {differ} of 1600 pixels differ, by up to {max:e}");
     }
 }
 
-#[cfg(test)]
-mod part_tests {
-    use super::*;
-    use crate::color::hex;
+/// The share of a tube paint's volume that is oil, as engine 4's draw
+/// takes it (`ground_draw`). Real tube paint is 45–75% oil by volume; the
+/// drain switch takes each paint's own (`Paint::oil_volume`, `ground_drain`).
+pub(crate) const OIL_SHARE: f32 = 0.4;
 
-    fn vols(h: &Held) -> Vec<(f32, f32)> {
-        h.bristles.iter().map(|b| (b.rx, b.vol)).collect()
+/// An absorbent ground draws oil out of `v` coats of paint just laid on a
+/// film now `t` coats thick (engine 4), until its pores (`cap`, coats of oil
+/// it can still take) are full: up to 0.8 of the oil laid, the film's oil
+/// share (`hide[4]`) falling and its stiffness rising by what it lost.
+/// Returns the film's thickness after.
+pub(crate) fn ground_draw(cap: &mut f32, v: f32, t: f32, hd: &mut Prop) -> f32 {
+    // (without the drain switch; with it the ground drains the film,
+    // `ground_drain`)
+    if *cap <= 0.0 {
+        return t;
     }
-
-    #[test]
-    fn whole_part_is_an_ordinary_load() {
-        let mut a = Held::new(Tool::filbert(12.0), 7);
-        let mut b = Held::new(Tool::filbert(12.0), 7);
-        a.load(Paint::body(hex("#445566")), 0.8);
-        b.load_part(Paint::body(hex("#445566")), 0.8, &Part::ALL);
-        assert_eq!(vols(&a), vols(&b));
+    let oil_in = v * OIL_SHARE * hd[4].max(0.0);
+    let take = (*cap).min(0.8 * oil_in);
+    if take <= 0.0 {
+        return t;
     }
+    *cap -= take;
+    let film_oil = (t * OIL_SHARE * hd[4].max(0.0)).max(1e-9);
+    let lean = (take / film_oil).min(0.9);
+    hd[4] *= 1.0 - lean;
+    hd[1] = (hd[1] * (1.0 + lean) * (1.0 + lean)).min(1.0);
+    (t - take).max(0.0)
+}
 
-    #[test]
-    fn a_side_dip_reaches_only_that_side() {
-        let mut h = Held::new(Tool::filbert(12.0), 7);
-        h.load_part(Paint::body(hex("#c04040")), 0.8, &Part { side: 1.0, share: 0.4, streak: 0.0, seed: 1 });
-        for (rx, v) in vols(&h) {
-            if rx < -0.1 {
-                assert_eq!(v, 0.0, "bristle at {rx} took paint");
-            }
-            if rx > 0.6 {
-                assert!(v > 0.0, "bristle at {rx} took none");
-            }
-        }
+/// The drain switch (`Canvas::with_drain`): an absorbent ground drains the
+/// wet film over it, `t` coats of paint whose properties are `hd`, until its
+/// pores (`cap`, coats of oil) are full or the paint is down to its drained
+/// floor (`hd[6]`, of the oil `hd[4]` counts). Its capillary pull, far
+/// stronger than a hand's pressure, takes the oil at once, and the pigment
+/// packs from the ground up as a filter cake does: the packed share of the
+/// film (`hd[7]`, of its thickness) holds the floor's oil, the paint above
+/// it keeps all its own, and the surface keeps its gloss and its flow until
+/// the packed layer reaches it (`Canvas::bake`). The film's oil (`hd[4]`) is
+/// the two's, by volume, as paint mixes. Returns the film's thickness after.
+pub(crate) fn ground_drain(cap: &mut f32, t: f32, hd: &mut Prop) -> f32 {
+    if *cap <= 0.0 || t <= 0.0 {
+        return t;
     }
+    let (floor, packed) = (hd[6].max(0.0), hd[7].clamp(0.0, 1.0));
+    let top = surface_oil(hd);
+    if packed >= 1.0 || top <= floor {
+        return t;
+    }
+    // each coat of the paint above gives up this much oil as it packs (its
+    // pigment, a share 1 − q of its tube paint's volume, holds q/(1 − q) of
+    // oil per unit of `oil`; q is the tube's own, `Paint::oil_volume`)
+    let q = hd[8].clamp(0.05, 0.95);
+    let r = q * (top - floor) / (1.0 - q + q * top);
+    let fluid = t * (1.0 - packed);
+    let take = (*cap).min(fluid * r);
+    if take <= 0.0 {
+        return t;
+    }
+    *cap -= take;
+    // the paint that packed, the packed layer it adds to, the film after
+    let u = (take / r).min(fluid);
+    let (left, under) = ((t - take).max(1e-9), packed * t + u - take);
+    hd[0] *= t / (t - take);
+    hd[7] = (under / left).clamp(0.0, 1.0);
+    hd[4] = ((under * floor + (fluid - u) * top) / left).max(0.0);
+    t - take
+}
 
-    #[test]
-    fn streaks_keep_about_the_same_paint() {
-        let mut even = Held::new(Tool::filbert(12.0), 7);
-        even.load(Paint::body(hex("#445566")), 0.8);
-        let mut sum = 0.0;
-        for seed in 0..40 {
-            let mut h = Held::new(Tool::filbert(12.0), 7);
-            h.load_part(Paint::body(hex("#445566")), 0.8, &Part { streak: 1.0, seed, ..Part::ALL });
-            sum += h.fullness() / even.fullness();
-            // and the bristles take it unevenly
-            let v: Vec<f32> = h.bristles.iter().map(|b| b.vol).collect();
-            let (lo, hi) = v.iter().fold((f32::MAX, 0f32), |(l, m), &x| (l.min(x), m.max(x)));
-            assert!(hi > 3.0 * lo.max(1e-9), "seed {seed}: {lo}..{hi}");
-        }
-        let mean = sum / 40.0;
-        assert!((0.8..1.2).contains(&mean), "mean {mean}");
+/// The drain switch: `v` coats taken off a film `vol` coats thick whose
+/// properties are `hd`, from the top down: the paint above its packed layer
+/// first, at the surface's oil, then the packed paint, at its drained
+/// floor's. Leaves `hd` the film's after and returns the paint taken, broken
+/// up and fluid (none of it packed).
+pub(crate) fn take_from(hd: &mut Prop, vol: f32, v: f32) -> Prop {
+    let mut got = fluid_of(*hd);
+    let packed = hd[7].clamp(0.0, 1.0);
+    if packed <= 0.0 || vol <= 0.0 || v <= 0.0 {
+        return got;
+    }
+    let (o, floor, top) = (hd[4].max(0.0), hd[6].max(0.0), surface_oil(hd));
+    let v = v.min(vol);
+    let from_top = v.min(vol * (1.0 - packed));
+    let from_packed = v - from_top;
+    got[4] = (top * from_top + floor.min(o) * from_packed) / v;
+    let left = vol - v;
+    if left > 1e-9 {
+        hd[4] = ((o * vol - got[4] * v) / left).max(0.0);
+        hd[7] = ((packed * vol - from_packed) / left).clamp(0.0, 1.0);
+    }
+    got
+}
+
+/// Paint `hd` broken up and fluid: none of it packed (the drain switch:
+/// paint laid, or taken up and laid again, `ground_drain`).
+#[inline]
+pub(crate) fn fluid_of(hd: Prop) -> Prop {
+    let mut h = hd;
+    h[7] = 0.0;
+    h
+}
+
+pub(crate) fn skim_top(hd: &mut Prop, vol: f32, buried: f32) -> Prop {
+    let mut below = *hd;
+    *hd = take_from(&mut below, vol, vol - buried);
+    below
+}
+
+pub(crate) fn restore_buried(hd: &mut Prop, below: &Prop, share: f32) {
+    for k in 4..hd.len() {
+        hd[k] += (below[k] - hd[k]) * share;
     }
 }
 
-/// The share of a tube paint's volume that is oil (about 30–45%).
-const OIL_SHARE: f32 = 0.4;
+/// The oil at the surface of a film whose properties are `hd`: the paint's
+/// own above its packed layer (`ground_drain`; the drain switch).
+pub(crate) fn surface_oil(hd: &Prop) -> f32 {
+    let (o, floor, packed) = (hd[4].max(0.0), hd[6].max(0.0), hd[7].clamp(0.0, 1.0));
+    // (the surface is the paint above until the packed layer reaches it; at
+    // the last ten-thousandth the division is no longer exact in f32)
+    if packed < 1.0 - 1e-4 { ((o - packed * floor) / (1.0 - packed)).max(floor.min(o)) } else { o }
+}
 
 /// How far (µm) below the paint under a knife's blade it is pressed into the
 /// hollows of the surface (`Canvas::knife`).
@@ -2965,11 +2769,17 @@ const PRESS_IN_UM: f32 = 60.0;
 /// it; finer hollows than that it bridges (`Canvas::knife`).
 const FLEX_MM: f32 = 4.0;
 
+/// How deep (coats; about 6 µm) a knife's paint laid on wet paint mixes into
+/// it when the canvas skims (`Canvas::knife`): the blade slides the paint on
+/// without stirring it in, so only the film where the two meet blends.
+const SKIM_COATS: f32 = 0.25;
+
 /// A painting knife: a flat, rigid steel blade, `width` units long, and the
 /// bead of paint it carries (coats × units², as a bristle's load). It lays
 /// paint in flat slabs, leaving the paint it cuts off at the blade's ends in
 /// ridges and a bead where it lifts, and scrapes wet paint off.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
+#[cfg_attr(feature = "replay-effects", derive(serde::Serialize, serde::Deserialize))]
 pub struct Knife {
     pub width: f32,
     vol: f32,
@@ -2977,6 +2787,25 @@ pub struct Knife {
     lat: Latent,
     hide: Prop,
     cure: f32,
+    /// On a canvas that drains (`Canvas::with_drain`): its `Debug` gives the
+    /// paint's packing too (`with_packing`). Not printed itself.
+    shows_packing: bool,
+}
+
+/// As derived, but the paint's properties without the pigment's packing
+/// (`Prop`'s last five) unless `shows_packing` (the drain switch): a knife
+/// without it prints as it always did (`easel run --state-digest` hashes it).
+impl std::fmt::Debug for Knife {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Knife")
+            .field("width", &self.width)
+            .field("vol", &self.vol)
+            .field("solvent", &self.solvent)
+            .field("lat", &self.lat)
+            .field("hide", &if self.shows_packing { &self.hide[..] } else { &self.hide[..5] })
+            .field("cure", &self.cure)
+            .finish()
+    }
 }
 
 impl Knife {
@@ -2995,7 +2824,13 @@ impl Knife {
     }
 
     pub fn new(width: f32) -> Self {
-        Knife { width: if width.is_finite() { width.clamp(1.0, 1000.0) } else { 1.0 }, vol: 0.0, solvent: 0.0, lat: [0.0; LAT], hide: [0.0; 5], cure: 0.0 }
+        Knife { width: if width.is_finite() { width.clamp(1.0, 1000.0) } else { 1.0 }, vol: 0.0, solvent: 0.0, lat: Latent::default(), hide: [0.0; 10], cure: 0.0, shows_packing: false }
+    }
+    /// The knife of a painting whose canvas drains (`Canvas::with_drain`):
+    /// its `Debug` gives the paint's packing too.
+    pub fn with_packing(mut self, on: bool) -> Self {
+        self.shows_packing = on;
+        self
     }
     /// A full load: a bead along the blade twice its length deep and 12
     /// coats (300 µm) thick (about a millilitre on a 4 cm blade).
@@ -3023,7 +2858,7 @@ impl Knife {
         }
         let color = mixbox::latent_to_linear_float_rgb(&self.lat);
         let p = Paint::km(color, self.hide[0], self.hide[1].clamp(0.0, 1.0)).with_drying(self.hide[2]);
-        Some(Paint { solvent: self.hide[3], oil: self.hide[4], thinner: self.solvent / (self.vol + self.solvent), ..p })
+        Some(Paint { solvent: self.hide[3], oil: self.hide[4], packed: self.hide[5], floor: self.hide[6], oil_volume: self.hide[8], thinner: self.solvent / (self.vol + self.solvent), ..p })
     }
     /// Wipe the blade clean on the rag.
     pub fn wipe(&mut self) {
@@ -3033,6 +2868,60 @@ impl Knife {
     /// Paint on the blade, relative to a full load.
     pub fn fullness(&self) -> f32 {
         (self.vol + self.solvent) / self.full()
+    }
+
+    pub fn carried_parts(&self) -> &[(usize, f32)] {
+        if self.vol > 0.0 { &self.lat.parts } else { &[] }
+    }
+}
+
+/// Lay `v` coats of the knife's paint at pixel `i` (`Surf::add`). With
+/// `skim` it mixes with only the top `SKIM_COATS` of the wet paint there; the
+/// wet paint below lies buried under it, out of sight, and the pixel takes
+/// the color of what is on top (its one color is what is seen).
+///
+/// # Safety
+/// As `Surf::add`.
+unsafe fn knife_add(sf: &Surf, i: usize, v: f32, k: &Knife, skim: bool) {
+    unsafe {
+        if !skim {
+            return sf.add(i, v, &k.lat, k.hide, k.cure);
+        }
+        Surf { skim: SKIM_COATS, ..*sf }.lay(i, v, &k.lat, k.hide, k.cure);
+    }
+}
+
+#[cfg(test)]
+mod skim_packing_tests {
+    use super::*;
+
+    #[test]
+    fn skimming_keeps_the_packed_paint_buried_under_it() {
+        for path in ["brush", "engine7", "knife"] {
+            let mut c = Canvas::new(2, 1.0, [0.3; 3]).with_engine(7).with_drain(true);
+            c.wet.vol[0] = 1.0;
+            c.wet.hide[0] = [0.8, 0.6, 1.0, 0.0, 0.4, 0.7, 0.4, 1.0, 0.4, 0.0];
+            let mut sf = c.surf();
+            sf.skim = SKIM_COATS;
+            let paint = crate::Paint { oil: 1.0, packed: 0.7, floor: 0.4, oil_volume: 0.4, ..crate::Paint::body([1.0; 3]) };
+            let mut knife = Knife::new(20.0);
+            knife.load(paint, 1.0);
+            for pass in 0..=3 {
+                let added = if pass == 0 { 0.0 } else { 0.25 };
+                unsafe {
+                    match path {
+                        "brush" => sf.lay(0, added, &knife.lat, knife.hide, 0.0),
+                        "engine7" => crate::engine7::add::Film::of(&sf).lay(0, added, &crate::engine7::add::Paint7::new(sf.lean, sf.drain, &knife.lat, knife.hide, 0.0), sf.skim),
+                        _ => knife_add(&sf, 0, added, &knife, true),
+                    }
+                }
+                let (vol, hd) = (c.wet.vol[0], c.wet.hide[0]);
+                assert!((vol - (1.0 + 0.25 * pass as f32)).abs() < 1e-6, "{path}: volume {vol}");
+                let packed = if pass == 0 { 1.0 } else { 1.0 - SKIM_COATS };
+                assert!((vol * hd[7] - packed).abs() < 1e-6, "{path}: packed paint {} at pass {pass}", vol * hd[7]);
+                assert!((vol * hd[4] - (0.4 + 0.25 * pass as f32)).abs() < 1e-6, "{path}: oil {} at pass {pass}", vol * hd[4]);
+            }
+        }
     }
 }
 
@@ -3047,7 +2936,9 @@ impl Canvas {
     /// ridges. Where the surface lies below the blade, within the gap of it,
     /// `lay` fills it from the bead to the blade's level: a slab with a flat
     /// top, or over dry impasto paint on its peaks only. When the blade
-    /// lifts, the share `lift` of the bead stays where it last was.
+    /// lifts, the share `lift` of the bead stays where it last was. On a
+    /// canvas that skims (`with_knife_skim`) paint laid on wet paint stays
+    /// on top of it, mixing with only the film where the two meet.
     pub fn knife(&mut self, k: &mut Knife, pts: &[(f32, f32)], pressure: (f32, f32), angle: Option<f32>, lay: bool, lift: f32) {
         // (the blade's length is a public field: nothing to pull with one that is no length)
         if Knife::check_path(pts, self.f.scale).is_err() || !pressure.0.is_finite() || !pressure.1.is_finite() || angle.is_some_and(|a| !a.is_finite()) || !lift.is_finite() || !(k.width.is_finite() && (1.0..=1000.0).contains(&k.width)) {
@@ -3060,6 +2951,7 @@ impl Canvas {
         // at the slab's ends, its leading edge, and where the blade's reach
         // into the hollows runs out (`tn`, a noise along and across the blade)
         let tears = self.engine >= 5;
+        let skim = self.knife_skim;
         // (the paint the tears held back under the blade: back on it at the end)
         let (mut held, mut held_solvent) = (0.0f32, 0.0f32);
         let tseed = (id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0x7EA2;
@@ -3162,9 +3054,9 @@ impl Canvas {
                         if ex <= 1e-7 {
                             continue;
                         }
-                        let (l, hd) = (*sf.lat.add(i), *sf.hide.add(i));
+                        let l = (*sf.lat.add(i)).clone();
                         let cure = if sf.dry.is_null() { 0.0 } else { (*sf.dry.add(i)).cure };
-                        sf.take(i, ex);
+                        let hd = sf.take(i, ex);
                         if !sf.solv.is_null() { *sf.solv.add(i) -= ex_solvent * crate::surface::COAT_UM; }
                         // pressed out past the blade's end into a ridge (off
                         // the canvas's edge there is nowhere to press it: it
@@ -3213,7 +3105,7 @@ impl Canvas {
                         let give = want.min(liquid / px_area * 0.25);
                         let phi = k.solvent / liquid;
                         if give > 1e-7 {
-                            sf.add(i, give * (1.0 - phi), &k.lat, k.hide, k.cure);
+                            knife_add(&sf, i, give * (1.0 - phi), k, skim);
                             if !sf.solv.is_null() { *sf.solv.add(i) += give * phi * crate::surface::COAT_UM; }
                             *sf.cover.add(i) = 1.0;
                             k.vol = (k.vol - give * (1.0 - phi) * px_area).max(0.0);
@@ -3253,7 +3145,7 @@ impl Canvas {
                     let v = leave * wgt / tw / px_area;
                     // SAFETY: as above
                     unsafe {
-                        sf.add(i, v * (1.0 - phi), &k.lat, k.hide, k.cure);
+                        knife_add(&sf, i, v * (1.0 - phi), k, skim);
                         if !sf.solv.is_null() { *sf.solv.add(i) += v * phi * crate::surface::COAT_UM; }
                         *sf.cover.add(i) = 1.0;
                         *sf.stroke.add(i) = id;
@@ -3274,76 +3166,40 @@ impl Canvas {
 }
 
 #[cfg(test)]
-mod knife_tests {
+mod knife_skim {
     use super::*;
-    use crate::hex;
+    use crate::color::{hex, luminance};
 
-    #[test]
-    fn knife_preserves_thinner_when_loading_laying_and_scraping() {
-        let mut c = Canvas::new(120, 1.0, hex("#ffffff")).with_engine(4);
-        let mut k = Knife::new(30.0);
-        k.load(Paint::body(hex("#224466")).with_thinner(0.75), 0.5);
-        let liquid = k.full() * 0.5;
-        assert!((k.vol / liquid - 0.25).abs() < 1e-6, "the blade stores pigment separately from thinner");
-        c.knife(&mut k, &[(200.0, 300.0), (700.0, 300.0)], (0.4, 0.4), None, true, 0.1);
-        let paint: f32 = c.wet.vol.iter().sum();
-        let solvent: f32 = c.wet.solv.iter().sum::<f32>() / crate::surface::COAT_UM;
-        assert!(paint > 0.0 && solvent > 0.0, "a thinned knife lays both liquids");
-        assert!((solvent / paint - 3.0).abs() < 1e-3);
+    /// The mean luminance of the middle of a light knife pull laid lightly
+    /// over dark knife paint, wet or dried first.
+    fn light_over_dark(skim: bool, dried: bool) -> f32 {
+        let mut c = Canvas::new(300, 1.0, hex("#e8e0d0")).with_engine(crate::engine7::ENGINE).with_knife_skim(skim);
+        let mut k = Knife::new(120.0);
+        for x in [350.0, 450.0, 550.0, 650.0] {
+            k.load(Paint::body(hex("#1c2430")), 1.0);
+            c.knife(&mut k, &[(x, 250.0), (x, 750.0)], (0.45, 0.45), Some(0.0), true, 0.1);
+        }
+        if dried {
+            c.dry();
+        }
         k.wipe();
-        c.knife(&mut k, &[(200.0, 300.0), (700.0, 300.0)], (1.0, 1.0), None, false, 0.0);
-        assert!(k.vol > 0.0);
-        let before = c.wet.solv.iter().sum::<f32>();
-        c.knife(&mut k, &[(200.0, 600.0), (700.0, 600.0)], (0.4, 0.4), None, true, 0.1);
-        assert!(c.wet.solv.iter().sum::<f32>() > before, "scraped thinner remains on the blade for the next pull");
+        k.load(Paint::body(hex("#f2ece0")), 1.0);
+        c.knife(&mut k, &[(500.0, 350.0), (500.0, 650.0)], (0.05, 0.05), Some(0.0), true, 0.1);
+        let (seen, w, s) = (c.seen(), c.f.w, c.f.scale);
+        let px = |u: f32| (u * s) as usize;
+        let lum: Vec<f32> = (px(420.0)..px(580.0)).flat_map(|y| (px(470.0)..px(530.0)).map(move |x| y * w + x)).map(|i| luminance(seen[i])).collect();
+        lum.iter().sum::<f32>() / lum.len() as f32
     }
-}
 
-#[cfg(test)]
-mod spatter_tests {
-    use super::*;
-    use crate::color::hex;
-
+    /// A loaded knife laid lightly on wet dark paint leaves its own color on
+    /// top, about as it does on the same paint dried. Without the skim (older
+    /// logs) it is stirred into the wet paint under it and goes gray.
     #[test]
-    fn review_spatter_transfers_solvent_and_covers_its_drops() {
-        let mut c = Canvas::new(200, 1.0, hex("#e8e0d0")).with_size_mm(300.0);
-        c.wet.cover.fill(0.1);
-        let mut h = Held::new(Tool::round_sable(12.0), 3);
-        h.load(Paint::new(hex("#b03020"), 0.9, 0.1).with_thinner(0.5), 1.0);
-        let before: f32 = h.bristles.iter().map(|b| b.solvent).sum();
-        assert!(c.spatter(&mut h, &Spatter { at: (300.0, 400.0), toward: (100.0, 0.0), spread: 0.2, force: 0.9, seed: 9 }, None) > 0);
-        let after: f32 = h.bristles.iter().map(|b| b.solvent).sum();
-        assert!(after < before && c.solvent_total() > 0.0, "spatter must transfer the load's solvent");
-        assert!(c.wet.vol.iter().zip(&c.wet.cover).filter(|(v,_)| **v > 0.0).all(|(_,cover)| *cover == 1.0));
-    }
-
-    fn flick(stiff: f32, force: f32) -> (usize, f32, f32) {
-        let mut c = Canvas::new(400, 2.0, hex("#e8e0d0")).with_size_mm(300.0);
-        let mut h = Held::new(Tool::round_sable(8.0), 3);
-        h.load(Paint::new(hex("#b03020"), 0.9, stiff), 1.0);
-        let before = h.fullness();
-        let n = c.spatter(&mut h, &Spatter { at: (100.0, 150.0), toward: (150.0, 0.0), spread: 0.4, force, seed: 9 }, None);
-        let laid: f32 = c.wet.vol.iter().sum();
-        (n, before - h.fullness(), laid)
-    }
-
-    /// Fluid paint flies; stiff paint mostly stays on the brush; a harder
-    /// flick throws more; what leaves the brush lands on the canvas.
-    #[test]
-    fn fluid_paint_flies_and_stiff_paint_stays() {
-        let (n_fluid, out_fluid, laid_fluid) = flick(0.1, 0.9);
-        let (_, out_stiff, _) = flick(0.95, 0.9);
-        let (_, out_soft, _) = flick(0.1, 0.2);
-        assert!(n_fluid > 20, "a hard flick of fluid paint throws many droplets ({n_fluid})");
-        assert!(out_fluid > 2.0 * out_stiff, "stiff paint stays on the brush ({out_fluid} vs {out_stiff})");
-        assert!(out_fluid > out_soft, "a harder flick throws more ({out_fluid} vs {out_soft})");
-        assert!(laid_fluid > 0.0, "the droplets land in the wet layer");
-    }
-
-    /// Same seed, same spatter.
-    #[test]
-    fn spatter_is_deterministic() {
-        assert_eq!(flick(0.2, 0.7).0, flick(0.2, 0.7).0);
-        assert_eq!(flick(0.2, 0.7).2.to_bits(), flick(0.2, 0.7).2.to_bits());
+    fn a_skimming_knife_keeps_its_light_on_wet_dark_paint() {
+        let dried = light_over_dark(true, true);
+        let wet = light_over_dark(true, false);
+        let stirred = light_over_dark(false, false);
+        assert!(wet > 0.85 * dried, "on wet {wet}, on dried {dried}");
+        assert!(stirred < 0.6 * dried, "stirred in {stirred}, on dried {dried}");
     }
 }

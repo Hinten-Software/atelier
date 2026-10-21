@@ -1,7 +1,7 @@
 //! Finishing: varnish, cracks and relief over the whole dry picture.
 //!
-//! Only in builds with the `finish` feature (developers and the outside
-//! runner). The painter build has none of these verbs: finishing is applied
+//! Available only in developer mode and the outside runner. Painter mode
+//! has none of these verbs: finishing is applied
 //! after the session, by `scripts/finish_painting`, so that it can't become
 //! the painter's way of ending.
 
@@ -33,9 +33,10 @@ fn wet_share(c: &Canvas) -> f64 {
 
 /// Whole-picture finishing requires every film to be touch-dry.
 fn needs_dry(st: &S, what: &str) -> Result<()> {
-    let s = st.borrow();
-    let c = s.canvas.as_ref().ok_or_else(no_canvas)?;
-    let w = wet_share(c);
+    let w = time::read("wet_share", || {
+        let s = st.borrow();
+        Ok(wet_share(s.canvas.as_ref().ok_or_else(no_canvas)?))
+    })?;
     if w > 0.0 {
         let pc = if w < 0.005 { "under 1%".to_string() } else { format!("{:.0}%", 100.0 * w) };
         return err(format!("{what}: the paint is not all dry yet ({pc} of the canvas is still open, setting or tacky; drying(x, y) tells where): wait first"));
@@ -145,50 +146,4 @@ pub(crate) fn install(lua: &Lua, st: S) -> Result<()> {
         })
     })?)?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::session::Session;
-
-    #[test]
-    fn plain_finish_has_no_chunk() {
-        assert_eq!(super::chunk("0.4", false, false, false), "");
-    }
-
-    // Finishing verbs brush over the whole picture, so every film must be
-    // touch-dry first, however small the wet part; after a long wait they run.
-    #[test]
-    fn finishing_waits_for_the_whole_picture_to_dry() {
-        let mut s = Session::new(100).unwrap();
-        s.run(r#"canvas{size=300, aspect=1, linen=15,
-                ground={{pile={{"lead white",1}},um=100,apply="knife"}}}"#).unwrap();
-        s.run(r#"b = brush("flat", 20); b:load(pile{{"bone black",1}}); b:stroke({100,200,400,200})"#).unwrap();
-        for verb in ["varnish()", "cracks()", "relief()"] {
-            let e = s.run(verb).unwrap_err();
-            assert!(e.contains("not all dry yet") && e.contains("wait first"), "{verb}: {e}");
-        }
-        s.run("wait(90*24*60); varnish()").unwrap();
-    }
-
-    // A varnish of no coats lays nothing: the picture is seen as it was; a
-    // varnish makes a lean, matte passage glossy, and it is seen deeper.
-    #[test]
-    fn a_varnish_of_no_coats_changes_nothing() {
-        let mut s = Session::new(100).unwrap();
-        s.run(r#"canvas{size=300, aspect=1, linen=15,
-                ground={{pile={{"lead white",1}},um=100,apply="knife"}}}"#).unwrap();
-        s.run(r#"b = brush("flat", 60); b:load(pile{{"bone black",1}, blot=0.5}); b:stroke({100,500,900,500}); wait(90*24*60)"#).unwrap();
-        let seen = |s: &Session| -> Vec<u32> { s.canvas().unwrap().seen().iter().flat_map(|p| p.map(f32::to_bits)).collect() };
-        let before = seen(&s);
-        for options in ["coats=0, vary=-1", "coats=-2, vary=0.5"] {
-            let e = s.run(&format!("varnish{{{options}}}")).unwrap_err();
-            assert!(e.contains("must be nonnegative"), "{e}");
-            assert_eq!(before, seen(&s));
-        }
-        s.run("varnish{coats=0, vary=0}").unwrap();
-        assert_eq!(before, seen(&s));
-        s.run("varnish()").unwrap();
-        assert_ne!(before, seen(&s));
-    }
 }

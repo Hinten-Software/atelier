@@ -12,24 +12,29 @@ Three things hold for every session:
   a rag or scrape it off with a knife.
 - **A chunk that stops with an error changes nothing.** The canvas, your
   variables, the paint on your brushes and the clock are as they were
-  before it, and it isn't written to the log.
+  before it, and it isn't written to the log. The one exception is a fresh
+  scratch canvas: see [The scratch canvas](#the-scratch-canvas).
 - **The log is the painting.** Every chunk that ran is appended to the
   painting's log (`log` shows it), and replaying it paints the same canvas.
 
 ## Starting
 
-The studio holds one painting, and the easel is open on it. Its tools:
+The studio holds one painting, and the easel is open on it. When the easel
+opens on a painting that has a log, it rebuilds the painting by replaying
+the log; until it has finished, `status` answers how many of its chunks are
+done. Its tools:
 
 | tool | what it does |
 |---|---|
 | `paint` | runs a chunk of Lua. The reply is what the chunk printed, the painting's current clock, then `ok` |
 | `look` | shows you the canvas as it is now, or your palette (see [Looking](#looking)) |
 | `note` | adds an entry to your journal (see [The journal](#the-journal)) |
-| `status` | the canvas's setup |
-| `log` | the painting so far: every chunk that ran, each after a line `--@ chunk` |
+| `status` | the canvas's setup; while a chunk is still running, how far it has got; while the easel rebuilds the painting from its log, how many of its chunks are done |
+| `log` | the painting so far: every chunk that ran, each after a line `--@ chunk`; with `find: "<text>"`, only the lines that hold that text, each with its line number and the two lines before and after it |
+| `read` | reads a file in this folder, such as your brief or your notes; on a folder, lists what is in it |
 
 The first chunk is `canvas{}` (see [The canvas](#the-canvas)). `read` reads the files in this folder: your brief and
-your notes.
+your notes. `read` on a folder lists what is in it.
 
 Beside the painting is a scratch canvas to try things on (see [The scratch canvas](#the-scratch-canvas)): `paint`,
 `look`, `status` and `log` work on it with `scratch: true`.
@@ -65,16 +70,24 @@ canvas{size=<mm>, aspect=<width / height>, linen={<warp>, <weft>}, seed=<seed>,
   cloth there (`"raw"`), and whether paint lies on it.
 - A ground layer's `absorbent=true` (or 0..1) makes it a chalk and glue
   ground: it draws oil out of the paint laid straight on it until its pores
-  are full, so thin paint there goes lean, stiff, quick to set and matte,
-  while thick paint barely notices. Paint that has dried over it seals it.
-  An oil ground (the default) absorbs nothing and is semi-matte.
+  are full, so thin paint there goes lean, quick to set and matte, while
+  thick paint barely notices. The pigment packs from the ground up: the
+  paint above keeps its oil, its flow and its gloss until the packed layer
+  reaches the surface. How far a thin film drains depends on its pigment:
+  fine pigments keep the oil they pack with and dry semi-matte; coarse
+  ones, such as smalt, drain further and dry matte. Each tube holds as
+  much oil as paint of its day was ground with. Paint that has dried over
+  the ground seals it. An oil ground (the default) absorbs nothing and is
+  semi-matte. (A painting whose log's head has no `--@ drain` line keeps
+  the older ground: it draws oil from the paint just laid, leaving it
+  stiffer.)
 
 **Gloss.** Every dry surface is more or less glossy: oily paint (medium)
 dries glossy, lean paint (blotted, or drawn out by an absorbent ground)
 matte, a thin film shows the surface under it, a varnish makes all of it
 glossy. A matte surface scatters the light its first surface reflects back
 toward you, a faint veil of white over the colors that lifts the darks; a
-glossy one sends it away. The looks and the saved picture show it.
+glossy one sends it away. The looks show it.
 
 It sets `W` (1000) and `H` (`1000 / aspect`). The canvas is always 1000
 units wide, whatever its pixel width. The origin `(0, 0)` is the upper
@@ -99,8 +112,10 @@ transparent and more fluid, and slower to dry. It is added oil only. What a pile
 what its pigments make together, thick or thin, over what is already on
 the canvas; you find out by painting with it and looking. A pile mixed by
 hand is a little uneven: each brushload takes slightly different
-proportions (about 6%). The palette has room for 16 piles; the oldest is
-scraped off to make room.
+proportions (about 6%). The palette has room for 16 piles. A 17th is an
+error that lists the piles on the palette, oldest first; nothing is scraped
+off to make room. (A painting whose log has no `--@ full-palette-refuses`
+line scrapes the oldest off instead.)
 
 `turps` thins the pile with that share of turpentine (0 to 0.9):
 `pile({{"<tube>", <parts>}, turps=0.6})`. It flows on the brush and
@@ -114,7 +129,10 @@ little slower) or `"poppy"` (dries much slower, yellows least).
 first, which draws out that share of its own oil (0 to 0.5):
 `pile({{"<tube>", <parts>}, blot=0.3})`. Blotted paint is leaner, a little
 more opaque and much stiffer: it holds the ridges and furrows of the brush
-as it dries. A pile takes either medium or blot.
+as it dries. The paper draws no more than the pigment lets go: a paint
+already ground stiff, or of a fine pigment that holds its oil, gives up
+less than you ask. (On a painting whose log's head has no `--@ drain`
+line, the paper draws the full share.) A pile takes either medium or blot.
 
 **The palette board.** Every pile is a heap on the board beside the easel.
 
@@ -133,6 +151,9 @@ as it dries. A pile takes either medium or blot.
   a scraped heap is knifed fresh first.
 - `mix{{p1, <share>}, {p2, <share>}, ..., name=}` knifes heaps together into a
   new heap, as they are now.
+- `palette{scrape={p1, p2, ...}}` scrapes those piles off the board. A pile
+  scraped off is knifed fresh the next time it is used, if the palette has
+  room for it.
 - `palette{set_out={"<tube>", ...}}` sets out only those tubes, a limited
   palette: a pile of any other is an error.
 - `palette{dirty=<0..1>}` keeps the board as dirty as a working palette gets. A brush
@@ -352,8 +373,8 @@ change:
 | `body` (default) | filbert 9 | 20–60 units |
 | `detail` | round 2.2 | 4–14 units, clipped to the mask |
 | `hatch` | round 2.6 | 5–12 units, nearly straight, side by side, clumped |
-| `glaze` | soft filbert 26 | 120–300 units, light pressure |
-| `scumble` | filbert 9 | 10–20 units, worked back and forth |
+| `glaze` | soft filbert 26 | 120–300 units, light pressure; a thin film (below) |
+| `scumble` | filbert 9 | 10–20 units, worked back and forth; a thin, broken veil (below) |
 | `blend` | badger 40 | a clean blender, crossing passes top to bottom, inside the mask. It is wiped clean as it goes, so it lifts paint as well as moving it: one pass takes up about 15% of a thin wet film, three passes about 40% |
 
 | option | meaning |
@@ -361,7 +382,7 @@ change:
 | `pile` | the pile every stroke dips into (every hand but `blend`) |
 | `tool` | `"filbert 8"`, `{kind=, width=, ...}` or a brush |
 | `length` | `{min, max}` stroke length in units |
-| `coverage` | layers of strokes over each point on average |
+| `coverage` | layers of strokes over each point on average; for `glaze` and `scumble`, the share of the mask their film reaches (below) |
 | `angle` | stroke direction: a number or `function(x, y)` |
 | `pressure`, `ramps` | `{min, max}` pressure; attack and release fractions |
 | `dips` | `{strokes per trip to the palette, load, wipe before dipping}` |
@@ -380,12 +401,26 @@ Where an option takes `function(x, y)`, it is sampled every 2 units over
 the area and interpolated. A mistyped option is an error that lists the
 valid ones.
 
+**Glaze and scumble.** A `glaze` pass lays a thin film, about 7.5 µm,
+wherever its strokes reach. Where strokes overlap, the film gets no
+thicker. What shows through it depends on the pile: the more medium, the
+more transparent the film; transparent tubes tint what is under it, and
+white veils it. Each further pass adds another film. A `scumble` pass
+lays a thinner film, about 5 µm, as a broken veil; laid with body paint,
+it hides part of what it crosses. For both hands, `coverage` is the share
+of the mask the film reaches: 1 reaches all of it, 0.5 about half, and the
+rest is left as it was. A coverage above 1 reaches no further and makes
+the film no stronger. The other hands lay as much paint as the brush
+carries, so they cover rather than tint.
+
 **What stays inside the mask.** `work` plans its strokes from the mask:
 each stroke is anchored in it, but its path can begin outside and cross
 the edge. By default `detail` and `blend` keep their paint inside the
-mask. The other hands (`body`, `broad`, `hatch`, `glaze`, `scumble`) can
-carry paint past the edge onto whatever is there, by as much as a stroke's
-length (a `glaze` stroke is 120–300 units by default). `clip=true` keeps
+mask, soft where the mask is soft. `glaze`, and `blend` with
+`clip=false`, carry paint past the edge by half a brush at most, fading
+out. The other hands (`body`, `broad`, `hatch`, `scumble`) can carry
+paint past the edge onto whatever is there, by as much as a stroke's
+length. `clip=true` keeps
 every bristle inside the mask; `clip=` another mask keeps them inside that
 one instead. `edge=` (below) shapes how the passage meets the edge, with
 an overrun that varies and can reach beyond it.
@@ -439,13 +474,17 @@ m:distance()   m:band(lo, hi, soft)   m:times(fn or mask)   m:map(function(v) re
 m:at(x, y)   m:area()
 ```
 
+`m:soften(units)` gives a hard edge a ramp that many units wide and leaves
+a mask that is already soft (a function, a blur) at least as soft as it
+was.
+
 Points are `{{x, y}, ...}` or a flat `{x1, y1, x2, y2, ...}`.
 `below` selects larger y values, toward the bottom of the canvas;
 `above` selects smaller y values, toward the top.
 
 Numbers and randomness: `rand(a, b)`, `randn(mean, sd)`, `math.random`,
 `lerp(a, b, t)`, `clamp(x, lo, hi)`, `smoothstep(a, b, x)`;
-`noise{seed=, octaves=4, period=200, persistence=0.5, kind="fbm"|"ridged"|"billow", warp={period, amount, twice}, stretch={angle, k}}`
+`noise{seed=, octaves=4, period=200, persistence=0.5, kind="fbm"|"ridged"|"billow"|"plain", warp={period, amount, twice}, stretch={angle, k}}`
 (call it as `n(x, y)` for about -1..1, `n:at01(x, y)` for 0..1; it can be
 passed to `coverage=` or `load_at=`); `worley{seed=, period=, jitter=}`
 (`c:at(x, y)` gives the distances to the nearest two cell points, how near
@@ -482,6 +521,18 @@ is the silhouette of a skeleton of points and widths. Methods: `o:mask()`,
 `o:offset(d)`, `o:paint(brush, {...})`, `o:path(i)`, `o:paths()`,
 `o:strokes()`, `o:at(t)`, `o:length()`, `o:corners()`.
 
+An outline of three or more points is closed (its line returns from the
+last point to the first) unless it is given `open=true`; two points make an
+open line. On a closed outline `o:below()` and `o:above()` fill the shape
+itself and ignore `bottom`, and `o:band()` and `o:paint()` include the
+closing stretch. For a horizon or shoreline you mean to fill below or
+above, draw it with `open=true`:
+
+```lua
+shore = outline{{0, 500}, {500, 480}, {1000, 550}, open=true}
+land = shore:below()
+```
+
 ## Drawing: pencil, chalk and eraser
 
 ```lua
@@ -491,6 +542,7 @@ h:sketch(pts, {pressure=0.3})     -- a few light passes (passes=3, wander= units
 h:line(pts, {pressure={0.5, 0.7, 0.4}})    -- one line through the points (smooth=false keeps corners)
 h:rule({120, 700}, {860, 180}, {pressure=0.3})  -- straight, against a ruler
 h:hatch(m, {angle=-1.1, pressure=0.35})         -- short parallel strokes (spacing=, length=)
+h:hatch(m, {pressure=0.6, graded=true})         -- the mask as a weight: each stroke pressed by its value there
 h:width()   h.worn   h:sharpen()  -- the point blunts as you draw
 erase(pts, {strength=0.9, width=9})  -- a kneaded eraser along a path, or erase(mask, {strength=})
 fix()                                -- fixative (or fix(mask)): the eraser no longer lifts it
@@ -523,12 +575,8 @@ hollows. The last of a film comes away more and more slowly, so a dry rag
 leaves a pale tint of the color that more wiping thins. Toward its rim the
 pad presses lightly and reaches only the tops of the weave, so the edge of
 a wipe shows the weave. Its folds and creases touch unevenly, so a wipe
-leaves streaks along its path and a blot a crumpled patch. During a wipe,
-a little freshly lifted paint smears back along the lightly pressed edges
-and trailing end.
-
-Fresh paint at the face's surface can smear into the next wipe too. It
-gradually soaks into the cloth; refolding turns that paint inward.
+leaves streaks along its path and a blot a crumpled patch. What the rag
+lifts stays in the cloth: none of it goes back onto the canvas.
 
 A rag dipped in spirits (`r:dip`, 0..1) lifts wet paint more readily and
 reaches farther into the hollows. It works gradually: wipe after wipe
@@ -536,18 +584,24 @@ takes the paint nearly to the ground. Its folds still leave streaks.
 Dampness (`r.damp`) halves every three minutes of painting time. Refolding
 retains the cloth's dampness; another dip adds spirits.
 
-What it lifts soaks into the cloth. `r.load` is how loaded the part in use
-is (0 clean, 1 full): the more loaded, the less it lifts. `r:refold()`
-turns a cleaner part outward, though every part holds at least what has
-soaked through the whole cloth (`r.soaked`, 0..1); `rag()` takes a fresh
-one. These numbers can be read, not set. Over a mask, `refold=`
-refolds whenever the load passes that value.
+The part of the cloth in use is its face. `r.load` is how full the face
+is (0 clean, 1 full): the fuller, the less it lifts. One face holds about
+as much paint as a 20 µm wash covering twenty squares the width of the
+pad; thicker paint fills it over a smaller area, so a wipe over a big wet
+area can fill it in its first few strokes. A wipe that runs on a full face
+lifts almost nothing, and the chunk's reply says so
+(`rag: the face in use is full: ...`). `r:refold()` turns a cleaner face
+outward, though every face holds at least what has soaked through the
+whole cloth (`r.soaked`, 0..1); `rag()` takes a fresh one. These numbers
+can be read, not set. Over a mask, `refold=` refolds whenever the load
+passes that value.
 
 Over a mask, `wipe` lays wipes side by side across it in `angle`'s
 direction, back and forth, each starting and stopping a little inside the
-mask. The pad's rim reaches the mask's edge, and in places past it:
-the rag isn't clipped to the mask. `passes` goes over it again, each time
-a little turned. `seed=` fixes the cloth's folds.
+mask. The rag lifts only inside the mask, as much as the mask's value
+there: paint outside it stays as it was, even where the pad reaches past
+the edge. `passes` goes over it again, each time a little turned. `seed=`
+fixes the cloth's folds.
 
 **What it can't reach.** It lifts only open paint, and less the further
 the paint has set: paint that is `"setting"` comes away slowly, and paint
@@ -614,7 +668,10 @@ the view after it. Then `v:visible(x)`, `v:front(x)`, `v:behind(x)`,
 answers, and `v:cast_shadow{soft=, from=}` and `v:contact_shadow{reach=,
 from=}` are shadows that fall off with distance from what casts them.
 Things are named by body number, layer name, `"ground"`, `"water"`,
-`"surface"`, `"sky"`, `"bodies"`, `"layers"`, a mask or a list. Passes take
+`"surface"`, `"sky"`, `"bodies"`, `"layers"`, a mask or a list. Only
+bodies cast `v:cast_shadow` and `v:contact_shadow`: `from=` takes any of
+these names, but only the bodies among them cast, so a layer named there
+casts nothing. Passes take
 `visible=` (only where that is seen), `behind=` (only where nothing in
 front of it is) and `at=` (a depth in meters): strokes still overrun the
 mask's own edges and stop at what is in front.
@@ -663,9 +720,11 @@ top of it.
 
 `look` shows you the canvas as it is now, with wet paint as laid. A whole
 view shows all of it, scaled down, like stepping back. A crop shows the
-canvas close up, 2.4 pixels to a canvas unit, and may be at most
-500 units on either side. `crop: "x0,y0,x1,y1"` gives two opposite corners
-in canvas units, not a position and width/height.
+canvas close up, 2.4 pixels to a canvas unit, when it fits within
+1200 pixels a side; a wider crop is scaled down to fit, and `size` makes it
+smaller. The reply gives the scale in pixels per canvas unit.
+`crop: "x0,y0,x1,y1"` gives two opposite corners in canvas units, not a
+position and width/height.
 
 | `look` with | shows |
 |---|---|
@@ -676,10 +735,11 @@ in canvas units, not a position and width/height.
 | `mode: "mirror"` | flipped left to right |
 | `mode: "relief"` | under a raking light from the upper left, so the paint's ridges, furrows and slabs show (wet paint shines) |
 | `mode: "gallery"` | as the picture hangs: lit from above and a little left at 55°, so impasto models softly |
-| `mode: "relief"`, `light: "45,15"` | the light from that azimuth (degrees: 0 from the right, 90 from the top) and elevation; the lower the light, the harsher |
+| `mode: "relief"`, `light: "45,15"` | the light from that azimuth (degrees: 0 from the right, 90 from the top) and elevation (0 to 90); the lower the light, the harsher; at 0 the lamp lies in the canvas's plane: flat paint gets only the room's light, ridges are lit on the lamp side; at 90 it is overhead and casts no shadow |
 | `mode: "value,squint"`, `size: 600` | modes combine; `size` sets the long side |
 | `grid: true` | a squared grid in canvas units, labeled along the edges |
 | `crop: "300,200,500,350"`, `grid: 10` | a window with a grid every 10 units |
+| `mask: "<name>"` | the named global mask's outline and a light fill over the view; several names may be comma-separated |
 
 The grid is drawn on the PNG only, like the squares ruled over a drawing
 to transfer it.
@@ -693,8 +753,8 @@ other option, and nothing on the canvas or the clock changes.
 | `look` with | shows |
 |---|---|
 | `survey: true` | the whole canvas at full detail, as several tiles of at most 500 units (2 × 2 for most canvases, 2 × 1 for one twice as wide as high), each a separate image; modes apply (`mode: "gallery"`) |
-| `compare: "<an earlier look's path>"` | that earlier image on the left and the current view on the right, at the same height. The right is the view the other options ask for (`size: 800` without `crop` or `size`); the earlier picture is only resized to its height, so repeat the earlier look's crop, modes, light and grid options to compare the same view |
-| `hold: "<a knife's or a pile's name>"`, `at: "x,y"` | (speculative) the loaded knife held up to the canvas: the passage around the point (240 units square, clipped at the canvas's edges, or your `crop`) with the blade's end at it, the paint thick on the steel, seen in the same light and mode as the passage (`mode` value, squint, relief or gallery, and `light`; not mirror, `grid`, `size`, `palette`, `survey` or `compare`). A knife shows what is on it, as full as it is up to a full load; a pile, a fresh full load. It shows the paint on the knife, not how it would look laid |
+| `compare: "<an image's path>"` | an image in this studio, usually an earlier look, on the left and the current view on the right, at the same height. The right is the view the other options ask for (`size: 800` without `crop` or `size`); the image on the left is only resized to that height, so to compare an earlier look with the same view, repeat its crop, modes, light and grid options |
+| `hold: "<a knife's or a pile's name>"`, `at: "x,y"` | (speculative) the loaded knife held up to the canvas: the passage around the point (240 units square, clipped at the canvas's edges, or your `crop`) with the blade's end at it, the paint thick on the steel, seen in the same light and mode as the passage (`mode` value, squint, relief or gallery, `light` and `mask`; not mirror, `grid`, `size`, `palette`, `survey` or `compare`). A knife shows what is on it, as full as it is up to a full load; a pile, a fresh full load. It shows the paint on the knife, not how it would look laid |
 
 A survey can arrive in parts, as many tiles as one reply holds.
 The reply lists the remaining tile paths; read them one at a time to inspect
@@ -707,6 +767,12 @@ each campaign, and compare before and after.
 
 ## How chunks behave
 
+- **A long chunk.** If `paint` stops waiting for the easel's answer before
+  a chunk finishes, its reply says whether the chunk is still running, with
+  the painting time it has taken so far, or whether it is in the log. While
+  a chunk runs, `status` says so, with the painting time it has taken so
+  far and the painting's clock. Once the chunk is in the log and the easel
+  is still finishing its reply, `status` says that instead.
 - **Option types.** Each option takes the type shown in this guide.
   Options documented as `function(x, y)` accept a Lua function; numeric
   options take the computed number.
@@ -751,11 +817,14 @@ with `scratch: true`; without it they work on the painting.
 - It is a separate canvas: its own palette, brushes, knives, rags and variables (a pile
   knifed for the painting has to be knifed again here), and its own log (`log` with
   `scratch: true`). Nothing done on it reaches the painting.
-- It keeps its own clock. Time spent or waited there (`wait`, `dry()`, `glaze()`) doesn't
+- It keeps its own clock. Time spent or waited there (`wait`) doesn't
   pass for the painting, and the painting's time doesn't pass for it.
 - To use what worked, paint it on the painting: the same pile, the same handling.
 - `new_scratch: true` (with `scratch: true`) puts the scratch canvas aside, with its log, and
-  starts a fresh one before the chunk runs.
+  starts a fresh one before the chunk runs. The fresh canvas stays even if the chunk stops
+  with an error: the old trial's marks, variables and clock don't come back.
+- A scratch canvas the easel can't reopen is put aside the same way the first time it is
+  used after the easel opens, and the reply says so.
 - A trial judges a passage only as far as it repeats that passage's conditions: lay the
   underlayer you mean to work over, and let it dry as long as it has on the painting.
 

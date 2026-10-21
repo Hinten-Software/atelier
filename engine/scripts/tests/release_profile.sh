@@ -12,7 +12,7 @@
 #
 # Builds paint (a workspace crate, so the profile applies to it) in a scratch target directory, leaving engine/target
 # untouched, and reads the flags cargo gives rustc: a release build passes no -C incremental, and -C codegen-units=1.
-# A cold optimized build: minutes; run it on its own (scripts/lockrun).
+# A cold optimized build: minutes; run it on its own.
 set -euo pipefail
 : "${TMPDIR:?set TMPDIR to scratch storage}"
 repo=$(cd "$(dirname "$0")/../.." && pwd)

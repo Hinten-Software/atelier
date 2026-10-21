@@ -39,6 +39,9 @@ set -euo pipefail
 # the log names its box, and the replay takes it from there: a box set in
 # the caller's environment (EASEL_BOX) would only make the easel refuse the log
 unset EASEL_BOX
+# nor may it change how the log replays: claude-paint's PAINT_* switches (PAINT_SMALL_TILES, PAINT_COARSE_AGING)
+# change engine 5's and later output (atelier, 2026-10-21; the painter's easel gets a clean environment from easel-client.ts)
+for v in $(env | sed -n 's/^\(PAINT_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$v"; done
 
 usage() { sed -n '7,7p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 [ $# -eq 2 ] || usage

@@ -22,7 +22,7 @@ const pile = 'p = pile{{"lead white", 3}, {"yellow ochre", 1}}';
 const tools = (await client.listTools()).tools;
 const look = tools.find((t) => t.name === "look")!;
 const props = Object.keys((look.inputSchema as any).properties ?? {}).sort().join(",");
-console.log(props === "at,compare,crop,grid,hold,light,mode,palette,scratch,size,survey" ? "ok   look's options" : `FAIL look's options: ${props}`);
+console.log(props === "at,compare,crop,grid,hold,light,mask,mode,palette,scratch,size,survey" ? "ok   look's options" : `FAIL look's options: ${props}`);
 
 await check("paint tells the painting's clock", "paint", { lua: `${pile}\nb = brush("flat", 12)\nb:load(p, 0.8)\nb:stroke({{100, 100}, {600, 300}})` },
 	(t, e) => !e && /day \d+, \d\d:\d\d/.test(t) && t.trim().endsWith("ok"));
@@ -43,6 +43,13 @@ const earlier = /(\S+\.png)/.exec(first)?.[1];
 await check("compare with an earlier look", "look", { compare: earlier }, (t, e, n) => !e && n === 1);
 await check("compare outside the studio refused", "look", { compare: "/etc/hosts" }, (t, e) => e);
 await check("survey and compare together refused", "look", { survey: true, compare: earlier }, (t, e) => e);
+// claude-paint fea9aa6, as served here (2026-10-21)
+await check("a mask shown over the view", "look", { mask: "m" }, (t, e, n) => (!e && n === 1) || (e && /mask/.test(t)));
+await check("the edges mode isn't served", "look", { mode: "value,edges" }, (t, e) => e && !t.includes("edges"));
+await check("nor its alias", "look", { mode: "edge" }, (t, e) => e && !/edge/.test(t));
+await check("log finds lines", "log", { find: "brush" }, (t, e) => !e && /^\d+ lines? of the log/.test(t) && !t.includes("paintings/"));
+await check("log finds nothing", "log", { find: "nothing like this" }, (t, e) => !e && t.startsWith("no line of the log"));
+await check("a crop is shown with its scale", "look", { crop: "0,0,200,160" }, (t, e, n) => !e && n === 1);
 await check("the knife held up", "look", { hold: "p", at: "300,200" }, (t, e, n) => (!e && n === 1) || (e && /knife|pile/.test(t)));
 await client.close();
 console.log(failed ? `${failed} failed` : "all passed");

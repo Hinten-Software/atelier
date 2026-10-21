@@ -106,7 +106,6 @@ impl Style {
     ///   weave, then a brushed top layer (60 µm) whose striations stay;
     ///   total 240 µm.
     /// - `Palette::cobalt_box`.
-    #[cfg(tube_box)]
     pub fn oil() -> Self {
         Style::oil_with(Palette::cobalt_box())
     }
@@ -144,7 +143,6 @@ impl Style {
     /// `Palette::smalt_box` and a three-layer ground: bright red, then two
     /// light brown layers, the first two knifed, the third rolled on (a fine
     /// texture).
-    #[cfg(tube_box)]
     pub fn oil_red_ground() -> Self {
         Style {
             width_mm: 1714.0,
@@ -181,8 +179,9 @@ impl Style {
 
     fn prepare_cached_on(&self, c: Canvas, seed: u64, cache: Option<(&std::path::Path, &str)>) -> Canvas {
         use sha2::{Digest, Sha256};
-        let mut c = c
+        let c = c
             .with_engine(self.palette.engine)
+            .with_adaptive_sweep(self.palette.adaptive_sweep)
             .with_size_mm(self.width_mm)
             .with_linen(Linen { seed, ..self.linen });
         let cache = cache.filter(|_| self.ground.iter().any(|g| g.um > 0.0 && matches!(g.apply, Apply::Brush))).map(|(dir, build)| {
@@ -196,6 +195,9 @@ impl Style {
             key.update(seed.to_le_bytes());
             key.update(c.engine.to_le_bytes());
             key.update(c.engine.min(3).to_le_bytes());
+            if c.adaptive_sweep {
+                key.update(b"adaptive-sweep");
+            }
             for f in [c.f.scale, c.mm_per_unit, self.raw[0], self.raw[1], self.raw[2], self.linen.warp_per_cm, self.linen.weft_per_cm, self.linen.crown_um, self.linen.slubs] {
                 key.update(f.to_bits().to_le_bytes());
             }
@@ -216,12 +218,52 @@ impl Style {
                 if bytes.len() >= 32 && Sha256::digest(&bytes[32..]).as_slice() == &bytes[..32] {
                     if let Ok((cached, header)) = Canvas::read_state(&mut &bytes[32..]) {
                         if header == *key {
-                            return cached;
+                            // (written with the drain switch on to keep the
+                            // paint's packing, below; prepared, it is off)
+                            return cached.with_drain(false).with_quarter_tiles(self.palette.quarter_tiles).with_glaze_film(self.palette.glaze_film).with_liquid_film_levels(self.palette.liquid_film_levels).with_sealed_drawing_guide(self.palette.sealed_drawing_guide).with_drawing_optics(self.palette.drawing_optics).with_rag_lift(self.palette.rag_lift).with_knife_skim(self.palette.knife_skim).with_blend_feather(self.palette.blend_feather).with_brush_skim(self.palette.brush_skim);
                         }
                     }
                 }
             }
         }
+        let mut c = self.ground_on(c, seed);
+        if let Some((path, key)) = cache {
+            // the cache keeps the paint's packing (`wet::Prop`'s last five),
+            // which only a draining canvas's checkpoint holds (version 14), so
+            // a ground read back is the ground just prepared, bit for bit (the
+            // caller sets the drain switch on either)
+            let mut bytes = Vec::new();
+            c.drain = c.engine >= 4;
+            let written = c.write_state(&mut bytes, &key).is_ok();
+            c.drain = false;
+            if written {
+                use std::io::Write;
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                let temp = path.with_extension(format!("{}-{}.tmp", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+                let saved = (|| -> std::io::Result<()> {
+                    std::fs::create_dir_all(path.parent().unwrap())?;
+                    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
+                    file.write_all(&Sha256::digest(&bytes))?;
+                    file.write_all(&bytes)?;
+                    drop(file);
+                    std::fs::rename(&temp, &path)
+                })();
+                if saved.is_err() { let _ = std::fs::remove_file(temp); }
+            }
+        }
+        c.with_quarter_tiles(self.palette.quarter_tiles).with_glaze_film(self.palette.glaze_film).with_liquid_film_levels(self.palette.liquid_film_levels).with_sealed_drawing_guide(self.palette.sealed_drawing_guide).with_drawing_optics(self.palette.drawing_optics).with_rag_lift(self.palette.rag_lift).with_knife_skim(self.palette.knife_skim).with_blend_feather(self.palette.blend_feather).with_brush_skim(self.palette.brush_skim)
+    }
+
+    /// A sheet of paper of this style's width, with its ground layers (if
+    /// any) laid on it. Never from the ground cache (`prepare_cached`),
+    /// whose key describes a linen support: a sheet is laid afresh.
+    pub fn prepare_paper(&self, width_px: usize, aspect: f32, seed: u64, paper: crate::paper::Paper) -> Canvas {
+        let c = Canvas::new(width_px, aspect, self.raw).with_engine(self.palette.engine).with_adaptive_sweep(self.palette.adaptive_sweep).with_size_mm(self.width_mm).with_paper(paper);
+        self.ground_on(c, seed).with_quarter_tiles(self.palette.quarter_tiles).with_glaze_film(self.palette.glaze_film).with_liquid_film_levels(self.palette.liquid_film_levels).with_sealed_drawing_guide(self.palette.sealed_drawing_guide).with_drawing_optics(self.palette.drawing_optics).with_rag_lift(self.palette.rag_lift).with_knife_skim(self.palette.knife_skim).with_blend_feather(self.palette.blend_feather).with_brush_skim(self.palette.brush_skim)
+    }
+
+    /// This style's ground layers laid on `c`, bottom first.
+    fn ground_on(&self, mut c: Canvas, seed: u64) -> Canvas {
         // the canvas is prepared alike in every engine: engine 4's stiffer
         // films and clumping hair are the painting's, not the primer's
         let engine = c.engine;
@@ -243,23 +285,6 @@ impl Style {
             c.ground_finish(g.absorbent);
         }
         c.engine = engine;
-        if let Some((path, key)) = cache {
-            let mut bytes = Vec::new();
-            if c.write_state(&mut bytes, &key).is_ok() {
-                use std::io::Write;
-                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                let temp = path.with_extension(format!("{}-{}.tmp", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
-                let saved = (|| -> std::io::Result<()> {
-                    std::fs::create_dir_all(path.parent().unwrap())?;
-                    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
-                    file.write_all(&Sha256::digest(&bytes))?;
-                    file.write_all(&bytes)?;
-                    drop(file);
-                    std::fs::rename(&temp, &path)
-                })();
-                if saved.is_err() { let _ = std::fs::remove_file(temp); }
-            }
-        }
         c
     }
 }
@@ -447,6 +472,15 @@ impl Style {
     pub fn line_tool(&self, width: f32) -> Tool {
         Tool { width, length: width * 5.0, ..self.line.clone() }
     }
+
+    /// The film (coats) a `glaze` pass lays on a painting with the glaze film
+    /// (`Canvas::with_glaze_film`, `Handling::film`): about 7.5 µm, a
+    /// glaze brushed out thin. Its strength comes from the pile (medium,
+    /// transparent pigment) and from the number of passes.
+    pub const GLAZE_FILM: f32 = 0.3;
+    /// The film (coats) a `scumble` pass lays there: about 5 µm, a broken
+    /// veil that half hides what it crosses in body paint.
+    pub const SCUMBLE_FILM: f32 = 0.2;
 
     /// Scumbling: the body tool worked back and forth (`scrub(3)`) with
     /// strokes 10–20 units long, the brush's

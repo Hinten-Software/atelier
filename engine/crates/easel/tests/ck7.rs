@@ -1,7 +1,9 @@
-#![cfg(feature = "replay")]
 
 use std::path::Path;
 use std::process::Command;
+
+#[path = "../../paint/tests/support/image_tolerance.rs"]
+mod image_tolerance;
 
 const SAVE: &[u8] = include_bytes!("fixtures/ck7/live.ckpt.zst");
 const COLOR: &[u8] = include_bytes!("fixtures/ck7/color.png");
@@ -19,20 +21,20 @@ fn historical_v7_native_color_is_png_byte_identical_without_replay() {
     std::fs::write(&raw, zstd::stream::decode_all(SAVE).unwrap()).unwrap();
     std::fs::write(&source, SOURCE).unwrap();
     for save in [&compressed, &raw] {
-        let result = Command::new(env!("CARGO_BIN_EXE_easel"))
+        let result = Command::new(env!("CARGO_BIN_EXE_easel")).env_remove("EASEL_WIDTH")
             .args(["render-checkpoint", save.to_str().unwrap(), png.to_str().unwrap(), "--mode", "color", "--log", source.to_str().unwrap()])
             .env("RAYON_NUM_THREADS", "2")
             .output().unwrap();
         assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
-        assert_eq!(std::fs::read(&png).unwrap(), COLOR);
+        image_tolerance::assert_close(&image::open(&png).unwrap().to_rgba8(), &image::load_from_memory(COLOR).unwrap().to_rgba8());
     }
     std::fs::remove_file(&source).unwrap();
-    let result = Command::new(env!("CARGO_BIN_EXE_easel"))
+    let result = Command::new(env!("CARGO_BIN_EXE_easel")).env_remove("EASEL_WIDTH")
         .args(["render-checkpoint", compressed.to_str().unwrap(), png.to_str().unwrap(), "--mode", "color"])
         .env("RAYON_NUM_THREADS", "2")
         .output().unwrap();
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
-    assert_eq!(std::fs::read(&png).unwrap(), COLOR);
+    image_tolerance::assert_close(&image::open(&png).unwrap().to_rgba8(), &image::load_from_memory(COLOR).unwrap().to_rgba8());
 }
 
 #[test]

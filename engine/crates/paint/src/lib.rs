@@ -6,13 +6,11 @@
 //!
 //! Colors are linear-light RGB reflectances in 0..1.
 
-#[cfg(box_conflict)]
-compile_error!("paint: more than one box-* feature without all-boxes: a painter's build has one box (box-<name>), the replay build all of them (all-boxes)");
-
 pub mod canvas;
 pub mod checkpoint;
 pub mod color;
 pub mod crack;
+pub mod dry;
 pub mod drying;
 pub mod mask;
 pub mod noise;
@@ -24,16 +22,21 @@ pub mod graphite;
 pub mod rag;
 pub mod scene;
 pub mod palette;
+pub mod paper;
+pub mod pastel;
 pub mod pigment;
+pub mod prepared_optics;
 pub mod rng;
 #[cfg(feature = "render-snapshot")]
 pub mod render_snapshot;
 mod sched;
 pub mod shape;
+pub mod sheet;
 pub mod soak;
 pub mod spectral;
 pub mod wet;
 pub mod bristle;
+pub mod engine7;
 pub mod handling;
 pub mod stipple;
 pub mod state_dump;
@@ -64,11 +67,13 @@ pub use form::{Form, Light, Relief, Sdf, Shade, Solid};
 pub use scene::{Spot, Sun, View, Water, World};
 pub use noise::Fbm;
 pub use pigment::Pigment;
+pub use prepared_optics::PreparedOptics;
 pub use graphite::{Lead, Medium};
 pub use rng::Rng;
 pub use shape::Shape;
 
-/// The engine version new paintings are painted with. A painting replays
+/// The default engine version for low-level canvases and palettes. The easel
+/// selects engine 8 for new paintings and records it in the log. A painting replays
 /// with the version it was painted with (its log's `--@ engine` line; a log
 /// without one is version 1), so a fix that changes what paint does never
 /// changes a past painting. Exception: engine-5 solvent waits were
@@ -94,7 +99,37 @@ pub use shape::Shape;
 /// - 4: stiff paint holds its relief, hairs clump in it, films bridge the
 ///   weave; solvent, oil, absorbent grounds and gloss (notes/engine-4.md).
 /// - 5: knife-laid paint tears where it parts from the blade (`Canvas::knife`).
+/// - 7: engine 5, with the parts `engine7`
+///   reimplements for speed. A log asks for it with `--@ engine 7`.
+/// - 8: engine 7, and a stroke's mark reaches the end of its path
+///   (`REACH_END`, `bristle::drag_on`).
+///
+/// A switch rides on engine 5 and 7 without a number of its own (an easel
+/// log's head names it; a log without it replays as it was painted):
+/// - the drain switch (`Canvas::with_drain`, `--@ drain`): an absorbent
+///   ground drains paint as its pigment allows (`bristle::ground_drain`): to
+///   the oil left when the pigment packs, and below it only for pigments
+///   coarser than the ground's pores, the packed layer growing up from the
+///   ground while the surface keeps its oil, flow and gloss; a rag's smear
+///   is drained as a brush's paint is, and blotting stops at the drained
+///   floor (notes/research/pigment_oil.md).
 pub const ENGINE: u32 = 5;
+
+/// Engine 8: a brush stroke's mark reaches the end of its path. Before it
+/// the hairs trailing behind the hand left the canvas that far short of the
+/// end, so a stroke drawn up to a point (a limb to where it forks) stopped
+/// a few pixels before it.
+pub const REACH_END: u32 = 8;
+
+/// The engine versions a log, checkpoint or snapshot may name: `ENGINE` and
+/// those before it, engine 7 (`engine7`) and engine 8 (`REACH_END`). There
+/// is no engine 6.
+pub const SUPPORTED_ENGINES: [u32; 7] = [1, 2, 3, 4, 5, engine7::ENGINE, REACH_END];
+
+/// Whether engine version `v` is one this crate paints with.
+pub fn supported_engine(v: u32) -> bool {
+    SUPPORTED_ENGINES.contains(&v)
+}
 
 /// Hermite smoothstep.
 #[inline]

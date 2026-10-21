@@ -46,6 +46,10 @@ ALLOW = {
     ("easel_guide.md", "a yellower grade"): "a pigment grade",
     ("easel_guide.md", "a deeper grade"): "a pigment grade",
     ("easel_guide.md", "| round 2."): "a round brush, 2.2 / 2.6 wide",
+    # claude-paint fea9aa6 (2026-10-21)
+    ("easel_guide.md", "graded=true"): "a Lua option's name (hatch: the mask's values as each stroke's pressure)",
+    ("server.ts", "look: mode is value, squint, mirror, relief or gallery"): "look's mode names (gallery: the light the picture hangs in)",
+    ("server.ts", '"raking" "gallery"'): "look's mode names, as the easel takes them (never in a reply)",
     ("easel_guide.md", 'pencil("2H")'): "pencil grades",
     ("easel_guide.md", "Bitwise operators"): "Lua operators",
     # claude-paint 78c86ce (the atelier's port, 2026-10-10)

@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 # Build the replay easel and a painter's easel per box, with no account name or local path inside them (requirements ENG-7):
 # rustc's panic locations and the Lua C sources' __FILE__ name the build machine's paths otherwise.
-#   tools/build-engine.sh        -> engine/target/release/easel (the replay build: every box, the operator's)
-#                                   engine/target/painter/boxes/<box>/easel and tubes.md, one painter's easel per box
-# A painter's easel holds its studio's box only (upstream's rule: nothing in a studio names another box); the runner
-# gives a studio the easel of its work's box, "every" unless the owner names another (runner/config.py PAINTER_BOXES, DEFAULT_BOX).
-# The boxes are the easel's own (its all-boxes feature), so a box upstream adds is built here without a change.
+#   tools/build-engine.sh        -> engine/target/release/easel (the replay easel: the operator's, never in a studio)
+#                                   engine/target/painter/boxes/<box>/{easel,studio,width,tubes.md}, a studio's bin/ per box
+# Since claude-paint fea9aa6 the easel is one binary for every box; a file `studio` beside it ("painter <box>") makes
+# it a painter's easel for that box, and `width` (4800) sets a new painting's width. The painter's binary is built with
+# `--cfg atelier_painter`, which leaves out the one build path the replay easel keeps (ENG-7). The runner gives a
+# studio its work's box's folder, "every" unless the owner names another (runner/config.py PAINTER_BOXES, DEFAULT_BOX).
+# The boxes are paint's own (palette.rs BOXES), so a box upstream adds is set up here without a change.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo/engine"
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
 remap="--remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$repo=/atelier --remap-path-prefix=$HOME=/home"
 export RUSTFLAGS="$remap"
-# the atelier's changes to the easel (a new painting at 4800 px, the journal named "journal"): on in what we build,
+# the atelier's changes to the easel (the journal named "journal", no paper-and-pastel switch): on in what we build,
 # off in a plain `cargo test`, so claude-paint's own tests hold unchanged (engine/crates/easel/src/main.rs ATELIER)
 export ATELIER_BUILD=1
 # byte-identical builds: the painter's easel paints, the replay easel (another build) must paint the same bytes from the
@@ -22,12 +24,15 @@ export CARGO_PROFILE_RELEASE_INCREMENTAL=false CARGO_PROFILE_RELEASE_CODEGEN_UNI
 # engine/.cargo/config.toml sets CFLAGS for Lua's fixed hash seed; set here, it must carry that define too
 export CFLAGS="-Dluai_makeseed()=0x5eedu -ffile-prefix-map=$cargo_home=/cargo -ffile-prefix-map=$HOME=/home"
 cargo build --release -p easel
-boxes=$(sed -n 's/^all-boxes = \[\(.*\)\]/\1/p' crates/easel/Cargo.toml | tr -d '" ' | tr ',' '\n' | sed -n 's/^box-//p')
-[ -n "$boxes" ] || { echo "build-engine: no boxes found in crates/easel/Cargo.toml (all-boxes)" >&2; exit 1; }
-for box in $boxes; do  # one target dir for all: only paint and easel rebuild between boxes
-  cargo build --release -q -p easel --no-default-features --features "box-$box" --target-dir target/painter
+RUSTFLAGS="$remap --cfg atelier_painter" cargo build --release -q -p easel --target-dir target/painter
+boxes=$(awk '/^const BOXES/,/^\];/' crates/paint/src/palette.rs | sed -n 's/^        "\([a-z-]*\)",$/\1/p')
+[ -n "$boxes" ] || { echo "build-engine: no boxes found in crates/paint/src/palette.rs (BOXES)" >&2; exit 1; }
+rm -rf target/painter/boxes
+for box in $boxes; do
   mkdir -p "target/painter/boxes/$box"
   cp target/painter/release/easel "target/painter/boxes/$box/easel"
+  echo "painter $box" > "target/painter/boxes/$box/studio"
+  echo 4800 > "target/painter/boxes/$box/width"
   "target/painter/boxes/$box/easel" tubes --markdown > "target/painter/boxes/$box/tubes.md"
 done
 # (grep -q would end the pipe early, and with pipefail a broken pipe reads as "no match": count instead)

@@ -25,14 +25,80 @@ use crate::color::{Rgb, luminance};
 use crate::pigment::{Pigment, hiding_of, scatter_for};
 
 pub const LAT: usize = mixbox::LATENT_SIZE;
-pub type Latent = [f32; LAT];
+#[derive(Clone, Default, PartialEq)]
+#[cfg_attr(feature = "replay-effects", derive(serde::Serialize, serde::Deserialize))]
+#[repr(C)]
+pub struct Latent {
+    pub color: [f32; LAT],
+    pub parts: Vec<(usize, f32)>,
+}
+
+impl std::fmt::Debug for Latent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.parts.is_empty() { self.color.fmt(f) } else { f.debug_tuple("Latent").field(&self.color).field(&self.parts).finish() }
+    }
+}
+
+impl std::ops::Deref for Latent {
+    type Target = [f32; LAT];
+    fn deref(&self) -> &Self::Target { &self.color }
+}
+
+impl std::ops::DerefMut for Latent {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.color }
+}
+
+impl Latent {
+    pub fn from_color(color: [f32; LAT]) -> Self { Self { color, parts: Vec::new() } }
+
+    pub(crate) fn add_parts(&mut self, other: &Self, weight: f32) {
+        for &(i, f) in &other.parts {
+            match self.parts.iter_mut().find(|p| p.0 == i) {
+                Some(p) => p.1 += f * weight,
+                None => self.parts.push((i, f * weight)),
+            }
+        }
+    }
+
+    pub(crate) fn scale_parts(&mut self, weight: f32) {
+        for p in &mut self.parts { p.1 *= weight; }
+    }
+
+    pub(crate) fn blend_parts(&mut self, other: &Self, weight: f32) {
+        if self.parts.is_empty() && other.parts.is_empty() { return; }
+        self.scale_parts(1.0 - weight);
+        self.add_parts(other, weight);
+        self.parts.retain(|p| p.1 > 0.0);
+    }
+}
 /// Paint properties mixed by volume alongside the pigment: [KM scattering per
-/// coat, stiffness, drying rate, solvent, oil].
+/// coat, stiffness, drying rate, solvent, oil, packed oil, drained floor,
+/// packed share, oil volume, wax].
 /// Stiffness 0 = fluid, medium-rich glaze; 1 = stiff tube paint. Drying rate
 /// relative to average paint (see `drying::drier`). Solvent and oil are
 /// engine 4's (see `Paint`; engine 3's thinner keeps its solvent beside the
-/// paint, `crate::thinner`).
-pub type Prop = [f32; 5];
+/// paint, `crate::thinner`). The last five carry each paint's pigment
+/// packing (a checkpoint keeps them only with the drain switch, version
+/// 14; without it, the first five): the oil
+/// left, relative to tube paint as `oil` is, when the pigment packs
+/// (`Paint::packed`) and when an absorbent ground has drained all it can
+/// (`Paint::floor`), the share of a film packed from the ground up as it
+/// drained, of its thickness, the oil's share of the volume of its tube
+/// paint (`Paint::oil_volume`), and the share of its oil from waxed tubes.
+/// Only the drain switch reads them (`Canvas::with_drain`,
+/// `bristle::ground_drain`), which alone sets the packed share; the wax
+/// stays 0.
+pub type Prop = [f32; 10];
+
+/// The packed oil and drained floor of paint that names no tubes (relative
+/// to tube paint): a fine pigment's, ground as a tube is
+/// (`palette::tube_packing`).
+pub const PACKED_OIL: f32 = 0.7;
+pub const DRAINED_FLOOR: f32 = 0.6;
+/// The oil share by volume of tube paint naming no tubes: Golden's
+/// measured ultramarine tube, 54% oil, which keeps about `PACKED_OIL` of it
+/// packed (notes/research/pigment_oil.md).
+pub const OIL_VOLUME: f32 = 0.54;
 
 #[inline]
 fn lerp_prop(p: &mut Prop, q: Prop, a: f32) {
@@ -47,8 +113,9 @@ fn lerp_prop(p: &mut Prop, q: Prop, a: f32) {
 /// handed to the brush keeps the S it was mixed with, however opaque it is
 /// (hiding saturates near 1 and can't carry a large S). Name paints by
 /// hiding with `Paint::new`/`with_hiding`; `hiding()` reports it back.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Paint {
+    pub parts: Vec<(usize, f32)>,
     /// Masstone, linear RGB: the paint's color laid thick (and over itself).
     pub color: Rgb,
     /// Kubelka–Munk scattering per coat (flat across channels; absorption
@@ -76,22 +143,36 @@ pub struct Paint {
     /// medium, less blotted or drawn into an absorbent ground. A film's gloss
     /// follows it (engine 4).
     pub oil: f32,
+    /// The oil left, relative to tube paint (as `oil`), when the pigment
+    /// packs at its critical pigment volume (`palette::Tube`'s oil
+    /// absorption against the oil its tube holds).
+    pub packed: f32,
+    /// The oil an absorbent ground could leave at the least, below `packed`
+    /// only for pigments coarser than the ground's pores (air enters the
+    /// paint).
+    pub floor: f32,
+    /// The oil's share of the volume of the tube paint it is made of (as
+    /// ground, before medium or blotting: `oil` counts those), from its
+    /// tubes' oil by weight and their pigments' density
+    /// (`palette::tube_packing`): about 0.5 for lead white, 0.85 for an oily
+    /// tube of burnt sienna.
+    pub oil_volume: f32,
 }
 
 impl Paint {
     /// Its properties as they mix in a brush and on the canvas (`Prop`).
     pub fn prop(&self) -> Prop {
-        [self.scatter(), self.stiff, self.drying, self.solvent, self.oil]
+        [self.scatter(), self.stiff, self.drying, self.solvent, self.oil, self.packed, self.floor, 0.0, self.oil_volume, 0.0]
     }
     /// A paint of masstone `color` whose one coat hides `hiding` (contrast
     /// ratio: over black ÷ over white; 0.05 = glaze, 0.5 = scumble,
     /// 0.92 = body).
     pub fn new(color: Rgb, hiding: f32, stiff: f32) -> Self {
-        Paint { color, scatter: scatter_for(luminance(color), hiding), stiff, drying: 1.0, thinner: 0.0, solvent: 0.0, oil: 1.0 }
+        Paint { parts: Vec::new(), color, scatter: scatter_for(luminance(color), hiding), stiff, drying: 1.0, thinner: 0.0, solvent: 0.0, oil: 1.0, packed: PACKED_OIL, floor: DRAINED_FLOOR, oil_volume: OIL_VOLUME }
     }
     /// A paint of masstone `color` that scatters `scatter` per coat.
     pub fn km(color: Rgb, scatter: f32, stiff: f32) -> Self {
-        Paint { color, scatter, stiff, drying: 1.0, thinner: 0.0, solvent: 0.0, oil: 1.0 }
+        Paint { parts: Vec::new(), color, scatter, stiff, drying: 1.0, thinner: 0.0, solvent: 0.0, oil: 1.0, packed: PACKED_OIL, floor: DRAINED_FLOOR, oil_volume: OIL_VOLUME }
     }
     pub fn body(color: Rgb) -> Self {
         Paint::new(color, 0.92, 1.0)
@@ -128,7 +209,7 @@ impl Paint {
         hiding_of(luminance(self.color), self.scatter)
     }
     pub fn latent(&self) -> Latent {
-        mixbox::linear_float_rgb_to_latent(&self.color)
+        Latent { color: mixbox::linear_float_rgb_to_latent(&self.color), parts: self.parts.clone() }
     }
     /// Kubelka–Munk scattering per coat (the `scatter` field).
     pub fn scatter(&self) -> f32 {
@@ -183,7 +264,7 @@ pub(crate) struct Wet {
 
 impl Wet {
     pub fn new(n: usize) -> Self {
-        Wet { vol: vec![0.0; n], lat: vec![[0.0; LAT]; n], hide: vec![[0.0, 0.5, 1.0, 0.0, 1.0]; n], stroke: vec![0; n], touched: vec![0; n], floor: vec![0.0; n], cover: vec![1.0; n], current: 0, dirty: None, clock: Default::default(), solv: Vec::new(), laid: Vec::new(), laid_id: Vec::new() }
+        Wet { vol: vec![0.0; n], lat: vec![Latent::default(); n], hide: vec![[0.0, 0.5, 1.0, 0.0, 1.0, PACKED_OIL, DRAINED_FLOOR, 0.0, OIL_VOLUME, 0.0]; n], stroke: vec![0; n], touched: vec![0; n], floor: vec![0.0; n], cover: vec![1.0; n], current: 0, dirty: None, clock: Default::default(), solv: Vec::new(), laid: Vec::new(), laid_id: Vec::new() }
     }
 
     /// Allocate the solvent and the strokes' ceilings (a thinned paint is
@@ -237,6 +318,7 @@ pub fn mix_into(rv: &mut f32, rl: &mut Latent, rh: &mut Prop, v: f32, lat: &Late
     for k in 0..LAT {
         rl[k] += (lat[k] - rl[k]) * a;
     }
+    rl.blend_parts(lat, a);
     lerp_prop(rh, hide, a);
     *rv = t;
 }
@@ -305,6 +387,9 @@ impl Canvas {
             return (0..self.px.len())
                 .into_par_iter()
                 .map(|i| {
+                    if let Some(c) = self.sheet_seen(i) {
+                        return c;
+                    }
                     // (the thinnest wet film lets the surface under it show: no edge where it ends)
                     let v = self.wet.vol[i];
                     let cover = bead_cover(self.wet.cover[i], v, self.px_mm() * 1000.0);
@@ -368,70 +453,5 @@ impl Canvas {
     /// units).
     pub fn solvent_total(&self) -> f64 {
         self.wet.solv.iter().map(|&v| v as f64).sum::<f64>() / crate::surface::COAT_UM as f64 / (self.f.scale as f64 * self.f.scale as f64)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-
-    #[test]
-    fn a_partial_wet_mark_keeps_the_uncovered_surface_matte() {
-        let mut c = crate::Canvas::new(32, 1.0, [0.1; 3]).with_engine(4);
-        c.gloss.fill(0.0);
-        let matte = c.seen()[0][0];
-        c.wet.lat[0] = mixbox::linear_float_rgb_to_latent(&[0.1; 3]);
-        c.wet.vol[0] = 0.1;
-        c.wet.cover[0] = 1.0;
-        let full = c.seen()[0][0];
-        c.wet.cover[0] = 0.01;
-        let partial = c.seen()[0][0];
-        assert!((partial - matte).abs() < (full - matte).abs() * 0.05,
-            "1% wet coverage cannot remove the matte veil from the whole pixel: {matte}, {partial}, {full}");
-    }
-
-    /// Setting a paint's hiding changes its scattering and nothing else: a
-    /// slow-drying paint stays slow whichever builder comes first.
-    #[test]
-    fn with_hiding_keeps_the_other_fields() {
-        let a = super::Paint::body([0.3; 3]).with_stiff(0.4).with_drying(0.3).with_hiding(0.5);
-        let b = super::Paint::body([0.3; 3]).with_stiff(0.4).with_hiding(0.5).with_drying(0.3);
-        assert_eq!((a.drying, a.stiff, a.color), (0.3, 0.4, [0.3; 3]));
-        assert_eq!((a.drying, a.stiff, a.color, a.scatter), (b.drying, b.stiff, b.color, b.scatter));
-        assert!((a.hiding() - 0.5).abs() < 0.01);
-    }
-
-    /// A hairline's fringe keeps its share (the floor is linear in the paint
-    /// and far below a hair's film at 1000px); a sliver holding a bead many
-    /// times taller than the pixel is wide spreads over the pixel.
-    #[test]
-    fn bead_cover_floors_only_impossible_beads() {
-        // 0.02 coats on 5% of a 0.3 mm pixel: a 10 µm film, left alone
-        assert_eq!(super::bead_cover(0.05, 0.02, 300.0), 0.05);
-        // linear: twice the paint on twice the share is the same film
-        assert_eq!(super::bead_cover(0.10, 0.04, 300.0), 0.10);
-        // 4 coats (100 µm) on 10% of a 0.1 mm pixel would stand 1 mm tall
-        assert_eq!(super::bead_cover(0.10, 4.0, 100.0), 1.0);
-        // 1 coat on 10% of a 0.1 mm pixel: at least half of it
-        assert!((super::bead_cover(0.10, 1.0, 100.0) - 0.5).abs() < 1e-6);
-        assert_eq!(super::bead_cover(1.0, 9.0, 100.0), 1.0);
-        assert_eq!(super::bead_cover(0.3, 0.0, 100.0), 0.3);
-    }
-
-    /// Paint over a sliver of a pixel darkens it by that sliver's share, not
-    /// by a 1% floor; no share shows nothing, and a vanishing share of thick
-    /// paint stays finite.
-    #[test]
-    fn sub_percent_cover_keeps_its_area() {
-        let pig = super::Paint::body([0.01; 3]).pigment();
-        let under = [1.0; 3];
-        for cover in [0.001f32, 0.005, 0.02, 0.5] {
-            let thick = pig.over(under, 0.1 / cover);
-            let want: [f32; 3] = std::array::from_fn(|i| under[i] + (thick[i] - under[i]) * cover);
-            let got = super::over_share(pig, under, 0.1, cover);
-            assert!((0..3).all(|i| (got[i] - want[i]).abs() < 1e-6), "cover {cover}: {got:?} vs {want:?}");
-        }
-        assert_eq!(super::over_share(pig, under, 0.1, 0.0), under);
-        let tiny = super::over_share(pig, under, 5.0, 1e-30);
-        assert!(tiny.iter().all(|v| v.is_finite() && (v - 1.0).abs() < 1e-6), "{tiny:?}");
     }
 }

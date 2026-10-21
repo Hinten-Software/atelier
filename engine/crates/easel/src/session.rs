@@ -13,6 +13,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::mem::ManuallyDrop;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 /// Marks the start of a chunk in a session file.
@@ -25,9 +26,63 @@ pub const BOX_MARK: &str = "--@ box";
 /// the head of its session file. A log without it was painted with engine 1:
 /// every log before the version was recorded.
 pub const ENGINE_MARK: &str = "--@ engine";
+/// A log's head line: its knife's paint laid on wet paint stays on top of it
+/// (`paint::Canvas::with_knife_skim`). Every new painting has it.
+pub const KNIFE_SKIM_MARK: &str = "--@ knife-skim";
 /// Marks a sketch: a painting painted at `SKETCH_WIDTH`, not the live width.
 /// A log replays at the width it was painted at, whatever its file is named.
 pub const SKETCH_MARK: &str = "--@ sketch";
+pub const TILES_MARK: &str = "--@ work-tiles";
+/// Marks a painting whose `body_of` limbs join the nearest other limb, and
+/// only from within their own width (`paint::Outline::body`): every new
+/// painting. A log without it replays its limbs joined to the spine.
+pub const LIMBS_MARK: &str = "--@ limbs-join-nearest";
+/// Marks a painting whose `b:reload` refuses a nonfinite amount, as `b:load`
+/// does: every new painting. A log without it replays its NaN reload.
+pub const RELOAD_FINITE_MARK: &str = "--@ reload-finite";
+pub const CARRIED_PAINT_MARK: &str = "--@ palette-carried-paint";
+/// A log's head line: its `glaze` and `scumble` passes lay a thin film,
+/// their coverage the share of the mask it reaches
+/// (`paint::Canvas::with_glaze_film`). Every new painting has it; it
+/// requires engine 7 or 8.
+pub const GLAZE_FILM_MARK: &str = "--@ glaze-film";
+pub const LIQUID_FILM_LEVELS_MARK: &str = "--@ liquid-film-levels";
+pub const SEALED_DRAWING_GUIDE_MARK: &str = "--@ sealed-drawing-guide";
+pub const DRAWING_OPTICS_MARK: &str = "--@ drawing-optics";
+/// Marks a painting whose full palette board refuses a new heap instead of scraping off the
+/// oldest (board.rs): every new painting. A log without it replays with the oldest scraped off.
+pub const FULL_PALETTE_MARK: &str = "--@ full-palette-refuses";
+/// Marks a painting whose blender and glaze meet their masks as the mask says
+/// (`paint::Palette::blend_at_masks`): every new painting. A log without it
+/// replays `soften` as a fresh ramp on the mask's 0.5 line and its unclipped
+/// blends and glazes at their strokes' full length.
+pub const BLEND_MARK: &str = "--@ blend-at-masks";
+/// A log's head line: its blender lays the wet paint it picks up only where
+/// wet paint was, and a little way past it (`paint::Canvas::with_blend_feather`).
+/// Every new painting has it.
+pub const BLEND_FEATHER_MARK: &str = "--@ blend-feather";
+/// A log's head line: a brush's paint laid on wet paint stays on top of it
+/// (`paint::Canvas::with_brush_skim`). Every new painting has it.
+pub const BRUSH_SKIM_MARK: &str = "--@ brush-skim";
+/// A log's head line: its rag keeps what it lifts and a mask wipe stays
+/// inside its mask (`paint::Canvas::with_rag_lift`). Every new painting has
+/// it.
+pub const RAG_LIFT_MARK: &str = "--@ rag-lift";
+/// The drain switch, in the head of a session file: a painting whose log
+/// has it is painted with an absorbent ground that drains paint as its
+/// pigment packs, and blotting that stops at the drained floor (paint's
+/// `Canvas::with_drain`). A new painting has it; a log without it was
+/// painted before the drain and replays as it was painted. It names no
+/// engine of its own: it rides on engine 5 and later (`box_for`), and the
+/// box carries it (`Palette::drain`).
+pub const DRAIN_MARK: &str = "--@ drain";
+/// The paper-and-pastel switch, in the head of a session file: a painting
+/// whose log has it may be on a sheet of paper (`canvas{paper=}`, paint's
+/// `paper`), and what comes with paper is its too. A new painting has it; a
+/// log without it was painted before paper and replays as it was painted,
+/// with none of it. It names no engine of its own: it rides on engine 5
+/// and later (`box_for`).
+pub const PAPER_MARK: &str = "--@ paper";
 /// A sketch's width (px): a quarter of the live width, some 16 times faster,
 /// for trying out a composition before the painting.
 pub const SKETCH_WIDTH: usize = crate::LIVE_WIDTH / 4;
@@ -48,20 +103,109 @@ pub fn canonical_tables(engine: u32) -> bool {
 /// same on a slower or busier machine.
 pub const CHUNK_LIMIT: Duration = Duration::from_secs(600);
 
-/// The head line naming the width a painting is painted at (atelier change, 2026-10-06): a log
-/// without one was painted at `LEGACY_WIDTH` (or is a sketch, `SKETCH_MARK`).
+/// The head line naming the width a painting is painted at: a log without
+/// one was painted at `LEGACY_WIDTH` (or is a sketch, `SKETCH_MARK`).
 pub const WIDTH_MARK: &str = "--@ width";
 pub const LEGACY_WIDTH: usize = crate::LIVE_WIDTH;
 /// The widths a painting may name.
-pub const WIDTHS: [usize; 2] = [LEGACY_WIDTH, 4800];
+pub const WIDTHS: [usize; 2] = [2400, 4800];
 
 /// A chunk's limit at a width: `CHUNK_LIMIT` at the legacy width, scaled with the pixel count
-/// above it (atelier change, 2026-10-06), so a chunk that fit at 2400 px still fits at 4800.
+/// above it, so a chunk that fit at 2400 px still fits at 4800.
 pub fn chunk_limit_for(width: usize) -> Duration {
     if width > LEGACY_WIDTH { CHUNK_LIMIT * ((width * width).div_ceil(LEGACY_WIDTH * LEGACY_WIDTH)) as u32 } else { CHUNK_LIMIT }
 }
 /// Lua instructions between two looks at the clock.
 const HOOK_EVERY: u32 = 1_000_000;
+
+/// How far the chunk a live session is running has got, for `status` while it runs (main.rs
+/// `serving_status`). A process runs one chunk at a time; replays leave it alone. Written on
+/// the session's thread, read on the thread that answers `status`.
+pub struct Progress {
+    /// The chunk's lines, and the line of it running when last seen (0: not seen yet). The
+    /// line is looked at with the clock (`HOOK_EVERY`), so not inside one long verb.
+    lines: AtomicUsize,
+    line: AtomicUsize,
+    /// Strokes and touches (`paint::Tally`) and the painting's clock (minutes, f64 bits) when
+    /// the chunk began and after its last verb.
+    marks0: AtomicU64,
+    marks: AtomicU64,
+    clock0: AtomicU64,
+    clock: AtomicU64,
+    /// The chunk's number in the log once it is kept there (0: not yet), while the easel
+    /// finishes its reply (a look, a frame).
+    kept: AtomicUsize,
+}
+
+pub static PROGRESS: Progress = Progress { lines: AtomicUsize::new(0), line: AtomicUsize::new(0), marks0: AtomicU64::new(0), marks: AtomicU64::new(0), clock0: AtomicU64::new(0), clock: AtomicU64::new(0), kept: AtomicUsize::new(0) };
+
+impl Progress {
+    fn begin(&self, lines: usize, st: &Studio) {
+        let marks = st.canvas.as_ref().map_or(0, |c| { let t = c.tally(); t.strokes + t.touches });
+        self.lines.store(lines, Ordering::Relaxed);
+        self.line.store(0, Ordering::Relaxed);
+        self.marks0.store(marks, Ordering::Relaxed);
+        self.marks.store(marks, Ordering::Relaxed);
+        self.clock0.store(st.clock.to_bits(), Ordering::Relaxed);
+        self.clock.store(st.clock.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Before a chunk is asked for: nothing of the last one's is reported.
+    pub fn clear(&self) {
+        self.lines.store(0, Ordering::Relaxed);
+        self.line.store(0, Ordering::Relaxed);
+        self.marks0.store(0, Ordering::Relaxed);
+        self.marks.store(0, Ordering::Relaxed);
+        self.clock0.store(0, Ordering::Relaxed);
+        self.clock.store(0, Ordering::Relaxed);
+        self.kept.store(0, Ordering::Relaxed);
+    }
+
+    /// The chunk is in the log as chunk `n` (main.rs `serve_cmd`).
+    pub fn keep(&self, n: usize) {
+        self.kept.store(n, Ordering::Release);
+    }
+
+    /// The running chunk's number in the log, once it is kept there.
+    pub fn kept(&self) -> usize {
+        self.kept.load(Ordering::Acquire)
+    }
+
+    /// After a verb of a live chunk (time.rs `verb`).
+    pub fn verb(&self, st: &Studio) {
+        if let Some(c) = st.canvas.as_ref() {
+            let t = c.tally();
+            self.marks.store(t.strokes + t.touches, Ordering::Relaxed);
+        }
+        self.clock.store(st.clock.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The running chunk's progress, `elapsed` after it began, as `status` answers it.
+    pub fn report(&self, elapsed: Duration) -> String {
+        let kept = self.kept();
+        if kept > 0 {
+            return format!("the chunk is in the log (chunk {kept}); the easel is finishing its reply, running for {}", minutes_seconds(elapsed.as_secs_f64()));
+        }
+        let (line, lines) = (self.line.load(Ordering::Relaxed), self.lines.load(Ordering::Relaxed));
+        let marks = self.marks.load(Ordering::Relaxed).saturating_sub(self.marks0.load(Ordering::Relaxed));
+        let clock = f64::from_bits(self.clock.load(Ordering::Relaxed));
+        let spent = (clock - f64::from_bits(self.clock0.load(Ordering::Relaxed))).max(0.0) * 60.0;
+        if lines == 0 {
+            return format!("painting a chunk: starting, running for {}", minutes_seconds(elapsed.as_secs_f64()));
+        }
+        let at = if line > 0 { format!("at line {line} of {lines}") } else { format!("{lines} lines") };
+        format!(
+            "painting a chunk ({at}): {marks} strokes and touches so far, {} on the painting's clock (now {}), running for {}",
+            minutes_seconds(spent), crate::time::time_of_day(clock), minutes_seconds(elapsed.as_secs_f64())
+        )
+    }
+}
+
+/// `14 min 20 s`, `40 s`.
+fn minutes_seconds(secs: f64) -> String {
+    let s = secs.round() as u64;
+    if s < 60 { format!("{s} s") } else { format!("{} min {} s", s / 60, s % 60) }
+}
 
 pub struct Chunk {
     pub src: String,
@@ -69,6 +213,7 @@ pub struct Chunk {
 
 /// Everything a failed chunk could have changed, taken before it runs.
 struct Snap {
+    recording_ground: u64,
     canvas: Option<Canvas>,
     style: Option<Rc<Style>>,
     setup: Option<String>,
@@ -129,9 +274,6 @@ pub struct Session {
     pub chunks_before: usize,
     /// Creation serials of the state's objects (outlives the state).
     _serials: Box<Serials>,
-    /// Tests: the step of `run` that fails ("flush", "globals" or "restore").
-    #[cfg(test)]
-    pub fail_at: Cell<Option<&'static str>>,
 }
 
 #[derive(Debug)]
@@ -143,7 +285,7 @@ pub struct Ran {
 
 impl Session {
     /// A session painting from the default box (tests).
-    #[cfg(all(test, tube_box))]
+    #[cfg(test)]
     pub fn new(width: usize) -> mlua::Result<Self> {
         Self::with_box(width, Palette::tube_box())
     }
@@ -182,20 +324,36 @@ impl Session {
         let deadline = Rc::new(Cell::new(None::<Instant>));
         let d = deadline.clone();
         let limit_min = chunk_limit_for(width).as_secs() / 60;
-        lua.set_hook(mlua::HookTriggers::new().every_nth_instruction(HOOK_EVERY), move |_, _| match d.get() {
+        lua.set_hook(mlua::HookTriggers::new().every_nth_instruction(HOOK_EVERY), move |lua, _| match d.get() {
             Some(t) if Instant::now() > t => Err(mlua::Error::runtime(format!(
                 "the chunk ran longer than {limit_min} minutes and was stopped; nothing it did was kept"
             ))),
-            _ => Ok(mlua::VmState::Continue),
+            // a live chunk: the line of it running (its outermost frame; a function an
+            // earlier chunk made is that chunk's)
+            Some(_) => {
+                let mut line = None;
+                for level in 0..200 {
+                    let Some(found) = lua.inspect_stack(level, |f| {
+                        let chunk = f.source().source.is_some_and(|s| s.trim_start_matches(['=', '@']).starts_with("chunk "));
+                        chunk.then(|| f.current_line()).flatten()
+                    }) else { break };
+                    line = found.or(line);
+                }
+                if let Some(l) = line {
+                    PROGRESS.line.store(l, Ordering::Relaxed);
+                }
+                Ok(mlua::VmState::Continue)
+            }
+            None => Ok(mlua::VmState::Continue),
         })?;
         let own = global_values(&lua)?;
         let globals = own.iter().map(|(k, v)| (k.clone(), (v.clone(), 0))).collect();
-        Ok(Session { lua: ManuallyDrop::new(lua), state, st, log: Vec::new(), replay: false, deadline, chunk_limit: chunk_limit_for(width), heap: Some((snap_f, restore_f)), prelude: Some(prelude), stale: false, unrestored: false, globals, own, chunks_before: 0, _serials: serials, #[cfg(test)] fail_at: Cell::new(None) })
+        Ok(Session { lua: ManuallyDrop::new(lua), state, st, log: Vec::new(), replay: false, deadline, chunk_limit: chunk_limit_for(width), heap: Some((snap_f, restore_f)), prelude: Some(prelude), stale: false, unrestored: false, globals, own, chunks_before: 0, _serials: serials })
     }
 
     /// A session that replays a program from the default box (tests;
     /// `easel run` and `check` use `replay_with`).
-    #[cfg(all(test, tube_box))]
+    #[cfg(test)]
     pub fn replay(width: usize) -> mlua::Result<Self> {
         Self::replay_with(width, Palette::tube_box())
     }
@@ -203,17 +361,55 @@ impl Session {
     /// A session that replays a program painted from `tubes`: a failed chunk
     /// ends it, so it keeps no snapshot. (`easel run` and `check`: the replay
     /// build.)
-    #[cfg(any(feature = "replay", all(test, tube_box)))]
     pub fn replay_with(width: usize, tubes: Palette) -> mlua::Result<Self> {
         let mut s = Self::with_box(width, tubes)?;
         s.replay = true;
         Ok(s)
     }
 
+    /// Set the drain switch (`DRAIN_MARK`) on the box this session paints
+    /// from (tests: a new painting's is on and a replay's is its log's,
+    /// both set by `box_for`). Set before the first chunk runs.
+    #[cfg(test)]
+    pub fn with_drain(self, on: bool) -> Self {
+        debug_assert!(self.log.is_empty(), "the drain switch is set before the first chunk");
+        Rc::make_mut(&mut self.st.borrow_mut().tubes).drain = on;
+        self
+    }
+
     /// The box this session paints from.
-    #[cfg(feature = "replay")]
     pub fn tube_box(&self) -> Palette {
         (*self.st.borrow().tubes).clone()
+    }
+
+    /// Set the paper-and-pastel switch (`PAPER_MARK`): a new painting's is
+    /// on, a replay's is its log's (`logged_paper`). Set before the first
+    /// chunk runs.
+    pub fn with_paper(mut self, on: bool) -> mlua::Result<Self> {
+        self.set_paper(on)?;
+        Ok(self)
+    }
+
+    /// `with_paper` in place. Switched on, the session gets the switch's
+    /// verbs (`api::install_paper`: `pastel`, `smudge`, `feel` and the
+    /// stick's methods), which are then the easel's own globals as much as
+    /// those `api::install` set; switched off it has none of them, so a log
+    /// painted before the switch sees exactly the globals it saw.
+    pub fn set_paper(&mut self, on: bool) -> mlua::Result<()> {
+        debug_assert!(self.log.is_empty(), "the paper-and-pastel switch is set before the first chunk");
+        let was = self.st.borrow().paper;
+        match (was, on) {
+            (false, true) => {
+                self.st.borrow_mut().paper = true;
+                api::install_paper(&self.lua, self.st.clone())?;
+                // (no chunk has run: every global is the easel's own)
+                self.own = global_values(&self.lua)?;
+                self.globals = self.own.iter().map(|(k, v)| (k.clone(), (v.clone(), 0))).collect();
+                Ok(())
+            }
+            (true, false) => Err(mlua::Error::runtime("the paper-and-pastel switch, once on, stays on")),
+            _ => Ok(()),
+        }
     }
 
     /// Replaying (reopening a log): no snapshot before each chunk, since a failed chunk ends
@@ -226,7 +422,13 @@ impl Session {
         let (snap_f, _) = self.heap.as_ref().unwrap();
         let strings = self.lua.load("return getmetatable('')").eval::<Value>().ok();
         let skip = self.prelude.as_ref().unwrap().1.clone();
-        let heap: Table = snap_f.call((skip, self.lua.globals(), strings))?;
+        let sr = &self._serials;
+        sr.uncapped.set(true);
+        sr.marking.set(true);
+        let heap = snap_f.call::<Table>((skip, self.lua.globals(), strings));
+        sr.marking.set(false);
+        sr.uncapped.set(false);
+        let heap = heap?;
         let mut s = self.st.borrow_mut();
         let brushes = s.live_brushes().into_iter().map(|b| {
             let h = b.borrow().clone();
@@ -237,18 +439,21 @@ impl Session {
             (k, h)
         }).collect();
         let rags = s.live_rags().into_iter().map(|r| {
-            let v = *r.borrow();
+            let v = r.borrow().clone();
             (r, v)
         }).collect();
-        Ok(Snap { canvas: s.canvas.clone(), style: s.style.clone(), setup: s.setup.clone(), canvas_src: s.canvas_src.clone(), seed: s.seed, clock: s.clock, clock0: s.clock0, hand: s.hand.clone(), board: s.board.clone(), view: s.view.clone(), heap, brushes, knives, rags })
+        Ok(Snap { recording_ground: s.recording_ground, canvas: s.canvas.clone(), style: s.style.clone(), setup: s.setup.clone(), canvas_src: s.canvas_src.clone(), seed: s.seed, clock: s.clock, clock0: s.clock0, hand: s.hand.clone(), board: s.board.clone(), view: s.view.clone(), heap, brushes, knives, rags })
     }
 
     /// Put everything back as it was at `snap`. Returns how many Lua tables
     /// still differ in contents, traversal order or raw length after restoration (see `stale`).
     fn restore(&mut self, snap: &Snap) -> mlua::Result<usize> {
         let (_, restore_f) = self.heap.as_ref().unwrap();
-        let mismatches = restore_f.call::<usize>(snap.heap.clone())?;
-        self.inject("restore")?;
+        // not marking: what restore makes is the painting's again
+        self._serials.uncapped.set(true);
+        let mismatches = restore_f.call::<usize>(snap.heap.clone());
+        self._serials.uncapped.set(false);
+        let mismatches = mismatches?;
         for (b, h) in &snap.brushes {
             *b.borrow_mut() = h.clone();
         }
@@ -256,13 +461,14 @@ impl Session {
             *k.borrow_mut() = h.clone();
         }
         for (r, v) in &snap.rags {
-            *r.borrow_mut() = *v;
+            *r.borrow_mut() = v.clone();
         }
         let mut s = self.st.borrow_mut();
         s.canvas = snap.canvas.clone();
         s.style = snap.style.clone();
         s.setup = snap.setup.clone();
         s.canvas_src = snap.canvas_src.clone();
+        s.recording_ground = snap.recording_ground;
         s.seed = snap.seed;
         s.clock = snap.clock;
         s.clock0 = snap.clock0;
@@ -270,15 +476,6 @@ impl Session {
         s.board = snap.board.clone();
         s.view = snap.view.clone();
         Ok(mismatches)
-    }
-
-    /// Tests: fail here if `fail_at` says so (nothing, outside tests).
-    fn inject(&self, _at: &str) -> mlua::Result<()> {
-        #[cfg(test)]
-        if self.fail_at.get() == Some(_at) {
-            return Err(mlua::Error::runtime(format!("injected failure: {_at}")));
-        }
-        Ok(())
     }
 
     /// Replace the state with a replay of the log in a fresh one: the state
@@ -294,7 +491,7 @@ impl Session {
             let s = self.st.borrow();
             (s.width, (*s.tubes).clone())
         };
-        let mut fresh = Session::with_box(width, tubes).map_err(|e| e.to_string())?;
+        let mut fresh = Session::with_box(width, tubes).and_then(|s| s.with_paper(self.st.borrow().paper)).map_err(|e| e.to_string())?;
         fresh.chunk_limit = self.chunk_limit;
         fresh.replay = true;
         for (i, c) in self.log.iter().enumerate() {
@@ -320,16 +517,22 @@ impl Session {
         if self.stale {
             self.rebuild()?;
         }
+        let trace = (!self.replay).then(crate::replay_checkpoint::mark);
         let mut snap = if !self.replay { Some(self.snap().map_err(|e| e.to_string())?) } else { None };
         let n = (self.chunks_before + self.log.len()) as u64 + 1;
         self.prelude.as_ref().unwrap().0.call::<()>(()).map_err(|e| e.to_string())?;
         self.st.borrow_mut().begin(n);
+        self.st.borrow_mut().live = !self.replay;
+        if !self.replay {
+            PROGRESS.begin(src.lines().count(), &self.st.borrow());
+        }
         let t0 = Instant::now();
         // text only: mlua would take a chunk starting with Lua's binary signature as bytecode
         let chunk = self.lua.load(src.as_str()).set_name(format!("chunk {n}")).set_mode(mlua::chunk::ChunkMode::Text);
         let (check, guard) = { let p = self.prelude.as_ref().unwrap(); (p.2.clone(), p.3.clone()) };
         let deadline = (!self.replay).then(|| t0 + self.chunk_limit);
         self.deadline.set(deadline);
+        self._serials.capped.set(false);
         // Everything that can fail before the chunk is kept is inside this guard: the chunk,
         // prelude.lua's check, putting its hand time on the clock and reading the globals it
         // left. A failure anywhere in it is a failed chunk, rolled back below.
@@ -337,11 +540,13 @@ impl Session {
             // through prelude.lua's guard: an error value is shown without its address
             guard.call::<()>(chunk.into_function()?)?;
             check.call::<()>(())?;
-            // the hand time the chunk spent goes on the clock before it ends
-            if self.inject("flush").is_err() {
-                panic!("injected failure: flush");
+            // a paper mask is laid and lifted within one sitting's chunk (paint's sheet.rs)
+            if self.st.borrow().canvas.as_ref().is_some_and(|c| c.has_sheet()) {
+                return Err(mlua::Error::runtime("the chunk ended with a sheet laid on the picture: lift it (lift_sheet()) in the chunk that laid it"));
             }
+            // the hand time the chunk spent goes on the clock before it ends
             crate::time::flush(&self.st, true);
+            crate::replay_checkpoint::check()?;
             self.next_globals(n as usize)
         }));
         self.deadline.set(None);
@@ -352,6 +557,10 @@ impl Session {
             Ok(Err(e)) => (Some(clean_error(&e.to_string())), None),
             Err(p) => (Some(format!("engine panic: {}", panic_text(&p))), None),
         };
+        let globals = if self._serials.capped.get() { None } else { globals };
+        if fail.is_none() && self._serials.capped.get() {
+            fail = Some(format!("the chunk asked for more memory than a painting may hold ({} GiB), so nothing it did was kept", LUA_MAX_BYTES >> 30));
+        }
         // Rollback must finish even after the chunk exhausted its deadline. The
         // private restore uses raw operations and runs no painter code; collection
         // below reinstates the deadline because it can run Lua work.
@@ -387,6 +596,7 @@ impl Session {
         let _ = self.lua.gc_collect();
         self.deadline.set(None);
         if let Some(e) = fail {
+            if let Some(mark) = trace { crate::replay_checkpoint::rollback(mark); }
             let mut msg = out;
             msg.push_str(&e);
             return Err(msg);
@@ -412,6 +622,51 @@ impl Session {
         if engine != 1 {
             let _ = writeln!(s, "{ENGINE_MARK} {engine}");
         }
+        if self.st.borrow().tubes.quarter_tiles {
+            let _ = writeln!(s, "{TILES_MARK} quarter");
+        }
+        if self.st.borrow().tubes.adaptive_sweep {
+            let _ = writeln!(s, "--@ adaptive-sweep");
+        }
+        if self.st.borrow().tubes.knife_skim {
+            let _ = writeln!(s, "{KNIFE_SKIM_MARK}");
+        }
+        if self.st.borrow().tubes.carried_paint {
+            let _ = writeln!(s, "{CARRIED_PAINT_MARK}");
+        }
+        if self.st.borrow().tubes.limbs_join_nearest {
+            let _ = writeln!(s, "{LIMBS_MARK}");
+        }
+        if self.st.borrow().tubes.reload_finite {
+            let _ = writeln!(s, "{RELOAD_FINITE_MARK}");
+        }
+        if self.st.borrow().tubes.blend_feather {
+            let _ = writeln!(s, "{BLEND_FEATHER_MARK}");
+        }
+        if self.st.borrow().tubes.brush_skim {
+            let _ = writeln!(s, "{BRUSH_SKIM_MARK}");
+        }
+        if self.st.borrow().tubes.blend_at_masks {
+            let _ = writeln!(s, "{BLEND_MARK}");
+        }
+        if self.st.borrow().tubes.glaze_film {
+            let _ = writeln!(s, "{GLAZE_FILM_MARK}");
+        }
+        if self.st.borrow().tubes.liquid_film_levels {
+            let _ = writeln!(s, "{LIQUID_FILM_LEVELS_MARK}");
+        }
+        if self.st.borrow().tubes.sealed_drawing_guide {
+            let _ = writeln!(s, "{SEALED_DRAWING_GUIDE_MARK}");
+        }
+        if self.st.borrow().tubes.drawing_optics {
+            let _ = writeln!(s, "{DRAWING_OPTICS_MARK}");
+        }
+        if self.st.borrow().tubes.rag_lift {
+            let _ = writeln!(s, "{RAG_LIFT_MARK}");
+        }
+        if self.st.borrow().tubes.full_palette_refuses {
+            let _ = writeln!(s, "{FULL_PALETTE_MARK}");
+        }
         if self.st.borrow().width == SKETCH_WIDTH {
             let _ = writeln!(s, "{SKETCH_MARK}");
         }
@@ -419,6 +674,13 @@ impl Session {
         let width = self.st.borrow().width;
         if width != LEGACY_WIDTH && WIDTHS.contains(&width) {
             let _ = writeln!(s, "{WIDTH_MARK} {width}");
+        }
+        // (our switches after main's head lines)
+        if self.st.borrow().tubes.drain {
+            let _ = writeln!(s, "{DRAIN_MARK}");
+        }
+        if self.st.borrow().paper {
+            let _ = writeln!(s, "{PAPER_MARK}");
         }
         for (i, c) in self.log.iter().enumerate() {
             let _ = writeln!(s, "\n{MARK} {}", i + 1);
@@ -430,7 +692,6 @@ impl Session {
 
     /// The globals as chunk `n` left them: the ones it set, changed or removed are its.
     fn next_globals(&self, n: usize) -> mlua::Result<BTreeMap<String, (Value, usize)>> {
-        self.inject("globals")?;
         let now = global_values(&self.lua)?;
         let mut next = BTreeMap::new();
         for (k, v) in now {
@@ -471,6 +732,14 @@ impl Session {
             .collect()
     }
 
+    pub fn mask(&self, name: &str) -> Result<std::sync::Arc<paint::Mask>, String> {
+        let found = self.globals.get(name).filter(|(_, c)| *c > 0).map(|(v, _)| v);
+        if let Some(Value::UserData(u)) = found && let Ok(m) = u.borrow::<api::M>() {
+            return Ok(std::sync::Arc::new((*m.0).clone()));
+        }
+        Err(format!("look --mask {name}: no global mask with that name"))
+    }
+
     /// What the global `name` puts on a knife held up to the canvas (the look
     /// `--hold`): a knife's own load, with its blade's length and how full it
     /// is, or a pile as its heap is on the board now, as a fresh full load on
@@ -490,7 +759,7 @@ impl Session {
                 // the live board's dirt, ordering or last-carried paint.
                 let st = self.st.borrow();
                 let mut board = st.board.clone();
-                board.visit(p.heap, 0.0);
+                let _ = board.visit(p.heap, 0.0);
                 let mut projected = p.clone();
                 if let Some(h) = board.heap(p.heap).filter(|h| h.changed) {
                     projected.mix = st.tubes.pile(h.fractions());
@@ -510,6 +779,28 @@ impl Session {
             .collect();
         names.sort();
         Err(format!("look --hold {name}: no global of that name holds a knife or a pile ({})", if names.is_empty() { "there is none yet".to_string() } else { names.join(", ") }))
+    }
+
+    /// The pastel stick a global (or a field of one: `P.glow`) holds, and how
+    /// far it has been turned in the fingers (degrees): `look --hold`'s.
+    pub fn held_stick(&self, name: &str) -> Result<(paint::pastel::Stick, f32), String> {
+        let mut parts = name.split('.');
+        let first = parts.next().unwrap_or("");
+        let mut v: Value = self.lua.globals().raw_get(first).map_err(|e| e.to_string())?;
+        for p in parts {
+            v = match v {
+                Value::Table(t) => t.raw_get(p).map_err(|e| e.to_string())?,
+                _ => Value::Nil,
+            };
+        }
+        match v {
+            Value::Table(t) if t.raw_get::<Option<String>>("kind").ok().flatten().as_deref() == Some("stick") => {
+                let s = crate::api::draw_pencil::stick_of(&t).map_err(|e| e.to_string())?;
+                let turned = t.raw_get::<Option<f32>>("turned").ok().flatten().unwrap_or(0.0);
+                Ok((s, turned))
+            }
+            _ => Err(format!("look --hold {name}: that holds no pastel stick")),
+        }
     }
 
     /// The ground's color, from the `canvas{}` layers: each layer's paint over the raw linen
@@ -628,14 +919,41 @@ fn describe(v: &Value) -> String {
 /// are also listed by address.
 pub struct Serials {
     next: Cell<i64>,
+    /// bytes the state holds now, headers included; past LUA_MAX_BYTES an
+    /// allocation fails and Lua raises "not enough memory"
+    used: Cell<usize>,
+    cap: Cell<usize>,
+    /// bytes of `used` in blocks the pre-chunk snapshot made (marked `SNAP`),
+    /// counted as they are freed or resized: the cap leaves them out, so a
+    /// chunk has the room a replay (which takes no snapshot) has
+    held: Cell<usize>,
+    /// while the easel snapshots or restores: no cap, so a painting the cap
+    /// allowed can always be snapshotted and a failed chunk always put back
+    uncapped: Cell<bool>,
+    /// while the easel snapshots: new blocks are the snapshot's (`SNAP`)
+    marking: Cell<bool>,
+    /// set when the cap refused an allocation; `run` fails a chunk that hit
+    /// it, even one that caught the error or that Lua's emergency collection
+    /// recovered from, since only a live session's heap holds its snapshot
+    capped: Cell<bool>,
     /// userdata and thread blocks: user address -> (serial, size)
     inner: RefCell<BTreeMap<usize, (i64, usize)>>,
 }
 
 const HDR: usize = 16;
+/// The most a session's Lua state may hold. A chunk that builds something huge
+/// (a giant string.rep, a loop filling a table) then errors and is rolled back
+/// instead of swapping the machine. The snapshot a live session takes before
+/// each chunk is outside it (`Serials::held`), so a live painting can hold
+/// up to about twice this. Even so live and replayed heaps differ a little,
+/// so a chunk that meets the cap fails however it handles that
+/// (`Serials::capped`): no kept chunk ever met it.
+const LUA_MAX_BYTES: usize = 2 << 30;
 const PLAIN: i64 = 0;
 const AT_START: i64 = 1;
 const LISTED: i64 = 2;
+/// With the kind: a block made while the easel snapshotted (`Serials::held`).
+const SNAP: i64 = 4;
 
 fn layout(size: usize) -> Layout {
     // SAFETY (for callers): 16 is a power of two and Lua's sizes are far from isize::MAX
@@ -653,10 +971,21 @@ unsafe extern "C" fn counting_alloc(ud: *mut c_void, ptr: *mut c_void, osize: us
             if nsize == 0 {
                 return std::ptr::null_mut();
             }
+            if nsize.saturating_add(HDR) > h.room() {
+                h.capped.set(true);
+                return std::ptr::null_mut();
+            }
             let b = std::alloc::alloc(layout(nsize));
             if b.is_null() {
                 return b as *mut c_void;
             }
+            h.used.set(h.used.get() + nsize + HDR);
+            let snap = if h.marking.get() {
+                h.held.set(h.held.get() + nsize + HDR);
+                SNAP
+            } else {
+                0
+            };
             // a new object: `osize` is its type
             let kind = match osize as i32 {
                 LUA_TTABLE | LUA_TFUNCTION => AT_START,
@@ -670,7 +999,7 @@ unsafe extern "C" fn counting_alloc(ud: *mut c_void, ptr: *mut c_void, osize: us
             }
             let hd = b as *mut i64;
             *hd = n;
-            *hd.add(1) = kind;
+            *hd.add(1) = kind | snap;
             let p = b.add(HDR);
             if kind == LISTED {
                 h.inner.borrow_mut().insert(p as usize, (n, nsize));
@@ -678,20 +1007,44 @@ unsafe extern "C" fn counting_alloc(ud: *mut c_void, ptr: *mut c_void, osize: us
             return p as *mut c_void;
         }
         let b = (ptr as *mut u8).sub(HDR);
+        let kind = *(b as *const i64).add(1);
         if nsize == 0 {
-            if *(b as *const i64).add(1) == LISTED {
+            if kind & !SNAP == LISTED {
                 h.inner.borrow_mut().remove(&(ptr as usize));
             }
             std::alloc::dealloc(b, layout(osize));
+            h.used.set(h.used.get().saturating_sub(osize + HDR));
+            if kind & SNAP != 0 {
+                h.held.set(h.held.get().saturating_sub(osize + HDR));
+            }
+            return std::ptr::null_mut();
+        }
+        if nsize > osize && nsize - osize > h.room() {
+            h.capped.set(true);
             return std::ptr::null_mut();
         }
         // only arrays and buffers are reallocated, never objects
         let nb = std::alloc::realloc(b, layout(osize), nsize + HDR);
-        if nb.is_null() { nb as *mut c_void } else { nb.add(HDR) as *mut c_void }
+        if nb.is_null() {
+            return nb as *mut c_void;
+        }
+        h.used.set(h.used.get().saturating_sub(osize) + nsize);
+        if kind & SNAP != 0 {
+            h.held.set(h.held.get().saturating_sub(osize) + nsize);
+        }
+        nb.add(HDR) as *mut c_void
     }
 }
 
 impl Serials {
+    /// What the cap still allows a chunk to allocate.
+    fn room(&self) -> usize {
+        if self.uncapped.get() {
+            return usize::MAX;
+        }
+        self.cap.get().saturating_sub(self.used.get().saturating_sub(self.held.get()))
+    }
+
     /// `id(v)`: the serial of a table, closure, userdata or thread; nil for
     /// values and light C functions (library functions have no block).
     fn id_fn(&self, lua: &Lua) -> mlua::Result<Function> {
@@ -721,7 +1074,7 @@ impl Serials {
 /// (see `Serials`).
 fn fixed_lua(libs: StdLib) -> mlua::Result<(Lua, *mut mlua::ffi::lua_State, Box<Serials>)> {
     use mlua::ffi;
-    let serials = Box::new(Serials { next: Cell::new(1), inner: RefCell::new(BTreeMap::new()) });
+    let serials = Box::new(Serials { next: Cell::new(1), inner: RefCell::new(BTreeMap::new()), used: Cell::new(0), cap: Cell::new(LUA_MAX_BYTES), held: Cell::new(0), uncapped: Cell::new(false), marking: Cell::new(false), capped: Cell::new(false) });
     unsafe {
         let ud = &*serials as *const Serials as *mut c_void;
         let state = ffi::lua_newstate(counting_alloc, ud, ffi::luaL_makeseed_(std::ptr::null_mut()));
@@ -896,9 +1249,9 @@ pub fn logged_engine(text: &str) -> Result<u32, String> {
             break;
         }
         if let Some(rest) = l.strip_prefix(ENGINE_MARK) {
-            let v = rest.strip_prefix(' ').and_then(|v| v.trim().parse::<u32>().ok()).filter(|v| (1..=paint::ENGINE).contains(v));
+            let v = rest.strip_prefix(' ').and_then(|v| v.trim().parse::<u32>().ok()).filter(|&v| paint::supported_engine(v));
             let Some(v) = v else {
-                return Err(format!("the log's line {l:?} names no engine this easel has ({ENGINE_MARK} <1 to {}>)", paint::ENGINE));
+                return Err(format!("the log's line {l:?} names no engine this easel has ({ENGINE_MARK} <1 to {}, {} or {}>)", paint::ENGINE, paint::engine7::ENGINE, paint::REACH_END));
             };
             if found.is_some() {
                 return Err(format!("the log names its engine twice ({ENGINE_MARK} lines)"));
@@ -938,11 +1291,43 @@ pub fn logged_sketch(text: &str) -> bool {
     text.lines().map(str::trim).take_while(|l| !l.starts_with(MARK)).any(|l| l == SKETCH_MARK)
 }
 
+/// Whether a session file's head has the paper-and-pastel switch (a
+/// `PAPER_MARK` line before the first chunk).
+pub fn logged_paper(text: &str) -> bool {
+    text.lines().map(str::trim).take_while(|l| !l.starts_with(MARK)).any(|l| l == PAPER_MARK)
+}
+
+pub fn logged_quarter_tiles(text: &str) -> Result<bool, String> {
+    let mut found = false;
+    for l in text.lines().map(str::trim).take_while(|l| !l.starts_with(MARK)) {
+        if let Some(rest) = l.strip_prefix(TILES_MARK) {
+            if rest.strip_prefix(' ').map(str::trim) != Some("quarter") || found {
+                return Err(format!("the log's line {l:?} names no work tiles this easel has, or names them twice ({TILES_MARK} quarter, at most once)"));
+            }
+            found = true;
+        }
+    }
+    if found && logged_engine(text)? != 5 {
+        return Err(format!("the log asks for quarter work tiles ({TILES_MARK} quarter), but only engine 5 paints with them"));
+    }
+    Ok(found)
+}
+
+/// Whether a session file's head has the drain switch (a `DRAIN_MARK` line
+/// before the first chunk).
+pub fn logged_drain(text: &str) -> bool {
+    text.lines().map(str::trim).take_while(|l| !l.starts_with(MARK)).any(|l| l == DRAIN_MARK)
+}
+
 /// Where the box of a new painting is set: a file `box` next to the easel's
 /// executable (one line, the box's name; a studio ships it as
-/// `<studio>/bin/box`), else `EASEL_BOX`. None: neither is set (the default
-/// box). The two naming different boxes is an error.
+/// `<studio>/bin/box`), else `EASEL_BOX`, in developer mode. Painter mode
+/// takes only its studio setting. None: the default box. Conflicting
+/// developer settings are an error.
 pub fn configured_box() -> Result<Option<(String, String)>, String> {
+    if let Some(name) = crate::studio::box_name() {
+        return Ok(Some((name.to_string(), "the studio setting".to_string())));
+    }
     let file = std::env::current_exe().ok().and_then(|e| e.canonicalize().ok()).and_then(|e| e.parent().map(|d| d.join("box")));
     let from_file = match file {
         Some(f) if f.exists() => {
@@ -965,6 +1350,11 @@ pub fn configured_box() -> Result<Option<(String, String)>, String> {
 
 /// The box called `name`, or an error naming the boxes this easel has.
 pub fn find_box(name: &str) -> Result<Palette, String> {
+    if let Some(own) = crate::studio::box_name()
+        && name != own
+    {
+        return Err("this studio paints from its own box only; nothing ran".into());
+    }
     Palette::named_box(name).ok_or_else(|| format!("this easel has no box {name:?} (its boxes: {})", box_list()))
 }
 
@@ -974,25 +1364,68 @@ fn box_list() -> String {
 }
 
 /// The box a painting is painted from. A new painting (`log` None) takes the
-/// configured box (`configured_box`), else the default (in a painter's build
-/// for one box, which has no default box: that box). An existing one takes
+/// configured box (`configured_box`), else the default. An existing one takes
 /// the box its log names (none: the default), whatever easel replays it; if a
 /// box is configured too, it must be the same one. The box carries the
-/// engine version the painting is painted with: a new one the current
-/// (`paint::ENGINE`), an existing one its log's (`logged_engine`).
+/// engine version the painting is painted with: a new one engine 8,
+/// an existing one its log's (`logged_engine`). New paintings' `body_of`
+/// joins limbs to the nearest limb; an existing one's as its log says
+/// (`LIMBS_MARK`), and likewise for the blender's feather
+/// (`BLEND_FEATHER_MARK`), the brush's skim (`BRUSH_SKIM_MARK`) and
+/// blends and glazes at masks (`BLEND_MARK`).
+/// New paintings' full palette refuses a new heap; an existing one's as its
+/// log says (`FULL_PALETTE_MARK`).
 pub fn box_for(log: Option<&str>) -> Result<Palette, String> {
     let configured = configured_box()?;
     let Some(text) = log else {
-        return find_box(configured.as_ref().map_or(Palette::fallback_box(), |c| c.0.as_str()));
+        let mut b = find_box(configured.as_ref().map_or(Palette::fallback_box(), |c| c.0.as_str()))?;
+        b.engine = paint::REACH_END;
+        b.knife_skim = true;
+        b.limbs_join_nearest = true;
+        b.reload_finite = true;
+        b.carried_paint = true;
+        b.glaze_film = true;
+        b.liquid_film_levels = true;
+        b.sealed_drawing_guide = true;
+        b.drawing_optics = true;
+        b.full_palette_refuses = true;
+        b.blend_at_masks = true;
+        b.blend_feather = true;
+        b.brush_skim = true;
+        b.rag_lift = true;
+        b.drain = true;
+        return Ok(b);
     };
     let engine = logged_engine(text)?;
+    if logged_paper(text) && engine < 5 {
+        return Err(format!("the log's {PAPER_MARK} line (the paper-and-pastel switch) is engine 5's and later's; this log names engine {engine}; nothing ran"));
+    }
+    let adaptive_sweep = text.lines().map(str::trim).take_while(|l| !l.starts_with(MARK)).any(|l| l == "--@ adaptive-sweep");
+    if adaptive_sweep && engine != 5 {
+        return Err("the log's adaptive sweep switch requires engine 5".into());
+    }
+    let head = |mark: &str| text.lines().map(str::trim).take_while(|l| !l.starts_with(MARK)).any(|l| l == mark);
+    let (knife_skim, blend_feather, brush_skim) = (head(KNIFE_SKIM_MARK), head(BLEND_FEATHER_MARK), head(BRUSH_SKIM_MARK));
+    if knife_skim && !matches!(engine, paint::engine7::ENGINE | paint::REACH_END) {
+        return Err(format!("the log's knife skim switch ({KNIFE_SKIM_MARK}) requires engine 7 or 8"));
+    }
+    for (on, mark) in [(blend_feather, BLEND_FEATHER_MARK), (brush_skim, BRUSH_SKIM_MARK)] {
+        if on && !matches!(engine, paint::engine7::ENGINE | paint::REACH_END) {
+            return Err(format!("the log's switch {mark:?} requires engine 7 or 8"));
+        }
+    }
+    let drain = logged_drain(text);
+    if drain && engine < 5 {
+        return Err(format!("the log's {DRAIN_MARK} line (the drain switch) is engine 5's and later's; this log names engine {engine}; nothing ran"));
+    }
     let logged = logged_box(text)?;
-    let Some(name) = logged.as_deref().or(paint::palette::default_box()) else {
-        return Err(format!("the log names no box, so it was painted from the default box, which this easel doesn't have (its boxes: {}); nothing ran", box_list()));
-    };
+    let name = logged.as_deref().unwrap_or(paint::palette::DEFAULT_BOX);
     if let Some((c, from)) = &configured
         && c != name
     {
+        if crate::studio::painter() {
+            return Err("the log wasn't painted from this studio's box; nothing ran".into());
+        }
         let log_says = match &logged {
             Some(n) => format!("the log was painted from the box {n:?} (its {BOX_MARK} line)"),
             None => format!("the log names no box, so it was painted from the default box {name:?}"),
@@ -1001,6 +1434,31 @@ pub fn box_for(log: Option<&str>) -> Result<Palette, String> {
     }
     let mut b = find_box(name)?;
     b.engine = engine;
+    b.quarter_tiles = logged_quarter_tiles(text)?;
+    b.adaptive_sweep = adaptive_sweep;
+    b.knife_skim = knife_skim;
+    b.carried_paint = head(CARRIED_PAINT_MARK);
+    b.limbs_join_nearest = text.lines().map(str::trim).take_while(|l| !l.starts_with(MARK)).any(|l| l == LIMBS_MARK);
+    b.reload_finite = head(RELOAD_FINITE_MARK);
+    b.glaze_film = text.lines().map(str::trim).take_while(|l| !l.starts_with(MARK)).any(|l| l == GLAZE_FILM_MARK);
+    b.liquid_film_levels = head(LIQUID_FILM_LEVELS_MARK);
+    b.sealed_drawing_guide = head(SEALED_DRAWING_GUIDE_MARK);
+    b.drawing_optics = head(DRAWING_OPTICS_MARK);
+    if b.liquid_film_levels && engine < 4 {
+        return Err(format!("the log's liquid film leveling switch ({LIQUID_FILM_LEVELS_MARK}) requires engine 4 or later"));
+    }
+    if b.glaze_film && !paint::engine7::active(engine) {
+        return Err(format!("the log's glaze film switch ({GLAZE_FILM_MARK}) requires engine 7 or 8"));
+    }
+    b.full_palette_refuses = text.lines().map(str::trim).take_while(|l| !l.starts_with(MARK)).any(|l| l == FULL_PALETTE_MARK);
+    b.blend_at_masks = text.lines().map(str::trim).take_while(|l| !l.starts_with(MARK)).any(|l| l == BLEND_MARK);
+    b.blend_feather = blend_feather;
+    b.brush_skim = brush_skim;
+    b.rag_lift = text.lines().map(str::trim).take_while(|l| !l.starts_with(MARK)).any(|l| l == RAG_LIFT_MARK);
+    if b.rag_lift && !paint::engine7::active(engine) {
+        return Err(format!("the log's rag lift switch ({RAG_LIFT_MARK}) requires engine 7 or 8"));
+    }
+    b.drain = drain;
     Ok(b)
 }
 
@@ -1026,13 +1484,16 @@ pub fn parse_program(text: &str) -> Vec<String> {
 }
 
 /// The checkout the easel works in (session logs in `paintings/lua`, renders
-/// in `out/`) in the replay build: `EASEL_ROOT` if set, else the nearest directory at or above
+/// in `out/`) in developer mode: `EASEL_ROOT` if set, else the nearest directory at or above
 /// the working directory that holds `crates/easel/Cargo.toml`, else the
 /// checkout this binary was built from. Looking from the working directory
 /// keeps git worktrees apart: a binary built in (or copied from) another
-/// checkout still writes into the worktree it's run in.
-#[cfg(feature = "replay")]
+/// checkout still writes into the worktree it's run in. Painter mode always
+/// uses the studio above the executable's directory.
 pub fn root() -> PathBuf {
+    if let Some(root) = crate::studio::root() {
+        return root.to_path_buf();
+    }
     if let Some(r) = std::env::var_os("EASEL_ROOT").filter(|r| !r.is_empty()) {
         let r = PathBuf::from(r);
         return r.canonicalize().unwrap_or(r);
@@ -1043,935 +1504,116 @@ pub fn root() -> PathBuf {
             return r.canonicalize().unwrap_or(r);
         }
     }
-    let r = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    r.canonicalize().unwrap_or(r)
+    // (atelier: a painter's easel is built with `--cfg atelier_painter` and holds no build path, ENG-7; painter mode
+    // never gets here, and a developer run of it uses the working directory)
+    #[cfg(atelier_painter)]
+    return PathBuf::from(".");
+    #[cfg(not(atelier_painter))]
+    {
+        let r = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        r.canonicalize().unwrap_or(r)
+    }
 }
 
-/// The studio the painter build works in: the parent of the directory
-/// holding the executable (the studio ships it as `<studio>/bin/easel`),
-/// wherever it is run from. Nothing in the environment moves it.
-#[cfg(not(feature = "replay"))]
-pub fn root() -> PathBuf {
-    let exe = std::env::current_exe().and_then(|e| e.canonicalize()).unwrap_or_else(|e| panic!("easel: cannot locate its own executable: {e}"));
-    exe.parent().and_then(Path::parent).unwrap_or_else(|| panic!("easel: {} is not inside <studio>/bin", exe.display())).to_path_buf()
-}
+#[cfg(test)]
+#[path = "../../paint/tests/support/image_tolerance.rs"]
+mod image_tolerance;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    #[cfg(tube_box)]
-    fn palette_add_refreshes_recipe_and_dilutes_materials() {
-        let mut s = Session::new(48).unwrap();
-        s.run(CANVAS).unwrap();
-        s.run(r#"p = pile{{"lead white", 2}, oil="poppy", turps=0.6, thinner=0.4}
-            p = p:add{{"cobalt blue", 2}}
-            local parts = p:parts()
-            assert(#parts == 2 and parts[1][2] == 2 and parts[2][2] == 2)
-            assert(math.abs(p.thinner - 0.2) < 0.00001)
-            assert(tostring(p):find("cobalt blue 2", 1, true))"#).unwrap();
-        let p = s.globals["p"].0.as_userdata().unwrap().borrow::<api::PileU>().unwrap();
-        assert!((p.mix.solvent - 0.3).abs() < 1e-5);
-        assert!((p.mix.oil_rate - 0.8).abs() < 1e-5);
-    }
-
-    #[test]
-    #[cfg(tube_box)]
-    fn a_retained_palette_pile_can_be_added_after_many_new_heaps() {
-        let mut s = Session::new(48).unwrap();
-        s.run(CANVAS).unwrap();
-        s.run(r#"p = pile{{"lead white", 1}}
-            for i = 1, 100 do pile{{"cobalt blue", 1}} end
-            p = p:add{{"cobalt blue", 1}}
-            assert(#p:parts() == 2)"#).unwrap();
-        let st = s.st.borrow();
-        assert_eq!(st.board.live().len(), crate::board::LIVE);
-        let p = s.globals["p"].0.as_userdata().unwrap().borrow::<api::PileU>().unwrap();
-        assert_eq!(st.board.live().last().unwrap().id, p.heap);
-    }
-
-    #[cfg(tube_box)]
-    const W: usize = 160;
-
-    #[cfg(tube_box)]
-    fn bits(s: &Session) -> Vec<u32> {
-        s.canvas().unwrap().seen().iter().flat_map(|p| p.map(f32::to_bits)).collect()
-    }
-
-    #[cfg(tube_box)]
-    pub(crate) const CANVAS: &str = r#"canvas{size=440, aspect=1.5, linen=15, seed=2, ground={{pile={{"lead white", 3}, {"red earth", 1}}, um=110, apply="knife"}, {pile={{"lead white", 5}, {"yellow ochre", 1}}, um=60, apply="brush"}}}"#;
-
-    #[cfg(tube_box)]
-    const CHUNKS: [&str; 4] = [
-        CANVAS,
-        r#"p = pile{{"lead white", 6}, {"cobalt blue", 1}, {"yellow ochre", 0.5}, medium=0.3}
-           work(ellipse(500, 300, 300, 150), {hand="broad", pile=p, angle=0, coverage=2})"#,
-        r#"b = brush("round", 4); b:load(pile{{"bone black", 1}, {"raw umber", 2}}, 0.9)
-           for i = 1, 5 do b:stroke({{100 + i*60, 500}, {130 + i*60 + rand(-10, 10), 420}}) end"#,
-        r#"wait(90); stipple(rect(100, 380, 800, 200), {width=3, pile=pile{{"lead white", 1}}, coverage=1.5})"#,
-    ];
-
-    #[test]
-    #[cfg(tube_box)]
-    fn replay_is_exact_and_failures_roll_back() {
-        let mut a = Session::new(W).unwrap();
-        for (i, c) in CHUNKS.iter().enumerate() {
-            a.run(c).unwrap();
-            if i == 1 {
-                // a failing chunk that painted and set globals first changes nothing
-                let before = bits(&a);
-                let e = a.run(r#"junk = 1; b0 = brush("flat", 6); b0:load(p); b0:stroke({0, 0, 900, 600}); work(everywhere(), {pile=p, colour="red"})"#).unwrap_err();
-                assert!(e.contains("unknown option \"colour\""), "{e}");
-                assert_eq!(before, bits(&a));
-                assert!(a.run("assert(junk == nil and b0 == nil)").is_ok());
-            }
+    fn assert_canvas_close(actual: &Canvas, expected: &Canvas) {
+        assert_eq!(actual.engine(), expected.engine());
+        assert_eq!(actual.drain(), expected.drain());
+        let (aw, ah, actual_surface) = actual.kept_surface_um();
+        let (ew, eh, expected_surface) = expected.kept_surface_um();
+        assert_eq!((aw, ah), (ew, eh));
+        image_tolerance::assert_fields_close(actual_surface, expected_surface);
+        for mode in ["normal", "gallery", "relief"] {
+            let size = expected.window().w.max(expected.window().h).to_string();
+            let view = crate::look::View::parse(&["--mode".into(), mode.into(), "--size".into(), size]).unwrap();
+            let (_, _, actual) = crate::look::render(actual, &view).unwrap();
+            let (_, _, expected) = crate::look::render(expected, &view).unwrap();
+            image_tolerance::assert_close(&image::load_from_memory(&actual).unwrap().to_rgba8(), &image::load_from_memory(&expected).unwrap().to_rgba8());
         }
-        assert_eq!(a.log.len(), CHUNKS.len() + 1);
-        // the log replays to the same canvas, bit for bit
-        let prog = a.program("t");
-        let chunks = parse_program(&prog);
-        assert_eq!(chunks.len(), CHUNKS.len() + 1);
-        let mut b = Session::replay(W).unwrap();
-        for c in &chunks {
-            b.run(c).unwrap();
-        }
-        assert_eq!(bits(&a), bits(&b));
-        assert_eq!(a.st.borrow().clock, b.st.borrow().clock);
     }
 
     #[test]
-    #[cfg(tube_box)]
-    fn globals_are_the_painting_s_as_the_state_holds_them_live_and_replayed() {
-        let chunks = [
-            CANVAS,
-            "local dm = nil\ndm = 3\na = 1; b = 2\ndo\n  inner = \"x\"\nend\nif true then\n  deep = {1, 2, 3}\nend\nlocal s = [[\nfake = 1\n]]\n-- ghost = 2\n--[[\nphantom = 3\n]]\nfunction tree(x)\n  return x\nend\ngone = 1\nn = 0/0\nm = rect(0, 0, 10, 10)",
-            "gone = nil; b = 2; a = 5",
-        ];
-        let mut live = Session::new(W).unwrap();
-        for (i, c) in chunks.iter().enumerate() {
-            live.run(c).unwrap();
-            if i == 1 {
-                live.run("c = 1; b = 7; error('no')").unwrap_err();
-            }
-        }
-        // canvas{} sets W and H
-        let want = "1\tH\tnumber 668.75\n1\tW\tnumber 1000\n2\tb\tnumber 2\n2\tdeep\ttable with 3 entries\n2\tinner\tstring \"x\"\n2\tm\tmask(88 sq units)\n2\tn\tnumber NaN\n2\ttree\tfunction (chunk 2, line 17)\n3\ta\tnumber 5\n";
-        assert_eq!(live.globals(), want);
-        let mut replay = Session::replay(W).unwrap();
-        for c in parse_program(&live.program("t")) {
-            replay.run(&c).unwrap();
-        }
-        assert_eq!(replay.globals(), want);
-    }
-
-    /// Lua loads precompiled chunks, which it doesn't verify (a crafted one can crash the
-    /// easel): a painting loads text only, by every way in, and can't dump functions.
-    #[test]
-    #[cfg(tube_box)]
-    fn binary_chunks_are_refused_and_text_load_still_works() {
-        let mut s = Session::new(64).unwrap();
-        // a benign binary chunk, dumped by another state of the same Lua
-        let other = Lua::new();
-        let bin = other.load("return 7").into_function().unwrap().dump(true);
-        s.lua.globals().set("bin", s.lua.create_string(&bin).unwrap()).unwrap();
-        let mut failed = Vec::new();
+    fn a_subnormal_blend_stays_finite_through_a_scrape_and_wait() {
+        let log = "--@ box every\n--@ engine 8\n--@ knife-skim\n--@ limbs-join-nearest\n--@ blend-feather\n--@ brush-skim\n--@ blend-at-masks\n--@ glaze-film\n--@ liquid-film-levels\n--@ rag-lift\n--@ full-palette-refuses\n--@ drain\n";
+        let mut s = Session::replay_with(320, box_for(Some(log)).unwrap()).unwrap();
+        s.run(r#"canvas{size=700,aspect=4/3,linen={16,14},ground={{pile={{"lead white",1}},um=70,apply="knife"}}}
+            p=pile{{"lead white",1}}
+            m=rect(580,270,130,200)
+            work(m,{hand="body",pile=p,tool={kind="filbert",width=8,lay=2.5},coverage=2.5,fill=true,clip=m})"#).unwrap();
         for chunk in [
-            "assert(string.dump == nil, 'string.dump is there')",
-            "local f, e = load(bin); assert(f == nil and e:find('binary chunk'), e)",
-            "for _, m in ipairs{'b', 'bt', 'tb'} do assert(load(bin, 'x', m) == nil, m) end",
-            "local n = 0; local f = load(function() n = n + 1; if n == 1 then return bin end end); assert(f == nil)",
-            // text loading is as Lua's, with and without an environment
-            "assert(load('return 1 + 1')() == 2); x = 9; assert(load('return x')() == 9)",
-            "assert(load('return x', 'c', 't', {x = 5})() == 5); assert(load('return x', 'c', nil, {x = 6})() == 6)",
-            "assert(not pcall(load('return x', 'c', 't', nil)))",
-            "assert(load('return 1', 'c', 'b') == nil)",
-            // load's own helpers are its own: replacing the global pcall, string.find or
-            // string.gsub hands a painting no function that loads bytecode
-            "local got, real = {}, {pcall, string.find, string.gsub}; \
-             local function spy(f) return function(g, ...) got[#got + 1] = g; return f(g, ...) end end; \
-             pcall, string.find, string.gsub = spy(real[1]), spy(real[2]), spy(real[3]); \
-             load('return 1'); load(bin); load('return (', 'c'); load('x', 'c', 1); \
-             pcall, string.find, string.gsub = real[1], real[2], real[3]; \
-             for _, g in ipairs(got) do assert(type(g) ~= 'function' or not pcall(g, bin), 'a load of bytecode leaked') end",
+            "soft=m*mask(function(x,y) return x<640 and 1 or 1e-40 end)\nblend(soft,{angle=0,seed=1})",
+            "k=knife{width=8}\nk:scrape({{644,350},{644,390}},{pressure=1,angle=0})",
+            "wait(1)",
         ] {
-            if let Err(e) = s.run(chunk) {
-                failed.push(format!("{chunk}: {e}"));
+            s.run(chunk).unwrap();
+            for field in s.canvas().unwrap().state_fields() {
+                if let paint::state_dump::Values::F32(values) = field.values {
+                    assert!(values.iter().all(|v| v.is_finite()), "{} after {chunk}", field.name);
+                }
             }
         }
-        // a chunk sent to the easel is loaded as text: one starting like a binary chunk is
-        // refused as one, not read as bytecode
-        let e = s.run("\x1bLua = 1").unwrap_err();
-        if !e.contains("attempt to load a binary chunk (mode is 't')") {
-            failed.push(format!("\\x1bLua chunk loaded as binary: {e}"));
-        }
-        assert!(failed.is_empty(), "{failed:#?}");
     }
 
-    /// Nothing a painting can print or branch on shows a memory address (which differs from
-    /// process to process, so between the live easel and a replay of its log): objects print
-    /// as `<type>: (hidden)`, `%p` is refused, and errors carrying objects say no address.
+
+    const CANVAS: &str = r#"canvas{size=440, aspect=1.5, linen=15, seed=2, ground={{pile={{"lead white", 3}, {"red earth", 1}}, um=110, apply="knife"}, {pile={{"lead white", 5}, {"yellow ochre", 1}}, um=60, apply="brush"}}}"#;
+
+    /// The drain switch is read from a log's head only, needs engine 5, and
+    /// rides on the box: a log with it replays, rebuilds and checkpoints the
+    /// same draining canvas (version 14), its brushes printing the paint's
+    /// packing; a log without it is as before (no mark, version 11, five
+    /// properties printed). A new painting's box has it.
     #[test]
-    #[cfg(tube_box)]
-    fn no_memory_address_reaches_a_painting() {
-        let shown = |s: &mut Session| {
-            let mut text = String::new();
-            for chunk in [
-                "local t, f = {}, function() end\nprint(t, f, print, string, setmetatable({}, {__name = 'Thing'}))\nprint(tostring(t), tostring(f), tostring(print))",
-                "local t = {}\nprint(string.format('%s|%8s|%-8s|%.3s', t, t, print, t), ('%s'):format(function() end))",
-                "print(setmetatable({}, {__tostring = function() return 'mine' end}), tostring(1.5), tostring(nil), tostring('s'))",
-                "for _, a in ipairs{{}, 's', 1} do local ok, e = pcall(string.format, '%p', a); assert(not ok, 'no %p'); print(e) end",
-                "error({})",
-                "error(function() end)",
-                "error(setmetatable({}, {}))",
-                "local t = {}; t = t .. 1",
-            ] {
-                match s.run(chunk) {
-                    Ok(r) => text.push_str(&r.out),
-                    Err(e) => text.push_str(&e),
-                }
-                text.push('\n');
-            }
-            text
+    fn the_drain_switch_comes_from_the_log_s_head() {
+        assert!(logged_drain(&format!("{ENGINE_MARK} 5\n  {DRAIN_MARK}  \n{MARK} 1\n")));
+        assert!(!logged_drain(&format!("{ENGINE_MARK} 5\n{MARK} 1\n{DRAIN_MARK}\n")));
+        assert!(!logged_drain(&format!("{ENGINE_MARK} 5\n{DRAIN_MARK}-ish\n{MARK} 1\n")));
+        let e = box_for(Some(&format!("{ENGINE_MARK} 4\n{DRAIN_MARK}\n{MARK} 1\n"))).unwrap_err();
+        assert!(e.contains(DRAIN_MARK), "{e}");
+        assert!(box_for(Some(&format!("{ENGINE_MARK} 5\n{DRAIN_MARK}\n{MARK} 1\n"))).unwrap().drain);
+        assert!(!box_for(Some(&format!("{ENGINE_MARK} 5\n{MARK} 1\n"))).unwrap().drain);
+        assert!(box_for(None).map(|b| b.drain).unwrap_or(true), "a new painting's box drains");
+        let strokes = r#"b = brush("flat", 24)
+            b:load(pile{{"raw umber", 1}}, 0.8)
+            b:stroke({{100, 200}, {900, 200}})
+            wait(30)"#;
+        let state = |s: &Session| {
+            let mut bytes = Vec::new();
+            s.canvas().unwrap().write_state(&mut bytes, "").unwrap();
+            bytes
         };
-        let a = shown(&mut Session::new(64).unwrap());
-        // another state, its objects elsewhere in memory
-        let _elsewhere: Vec<Vec<u8>> = (0..1000).map(|i| vec![0; i]).collect();
-        let b = shown(&mut Session::new(64).unwrap());
-        let hexes = a.split(|c: char| !c.is_ascii_hexdigit()).filter(|w| w.len() >= 8).collect::<Vec<_>>();
-        assert!(!a.contains("0x") && hexes.is_empty(), "an address shows:\n{a}");
-        assert_eq!(a, b, "two processes show different text");
-        for want in ["table: (hidden)\tfunction: (hidden)\tfunction: (hidden)\ttable: (hidden)\tThing: (hidden)", "mine\t1.5\tnil\ts", "table: (hidden)|table: (hidden)|function: (hidden)|tab"] {
-            assert!(a.contains(want), "{want:?} not in\n{a}");
-        }
-    }
-
-    /// An error object raised in a painter's function the easel calls (a mask's, a curve's)
-    /// reaches the painting, caught or not, without an address either: Lua's conversion of
-    /// it to text happens outside the painting's reach (mlua's handler), so it's the text
-    /// that hides the address.
-    #[test]
-    #[cfg(tube_box)]
-    fn no_memory_address_escapes_a_callback() {
-        let raised = ["{}", "function() end", "setmetatable({}, {__name = 'Thing'})", "noise()"];
-        let mut chunks = Vec::new();
-        for v in raised {
-            for call in ["mask(function() error(V) end)", "below(function() error(V) end)"] {
-                let call = call.replace('V', v);
-                chunks.push(format!("local ok, e = pcall(function() return {call} end); assert(not ok); print(e, tostring(e), string.format('%s|%-9s', e, e), ('%s'):format(e))"));
-                chunks.push(call);
+        for drain in [false, true] {
+            let mut live = Session::new(96).unwrap().with_drain(drain);
+            live.run(CANVAS).unwrap();
+            live.run(strokes).unwrap();
+            assert_eq!(live.canvas().unwrap().drain(), drain);
+            let log = live.program("drain");
+            assert_eq!(log.contains(&format!("{ENGINE_MARK} {}\n{DRAIN_MARK}\n\n{MARK} 1\n", paint::ENGINE)), drain, "{log}");
+            assert_eq!(logged_drain(&log), drain);
+            let mut replay = Session::replay_with(96, box_for(Some(&log)).unwrap()).unwrap();
+            for chunk in parse_program(&log) {
+                replay.run(&chunk).unwrap();
             }
-        }
-        for run in 0..100 {
-            let mut s = Session::new(64).unwrap();
-            s.run(r#"canvas{size=100, aspect=1, seed=5, linen=15, ground={{pile={{"lead white", 1}}, um=80, apply="knife"}}}"#).unwrap();
-            let mut text = String::new();
-            for c in &chunks {
-                match s.run(c) {
-                    Ok(r) => text.push_str(&r.out),
-                    Err(e) => text.push_str(&e),
-                }
-                text.push('\n');
-            }
-            assert!(!text.contains(": 0x"), "run {run}: an address shows:\n{text}");
-            if run == 0 {
-                for want in ["table: (hidden)", "function: (hidden)", "Thing: (hidden)", "Noise: (hidden)"] {
-                    assert!(text.contains(want), "{want:?} not in\n{text}");
-                }
-            }
+            let bytes = state(&live);
+            let original = live.canvas().unwrap().clone();
+            assert_eq!(&bytes[..8], if drain { b"PAINTC14" } else { b"PAINTC11" });
+            assert_canvas_close(&replay.canvas().unwrap(), &original);
+            assert_eq!(replay.program("drain"), log);
+            let brushes = live.st.borrow_mut().live_brushes();
+            let held = format!("{:?}", brushes[0].borrow());
+            let hide = held.split("hide: [").nth(1).and_then(|h| h.split(']').next()).unwrap();
+            assert_eq!(hide.matches(',').count(), if drain { 9 } else { 4 }, "drain {drain}: {hide}");
+            live.rebuild().unwrap();
+            assert_canvas_close(&live.canvas().unwrap(), &original);
+            assert_eq!(live.program("drain"), log);
         }
     }
-
-    /// A chunk that ran but whose ending failed (putting its hand time on the clock,
-    /// reading the globals it left) is a failed chunk: nothing it did is kept, and the
-    /// session goes on as a replay of its log does.
-    #[test]
-    #[cfg(tube_box)]
-    fn a_chunk_whose_ending_fails_changes_nothing() {
-        for at in ["globals", "flush"] {
-            let mut s = Session::new(W).unwrap();
-            s.run(CHUNKS[0]).unwrap();
-            s.run(CHUNKS[1]).unwrap();
-            let (before, clock, globals) = (bits(&s), s.st.borrow().clock, s.globals());
-            s.fail_at.set(Some(at));
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.run(r#"junk = 1; work(everywhere(), {hand="broad", pile=p, coverage=1})"#)));
-            s.fail_at.set(None);
-            let e = match r {
-                Ok(r) => r.expect_err(at),
-                Err(_) => panic!("{at}: the failure escaped the chunk's guard"),
-            };
-            assert!(e.contains(&format!("injected failure: {at}")), "{at}: {e}");
-            assert!(before == bits(&s), "{at}: the canvas kept what the chunk painted");
-            assert_eq!((clock, globals, s.log.len()), (s.st.borrow().clock, s.globals(), 2), "{at}");
-            s.run("assert(junk == nil)").unwrap();
-            s.run(CHUNKS[2]).unwrap();
-            let mut b = Session::replay(W).unwrap();
-            for c in parse_program(&s.program("t")) {
-                b.run(&c).unwrap();
-            }
-            assert!(bits(&s) == bits(&b), "{at}: the session went on differently from its log");
-        }
-    }
-
-    /// Putting back what a failed chunk did can fail too: the session then paints no more
-    /// from that state, but rebuilds from its log first, and says so.
-    #[test]
-    #[cfg(tube_box)]
-    fn a_failed_rollback_rebuilds_from_the_log_before_painting_again() {
-        let mut s = Session::new(W).unwrap();
-        s.run(CHUNKS[0]).unwrap();
-        s.run(CHUNKS[1]).unwrap();
-        let before = bits(&s);
-        s.fail_at.set(Some("restore"));
-        let e = s.run(r#"junk = 1; work(everywhere(), {hand="broad", pile=p, coverage=1}); error("no")"#).unwrap_err();
-        s.fail_at.set(None);
-        assert!(e.contains("no") && e.contains("couldn't put back"), "{e}");
-        assert!(s.stale, "a session that couldn't roll back went on");
-        s.run("assert(junk == nil)").unwrap();
-        assert!(before == bits(&s), "the canvas kept what the failed chunk painted");
-    }
-
-    #[test]
-    #[cfg(tube_box)]
-    fn terrain_refuses_huge_and_empty_areas_before_allocating() {
-        let mut s = Session::new(64).unwrap();
-        let h = "height=function(x, y) return 0 end";
-        let e = s.run(&format!("terrain{{area={{0, 0, 1e9, 1e9}}, {h}}}")).unwrap_err();
-        assert!(e.contains("at most 4001 x 4001"), "{e}");
-        let e = s.run(&format!("terrain{{area={{5, 5, 5, 50}}, {h}}}")).unwrap_err();
-        assert!(e.contains("at least one step"), "{e}");
-        s.run(&format!("t = terrain{{area={{0, 0, 20, 20}}, {h}}}")).unwrap();
-    }
-
-    #[test]
-    #[cfg(tube_box)]
-    fn a_live_chunk_over_the_limit_stops_and_keeps_nothing_but_a_replay_runs_it() {
-        let busy = "x = 1; for i = 1, 3000000 do end; x = 2";
-        let mut s = Session::new(64).unwrap();
-        s.chunk_limit = Duration::ZERO;
-        let e = s.run(busy).unwrap_err();
-        assert!(e.contains("was stopped"), "{e}");
-        assert!(s.log.is_empty());
-        assert!(s.lua.globals().get::<Value>("x").unwrap().is_nil());
-        s.set_replaying(true);
-        s.run(busy).unwrap();
-        assert_eq!(s.lua.globals().get::<i64>("x").unwrap(), 2);
-    }
-
-    #[test]
-    #[cfg(tube_box)]
-    fn rollback_restores_tables_and_upvalues_exactly() {
-        let mut s = Session::new(W).unwrap();
-        s.run(CHUNKS[0]).unwrap();
-        s.run(r##"things = {1, 2, {x = 3}}; local n = 0; function bump() n = n + 1; return n end; setmetatable(things, {tag = "a"})"##).unwrap();
-        // a failing chunk that edits old tables, an upvalue and a metatable
-        let e = s.run(r##"things[1] = 99; things[3].x = nil; things[4] = {}; bump(); getmetatable(things).tag = "b"; string.custom = 1; error("stop")"##).unwrap_err();
-        assert!(e.contains("stop"), "{e}");
-        s.run(r##"assert(things[1] == 1 and things[3].x == 3 and things[4] == nil); assert(bump() == 1); assert(getmetatable(things).tag == "a"); assert(string.custom == nil)"##).unwrap();
-        // and the live session still replays exactly
-        let mut b = Session::replay(W).unwrap();
-        for c in &s.log {
-            b.run(&c.src).unwrap();
-        }
-        assert_eq!(bits(&s), bits(&b));
-    }
-
-    /// A session painting with engine `v` from the default box.
-    #[cfg(tube_box)]
-    fn with_engine(v: u32) -> Session {
-        let mut tubes = Palette::tube_box();
-        tubes.engine = v;
-        Session::with_box(W, tubes).unwrap()
-    }
-
-    /// A fresh replay of a session's log, as a reopen or `easel run` makes it.
-    #[cfg(tube_box)]
-    fn replayed(s: &Session) -> Session {
-        let prog = s.program("t");
-        let mut b = Session::replay_with(W, box_for(Some(&prog)).expect("(EASEL_BOX set in the test's environment?)")).unwrap();
-        for c in parse_program(&prog) {
-            b.run(&c).unwrap();
-        }
-        b
-    }
-
-    /// Everything `easel run --state-digest` hashes (main.rs `state_digest_line`: the canvas
-    /// checkpoint, the held brushes, the studio's fields), unhashed, and the painting's globals.
-    #[cfg(tube_box)]
-    fn state(s: &Session) -> (Vec<u8>, String) {
-        let mut st = s.st.borrow_mut();
-        let mut canvas = Vec::new();
-        if let Some(c) = st.canvas.as_ref() {
-            c.write_state(&mut canvas, "").unwrap();
-        }
-        let brushes: Vec<String> = st.live_brushes().iter().map(|b| format!("{:?}", b.borrow())).collect();
-        let studio = format!("seed={} clock={:?} clock0={:?} chunk={} calls={} setup={:?} piles={:?} rng={:?}", st.seed, st.clock, st.clock0, st.chunk, st.calls, st.setup, st.hand.piles, st.rng);
-        drop(st);
-        (canvas, format!("{}\n{studio}\n{}", brushes.join("\n"), s.globals()))
-    }
-
-    /// A failed chunk can leave a table laid out differently (grown, or refilled by the
-    /// rollback) though its contents are back: under engines 1 and 2 `pairs` then walks it
-    /// in another order than a replay of the log does, so the session rebuilds from the log;
-    /// from engine 3 `pairs` walks every table in a fixed order and it needn't. Either way
-    /// the session goes on as its replay does.
-    #[test]
-    #[cfg(tube_box)]
-    fn after_a_failed_chunk_pairs_walks_tables_as_the_replay_does() {
-        for engine in [2, 3] {
-            let canon = canonical_tables(engine);
-            let order = "local o = {}; for k in pairs(t) do o[#o + 1] = k end; print(table.concat(o, ' '))";
-            let mut s = with_engine(engine);
-            let mut live = vec![s.run("t = {}; for i = 1, 30 do t['k' .. i] = i end").unwrap().out];
-            // a failure that touched no earlier table costs no rebuild
-            s.run("local u = {}; u.x = pencil(); error('stop')").unwrap_err();
-            assert!(!s.stale);
-            // Updating an existing array value restores both contents and next order;
-            // it must not pay for an unnecessary replay.
-            s.run("a = {1, 2, 3}").unwrap();
-            live.push(String::new());
-            s.run("a[2] = 99; error('stop')").unwrap_err();
-            assert!(!s.stale, "an exactly restored table should not rebuild");
-            assert_eq!(s.lua.globals().get::<Table>("a").unwrap().get::<i64>(2).unwrap(), 2);
-            // Sparse-array length is observable too, even if next order is unchanged: a
-            // changed table with holes rebuilds under every engine.
-            live.push(s.run("sparse = {}; sparse[2] = 2; sparse_length = #sparse").unwrap().out);
-            s.run("for i = 9, 13 do sparse[i] = i end; for i = 9, 13 do sparse[i] = nil end; sparse[2] = 99; error('stop')").unwrap_err();
-            assert!(s.stale, "engine {engine}: a changed sparse table must rebuild");
-            live.push(s.run("assert(#sparse == sparse_length)").unwrap().out);
-            // grows the table and empties it again: the same contents, a bigger table
-            s.run("for i = 1, 200 do t['x' .. i] = i end; for i = 1, 200 do t['x' .. i] = nil end; error('stop')").unwrap_err();
-            assert_eq!(s.stale, !canon, "engine {engine}: a grown and emptied table");
-            live.push(s.run(order).unwrap().out);
-            // leaves keys behind for the rollback to take out
-            s.run("for i = 1, 200 do t['y' .. i] = i end; error('stop')").unwrap_err();
-            assert_eq!(s.stale, !canon, "engine {engine}: keys left for the rollback");
-            live.push(s.run(order).unwrap().out);
-            let mut b = with_engine(engine);
-            b.set_replaying(true);
-            let replayed: Vec<String> = s.log.iter().map(|c| b.run(&c.src).unwrap().out).collect();
-            assert_eq!(live, replayed, "engine {engine}");
-        }
-    }
-
-    /// Engine 3: `#t` of a table with more than one border depends on its layout (array
-    /// size and length hint, ltable.c `luaH_getn`), which a failed chunk can move with
-    /// every entry, and the `next` order, put back: by adding keys and taking them out
-    /// again, or by `#t` itself. The session rebuilds, and goes on printing what a replay
-    /// of its log prints.
-    #[test]
-    #[cfg(tube_box)]
-    fn under_engine_3_a_failed_chunk_that_moved_a_border_rebuilds() {
-        for (setup, failed, after, want) in [
-            // grown into an array part and emptied again
-            ("t = {}; t[2] = 2; print(#t)", "t[1] = 1; t[3] = 3; t[1] = nil; t[3] = nil; error('stop')", "print(#t)", "0\n"),
-            // the same array part, another length hint
-            ("t = {1, nil, 3, 4}; print(#t)", "t[2] = 2; local n = #t; t[2] = nil; error('stop')", "print(#t)", "1\n"),
-        ] {
-            let mut s = with_engine(3);
-            let mut live = vec![s.run(setup).unwrap().out];
-            s.run(failed).unwrap_err();
-            assert!(s.stale, "{failed}: the border moved, so the session must rebuild");
-            live.push(s.run(after).unwrap().out);
-            assert_eq!(live[1], want, "{failed}");
-            let mut b = with_engine(3);
-            b.set_replaying(true);
-            let replayed: Vec<String> = s.log.iter().map(|c| b.run(&c.src).unwrap().out).collect();
-            assert_eq!(live, replayed, "{failed}");
-            // a failed chunk that leaves the layout alone still costs no rebuild
-            s.run("local n = t[2]; error('stop')").unwrap_err();
-            assert!(!s.stale, "{failed}: nothing moved");
-        }
-    }
-
-    /// Engine 3: a failed chunk that set 40 globals and changed tables of every kind
-    /// (strings, arrays, mixed, nested, object keys; grown, added to and emptied again,
-    /// keys left behind) is put back without a rebuild, and the session goes on exactly as
-    /// a fresh replay of its log: the same state digest, globals, and `pairs` order after.
-    #[test]
-    #[cfg(tube_box)]
-    fn under_engine_3_a_failed_chunk_needs_no_rebuild() {
-        let mut s = with_engine(3);
-        let mut live = Vec::new();
-        for c in [
-            CANVAS,
-            r#"words = {}; for i = 1, 30 do words['w' .. i] = i end
-               nums = {10, 20, 30}
-               mixed = {1, 2, x = 'a', [2.5] = 'f', [true] = 'b'}
-               nest = {a = {b = {c = 1}}, list = {{1}, {2}}}
-               objs = {}; objs[words] = 1; objs[nums] = 2
-               local n = 0; function bump() n = n + 1; return n end
-               b = brush("round", 4); b:load(pile{{"bone black", 1}}, 0.8); b:stroke({{200, 300}, {800, 320}})"#,
-        ] {
-            live.push(s.run(c).unwrap().out);
-        }
-        let failed = r#"for i = 1, 40 do _G['g' .. i] = {i} end
-            for i = 1, 200 do words['x' .. i] = i end; for i = 1, 200 do words['x' .. i] = nil end
-            for i = 1, 50 do words['y' .. i] = i end
-            nums[2] = 99; for i = 4, 100 do nums[i] = i end
-            mixed.y = 1; mixed[2.5] = nil; mixed[true] = nil; mixed[false] = 0
-            nest.a.b.c = 2; nest.a.b.d = {}; nest.list[3] = {3}; nest.list[1][2] = 'x'; nest.a = {}
-            objs[mixed] = 3; objs[words] = nil
-            bump(); b:stroke({{100, 100}, {900, 600}})
-            error('stop')"#;
-        let e = s.run(failed).unwrap_err();
-        assert!(e.contains("stop"), "{e}");
-        assert!(!s.stale, "engine 3 rebuilt after a failed chunk");
-        // what a later chunk sees, `pairs` order included, before and after adding keys
-        let walk = r#"local function keys(t, depth)
-                local o = {}
-                for k, v in pairs(t) do
-                    local kk = type(k) == 'table' and ('obj' .. tostring(objs[k] or '?')) or tostring(k)
-                    o[#o + 1] = (type(v) == 'table' and depth > 0) and (kk .. '{' .. keys(v, depth - 1) .. '}') or kk
-                end
-                return table.concat(o, ' ')
-            end
-            local g = {}; for k in pairs(_G) do g[#g + 1] = k end
-            local nx, k = {}, nil
-            repeat k = next(words, k); nx[#nx + 1] = tostring(k) until k == nil
-            print(table.concat(g, ' ')); print(table.concat(nx, ' '))
-            for _, name in ipairs{'words', 'nums', 'mixed', 'nest', 'objs'} do print(name, keys(_G[name], 3)) end
-            print(bump(), #nums, #words, g1)"#;
-        for c in [
-            walk,
-            "words.z = 1; words.a = 2; nums[4] = 40; mixed[0] = 'z'; nest.a.e = 1; objs[nest] = 4; for i = 1, 40 do _G['h' .. i] = i end",
-            walk,
-            "b:stroke({{150, 500}, {850, 450}}); wait(30)",
-        ] {
-            live.push(s.run(c).unwrap().out);
-        }
-        assert!(!s.stale);
-        let mut b = replayed(&s);
-        assert!(state(&s) == state(&b), "the session differs from a fresh replay of its log");
-        // and the replay printed the same (pairs order included)
-        let mut c = with_engine(3);
-        c.set_replaying(true);
-        let outs: Vec<String> = s.log.iter().map(|ch| c.run(&ch.src).unwrap().out).collect();
-        assert_eq!(live, outs);
-        // nothing of the failed chunk is left: bump's count, nums' length, no g1
-        assert!(live[2].ends_with("1\t3\t0\tnil\n"), "{}", live[2]);
-        // a later failure in the replayed session doesn't rebuild either
-        b.set_replaying(false);
-        b.run(failed).unwrap_err();
-        assert!(!b.stale);
-    }
-
-    /// Engines 1 and 2 keep Lua's own `pairs` order for tables keyed by values (it is what
-    /// their logs were painted with), and so the rebuild: a failed chunk that grew `_G` by 40
-    /// globals rebuilds from the log; one new global, which doesn't grow it, doesn't.
-    #[test]
-    #[cfg(tube_box)]
-    fn under_engine_2_a_failed_chunk_that_grew_a_table_rebuilds() {
-        let build = "t = {}; for i = 1, 30 do t['k' .. i * 7] = i end";
-        let order = "local o = {}; for k in pairs(t) do o[#o + 1] = k end; print(table.concat(o, ' '))";
-        // Lua's own order, in a plain state with the same hash seed
-        let raw = {
-            let (lua, state, _serials) = fixed_lua(StdLib::TABLE | StdLib::STRING).unwrap();
-            let o: String = lua.load(format!("{build}; local o = {{}}; for k in pairs(t) do o[#o + 1] = k end; return table.concat(o, ' ')")).eval().unwrap();
-            drop(lua);
-            unsafe { mlua::ffi::lua_close(state) };
-            o
-        };
-        for engine in [1, 2] {
-            let mut s = with_engine(engine);
-            s.run(build).unwrap();
-            assert_eq!(s.run(order).unwrap().out.trim_end(), raw, "engine {engine} walks in Lua's order");
-            s.run("g1 = 1; error('stop')").unwrap_err();
-            assert!(!s.stale, "engine {engine}: one new global");
-            let e = s.run("for i = 1, 40 do _G['g' .. i] = i end; error('stop')").unwrap_err();
-            assert!(e.contains("stop"), "{e}");
-            assert!(s.stale, "engine {engine}: 40 new globals left _G in another order, which only a rebuild puts right");
-            let live = s.run("local o = {}; for k in pairs(_G) do o[#o + 1] = k end; print(table.concat(o, ' '))").unwrap().out;
-            assert!(!s.stale, "the session rebuilt before that chunk");
-            let mut b = with_engine(engine);
-            b.set_replaying(true);
-            let outs: Vec<String> = s.log.iter().map(|c| b.run(&c.src).unwrap().out).collect();
-            assert_eq!(outs.last().unwrap(), &live, "engine {engine}");
-        }
-        // engine 3 walks the same table in its fixed order instead
-        let mut s = with_engine(3);
-        s.run(build).unwrap();
-        let mut want: Vec<String> = (1..=30).map(|i| format!("k{}", i * 7)).collect();
-        want.sort();
-        assert_eq!(s.run(order).unwrap().out.trim_end(), want.join(" "));
-    }
-
-    /// Real failed chunks, under engines 2 and 3: how long each took, whether the session
-    /// went stale, and how long it then took to be ready for the next chunk (the rebuild, if
-    /// stale). Not run by default; `EASEL_ROLLBACK_CASES` names a file of tab-separated lines
-    /// `<log> <chunks before the failure> <file holding the failed chunk>`, replayed at
-    /// `EASEL_ROLLBACK_WIDTH` (default 320) px. Each log replays once per engine, each failed
-    /// chunk run live at its place:
-    ///
-    ///   EASEL_ROLLBACK_CASES=cases.tsv cargo test -p easel --bin easel -- --ignored --nocapture real_failed_chunks
-    #[test]
-    #[ignore]
-    fn real_failed_chunks() {
-        let Ok(cases) = std::env::var("EASEL_ROLLBACK_CASES") else { return };
-        let width: usize = std::env::var("EASEL_ROLLBACK_WIDTH").ok().and_then(|w| w.parse().ok()).unwrap_or(320);
-        let mut logs: BTreeMap<String, Vec<(usize, String)>> = BTreeMap::new();
-        for line in std::fs::read_to_string(&cases).unwrap().lines().filter(|l| !l.trim().is_empty()) {
-            let f: Vec<&str> = line.split('\t').collect();
-            logs.entry(f[0].to_string()).or_default().push((f[1].parse().unwrap(), f[2].to_string()));
-        }
-        for (log, mut fails) in logs {
-            fails.sort();
-            let text = std::fs::read_to_string(&log).unwrap();
-            let chunks = parse_program(&text);
-            for engine in [2, 3] {
-                let mut tubes = box_for(Some(&text)).unwrap();
-                tubes.engine = engine;
-                let mut s = Session::with_box(width, tubes).unwrap();
-                let mut done = 0;
-                for (before, file) in &fails {
-                    s.set_replaying(true);
-                    for c in &chunks[done..*before] {
-                        s.run(c).unwrap();
-                    }
-                    done = *before;
-                    s.set_replaying(false);
-                    let failed = std::fs::read_to_string(file).unwrap();
-                    let t = Instant::now();
-                    let e = s.run(&failed).unwrap_err();
-                    let chunk = t.elapsed().as_secs_f64();
-                    let stale = s.stale;
-                    let t = Instant::now();
-                    if s.stale {
-                        s.rebuild().unwrap();
-                    }
-                    let ready = t.elapsed().as_secs_f64();
-                    let e1 = e.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-                    let name = file.rsplit('/').next().unwrap();
-                    println!("{name}\tafter {before}\tengine {engine}\tstale {stale}\tfailed chunk {chunk:.3} s\trecovery {:.3} s\trebuild {ready:.2} s\t{}", chunk + ready, &e1[..e1.len().min(60)]);
-                }
-            }
-        }
-    }
-
-    /// Engine 3's fixed order: booleans, numbers, strings (each ascending), then objects in
-    /// the order they were made; `next` the same. Lua's own `next` is handed out nowhere.
-    #[test]
-    #[cfg(tube_box)]
-    fn under_engine_3_every_table_walks_in_a_fixed_order() {
-        let mut s = with_engine(3);
-        let out = s.run(r#"local a, b = {}, {}
-            local t = {b = 1, a = 1, [3] = 1, [1] = 1, [true] = 1, [false] = 1, [2.5] = 1, [-1] = 1}
-            t[b] = 'b'; t[a] = 'a'
-            local o = {}
-            for k, v in pairs(t) do o[#o + 1] = type(k) == 'table' and v or tostring(k) end
-            local n, k = {}, nil
-            repeat k = next(t, k); if k ~= nil then n[#n + 1] = type(k) == 'table' and t[k] or tostring(k) end until k == nil
-            print(table.concat(o, ' ')); print(table.concat(n, ' '))
-            assert(pairs(1) == next)
-            for _, x in ipairs{{}, {1, 2}, {x = 1}} do assert(select(1, pairs(x)) ~= select(1, pairs(1))) end"#).unwrap().out;
-        assert_eq!(out, "false true -1 1 2.5 3 a b a b\nfalse true -1 1 2.5 3 a b a b\n");
-    }
-
-    /// The pencil's shared methods are out of a chunk's reach, so a failed chunk can't
-    /// take one away (nor add one a replay wouldn't have).
-    #[test]
-    #[cfg(tube_box)]
-    fn a_failed_chunk_cannot_change_pencil_methods() {
-        let mut s = Session::new(W).unwrap();
-        s.run("local p = pencil(); getmetatable(p).__index.line = nil; error('stop')").unwrap_err();
-        s.run("assert(type(pencil().line) == 'function')").unwrap();
-    }
-
-    /// Finalizers and weak tables act when the collector gets to them, which differs between
-    /// a live session (it holds a snapshot) and a replay: a painting can't use them.
-    #[test]
-    #[cfg(tube_box)]
-    fn finalizers_and_weak_tables_are_refused() {
-        let mut s = Session::new(W).unwrap();
-        for mt in ["{__gc = function() end}", "{__mode = 'v'}"] {
-            let e = s.run(&format!("w = setmetatable({{}}, {mt})")).unwrap_err();
-            assert!(e.contains("__gc and __mode"), "{e}");
-        }
-        // nor put in a metatable after it is set
-        s.run("mt = {}; w = setmetatable({}, mt)").unwrap();
-        let e = s.run("mt.__mode = 'k'").unwrap_err();
-        assert!(e.contains("__gc and __mode"), "{e}");
-        s.run("assert(getmetatable(w).__mode == nil)").unwrap();
-    }
-
-    /// A failed chunk takes back what it did to a brush and the clock too.
-    #[test]
-    #[cfg(tube_box)]
-    fn a_failed_chunk_leaves_brush_and_clock_alone() {
-        let mut s = Session::new(W).unwrap();
-        s.run(CHUNKS[0]).unwrap();
-        s.run(r#"b = brush("round", 4); b:load(pile{{"bone black", 1}}, 0.9); full0 = b:fullness()"#).unwrap();
-        let clock = s.st.borrow().clock;
-        let before = bits(&s);
-        let e = s.run("b:stroke({100, 300, 400, 320}); wait(600); error('stop')").unwrap_err();
-        assert!(e.contains("stop"), "{e}");
-        assert_eq!(before, bits(&s));
-        assert_eq!(clock, s.st.borrow().clock);
-        s.run("assert(b:fullness() == full0)").unwrap();
-    }
-
-    /// The order `pairs` and `next` walk a table keyed by tables, closures
-    /// and userdata in, as printed by a fresh session.
-    #[cfg(tube_box)]
-    fn object_key_order() -> String {
-        let mut s = Session::new(W).unwrap();
-        s.run(&CANVAS.replace("aspect=1.5", "aspect=1")).unwrap();
-        s.run("items = {}; for i = 1, 64 do items[{index = i}] = i end").unwrap();
-        // garbage and failed chunks in between must not matter
-        let _ = s.run("for i = 1, 500 do local _ = {i} end; items[{index = 0}] = 0; error('x')");
-        s.run(r#"fs = {}; for i = 1, 16 do fs[function() return i end] = i end
-                  ms = {}; for i = 1, 8 do ms[mask(function() return 1 end)] = i end
-                  mixed = {10, 20, x = 1, y = 2, [2.5] = 3, [true] = 4}; for i = 1, 20 do mixed[{i}] = -i end"#).unwrap();
-        s.run(r#"local o = {}
-                  for k, v in pairs(items) do o[#o + 1] = v end
-                  for k, v in pairs(fs) do o[#o + 1] = v end
-                  for k, v in pairs(ms) do o[#o + 1] = v end
-                  for k, v in pairs(mixed) do o[#o + 1] = tostring(v) end
-                  local k, v = next(items); o[#o + 1] = 'first ' .. v
-                  k, v = next(items, k); o[#o + 1] = 'second ' .. v
-                  local n = 0; for k in next, items do n = n + 1 end; o[#o + 1] = 'n ' .. n
-                  print(table.concat(o, ','))"#).unwrap();
-        let out = s.st.borrow().out.clone();
-        out
-    }
-
-    // tables keyed by objects walk in creation order, not address order
-    #[test]
-    #[cfg(tube_box)]
-    fn object_keys_walk_in_creation_order() {
-        let a = object_key_order();
-        // a different heap layout in the same process
-        let _pad: Vec<Session> = (0..3).map(|_| Session::new(W).unwrap()).collect();
-        let b = object_key_order();
-        assert_eq!(a, b);
-        let first: String = (1..=64).map(|i| format!("{i},")).collect();
-        assert!(a.starts_with(&first), "object keys in creation order: {a}");
-        assert!(a.contains("first 1,second 2,n 64"), "{a}");
-        // library functions have no serial: they go by name, after objects
-        let mut s = Session::replay(W).unwrap();
-        s.run("local t = {[math.sin] = 1, [math.cos] = 2, [string.rep] = 3, [{}] = 4, x = 5}; local o = {}; for k, v in pairs(t) do o[#o + 1] = v end; print(table.concat(o, ','))").unwrap();
-        assert_eq!(s.st.borrow().out.trim_end(), "5,4,2,1,3");
-    }
-
-    #[test]
-    #[cfg(tube_box)]
-    fn plain_tables_keep_lua_order() {
-        // under engines 1 and 2 tables without object keys walk in stock Lua's
-        // order (same seed), so their paintings replay as before (engine 3:
-        // `under_engine_3_every_table_walks_in_a_fixed_order`)
-        let build = "t = {}; for i = 1, 40 do t['k' .. i * 7919] = i end; for i = 1, 10 do t[i * 0.5] = -i end; t[true] = 0";
-        let (lua, state, _serials) = fixed_lua(StdLib::TABLE).unwrap();
-        let want: String = lua.load(format!("{build}; local o = {{}}; for k, v in next, t do o[#o + 1] = v end; return table.concat(o, ',')")).eval().unwrap();
-        drop(lua);
-        unsafe { mlua::ffi::lua_close(state) };
-        for engine in [1, 2] {
-            let mut s = with_engine(engine);
-            s.set_replaying(true);
-            s.run(build).unwrap();
-            s.run("local o = {}; for k, v in pairs(t) do o[#o + 1] = v end; print(table.concat(o, ','))").unwrap();
-            assert_eq!(s.st.borrow().out.trim_end(), want, "engine {engine}");
-            s.run("local o = {}; for k, v in next, t do o[#o + 1] = v end; print(table.concat(o, ','))").unwrap();
-            assert_eq!(s.st.borrow().out.trim_end(), want, "engine {engine}");
-        }
-        // __pairs is honored
-        let mut s = Session::replay(W).unwrap();
-        s.run("local p = setmetatable({}, {__pairs = function(t) return function(_, k) if not k then return 1, 'one' end end, t, nil end}); for k, v in pairs(p) do assert(k == 1 and v == 'one') end").unwrap();
-    }
-
-    // a gmatch iterator kept across chunks does not advance during a
-    // failed chunk
-    #[test]
-    #[cfg(tube_box)]
-    fn gmatch_iterators_roll_back() {
-        let mut s = Session::new(W).unwrap();
-        s.run(CANVAS).unwrap();
-        s.run(r#"it = string.gmatch("red green blue", "%a+")"#).unwrap();
-        let e = s.run(r#"assert(it() == "red"); error("stop")"#).unwrap_err();
-        assert!(e.contains("stop"), "{e}");
-        s.run(r#"assert(it() == "red")"#).unwrap();
-        s.run(r#"assert(it() == "green")"#).unwrap();
-        let _ = s.run("it(); error('stop')").unwrap_err();
-        s.run(r#"w = it(); assert(w == "blue", w)"#).unwrap();
-        // a method-call iterator and a word-pair iterator too
-        s.run(r#"it2 = ("a=1, b=2"):gmatch("(%w+)=(%w+)")"#).unwrap();
-        let _ = s.run("it2(); error('stop')").unwrap_err();
-        s.run(r#"local k, v = it2(); assert(k == "a" and v == "1")"#).unwrap();
-    }
-
-    // the rollback-aware gmatch matches Lua's own, match for match
-    #[test]
-    #[cfg(tube_box)]
-    fn gmatch_matches_lua() {
-        let cases: &[(&str, &str, Option<i64>)] = &[
-            ("red green blue", "%a+", None),
-            ("hello world from Lua", "%a+", None),
-            ("key=val, k2=v2", "(%w+)=(%w+)", None),
-            ("abc", "", None),
-            ("abc", "x*", None),
-            ("a,b,,c,", "([^,]*)", None),
-            ("one two three", "()%a+()", None),
-            ("^a^b", "^%a", None),
-            ("aaa", "a-", None),
-            ("abcabc", "b", Some(3)),
-            ("abcabc", "%a", Some(-2)),
-            ("abc", "", Some(10)),
-            ("abc", "%a", Some(0)),
-            ("THE (quick) fox", "%((%a+)%)", None),
-            ("x = 1.5e3", "%d+%.?%d*", None),
-        ];
-        let lua = mlua::Lua::new();
-        let mut s = Session::replay(W).unwrap();
-        let prog = |s: &str, p: &str, i: Option<i64>| {
-            let init = i.map(|i| format!(", {i}")).unwrap_or_default();
-            format!("local o = {{}}; for a, b in string.gmatch({s:?}, {p:?}{init}) do o[#o + 1] = tostring(a) .. '|' .. tostring(b) end; return table.concat(o, ' ')")
-        };
-        for (str_, pat, init) in cases {
-            let want: String = lua.load(prog(str_, pat, *init)).eval().unwrap();
-            s.run(&format!("print((function() {} end)())", prog(str_, pat, *init))).unwrap();
-            let got = s.st.borrow().out.trim_end_matches('\n').to_string();
-            assert_eq!(got, want, "gmatch({str_:?}, {pat:?}, {init:?})");
-        }
-        // errors are Lua's too
-        let e = s.run("for _ in string.gmatch('abc', '%') do end").unwrap_err();
-        assert!(e.contains("malformed pattern"), "{e}");
-    }
-
-    /// A painting from the default box names no box in its log: its log is
-    /// what round 19 wrote, and the engine it is painted with.
-    #[test]
-    #[cfg(tube_box)]
-    fn a_default_log_names_no_box() {
-        let mut a = Session::new(W).unwrap();
-        a.run(CANVAS).unwrap();
-        let prog = a.program("t");
-        let want = format!("-- easel session \"t\": a painting replayed chunk by chunk.\n-- Each \"--@ chunk\" line starts one chunk as it was run at the easel.\n--@ engine 5\n\n--@ chunk 1\n{CANVAS}\n");
-        assert_eq!(prog, want);
-        assert_eq!(logged_box(&prog).unwrap(), None);
-        assert_eq!(box_for(Some(&prog)).map(|b| b.name), Ok(paint::palette::DEFAULT_BOX), "(EASEL_BOX set in the test's environment?)");
-    }
-
-    /// Only the log's head names its box: a `--@ box` line inside a chunk is
-    /// the chunk's; two in the head, or one without a name, are errors.
-    #[test]
-    fn the_box_line_is_read_from_the_head_only() {
-        let head = "-- easel session \"t\": a painting replayed chunk by chunk.\n-- Each \"--@ chunk\" line starts one chunk as it was run at the easel.\n";
-        assert_eq!(logged_box(&format!("{head}--@ box inness\n\n--@ chunk 1\nx = 1\n")).unwrap().as_deref(), Some("inness"));
-        assert_eq!(logged_box(&format!("{head}\n--@ chunk 1\n--@ box inness\nx = 1\n")).unwrap(), None);
-        assert!(logged_box(&format!("{head}--@ box inness\n--@ box sargent\n--@ chunk 1\n")).unwrap_err().contains("twice"));
-        assert!(logged_box(&format!("{head}--@ box\n--@ chunk 1\n")).unwrap_err().contains("names no box"));
-        assert!(logged_box(&format!("{head}--@ boxes x\n--@ chunk 1\n")).unwrap_err().contains("names no box"));
-        // the boxes of this build: the default box, or a painter's build's own
-        let own = paint::palette::default_box().unwrap_or_else(|| Palette::box_names()[0]);
-        assert!(find_box("no such box").unwrap_err().contains(&format!("its boxes: {own:?}")));
-    }
-
-    /// A painting from another box names it in its log; the log replays with
-    /// that box to the same canvas, bit for bit, and the default box can't
-    /// paint it.
-    #[cfg(tube_box)]
-    #[cfg(feature = "box-sargent")]
-    #[test]
-    fn a_box_is_named_in_the_log_and_replays_with_it() {
-        let chunks = [CANVAS, r#"b = brush("round", 4); b:load(pile{{"rose madder", 1}, {"ultramarine blue", 2}, {"zinc white", 1}}, 0.9)
-           for i = 1, 5 do b:stroke({{100 + i*60, 500}, {130 + i*60, 420}}) end
-           work(ellipse(500, 300, 200, 100), {hand="glaze", pile=pile{{"viridian", 1}, medium=0.6}})"#];
-        let mut a = Session::with_box(W, find_box("sargent").unwrap()).unwrap();
-        for c in chunks {
-            a.run(c).unwrap();
-        }
-        let prog = a.program("t");
-        assert_eq!(prog.lines().nth(2), Some("--@ box sargent"), "{prog}");
-        assert_eq!(logged_box(&prog).unwrap().as_deref(), Some("sargent"));
-        let mut b = Session::replay_with(W, box_for(Some(&prog)).expect("(EASEL_BOX set in the test's environment?)")).unwrap();
-        for c in parse_program(&prog) {
-            b.run(&c).unwrap();
-        }
-        assert_eq!(bits(&a), bits(&b));
-        assert_eq!(b.program("t"), prog);
-        let mut d = Session::replay(W).unwrap();
-        d.run(CANVAS).unwrap();
-        let e = d.run(chunks[1]).unwrap_err();
-        assert!(e.contains("no tube \"rose madder\""), "{e}");
-    }
-
-    /// The guide's tube table is the every box's (atelier change, 2026-10-07: the painters' box; the runner writes a
-    /// studio's copy with its own box's table, runner/studio.py).
-    #[test]
-    #[cfg(feature = "box-every")]
-    fn the_guide_shows_the_painters_box() {
-        let guide = include_str!("../../../notes/easel_guide.md");
-        let table: String = guide.lines().skip_while(|l| !l.starts_with("| tube | pigment |")).take_while(|l| l.starts_with('|')).map(|l| format!("{l}\n")).collect();
-        assert_eq!(table, Palette::named_box("every").unwrap().table());
-    }
-
-    /// A painting at 4800 px names its width; a log without the line was
-    /// painted at 2400 and replays at 2400 (atelier change, 2026-10-06).
-    #[test]
-    #[cfg(tube_box)]
-    fn the_log_names_its_width() {
-        let mut a = Session::new(4800).unwrap();
-        a.run(CANVAS).unwrap();
-        let prog = a.program("t");
-        assert!(prog.contains(&format!("{WIDTH_MARK} 4800\n")), "{prog}");
-        assert_eq!(logged_width(&prog), Ok(4800));
-        assert_eq!(logged_width(&prog.replace(&format!("{WIDTH_MARK} 4800\n"), "")), Ok(LEGACY_WIDTH));
-        let mut b = Session::new(LEGACY_WIDTH).unwrap();
-        b.run(CANVAS).unwrap();
-        assert!(!b.program("t").contains(WIDTH_MARK));
-        assert_eq!(chunk_limit_for(4800), CHUNK_LIMIT * 4);
-        assert_eq!(chunk_limit_for(LEGACY_WIDTH), CHUNK_LIMIT);
-        for bad in ["--@ width 1000", "--@ width x", "--@ width 4800\n--@ width 4800"] {
-            assert!(logged_width(&format!("{bad}\n\n--@ chunk 1\n")).is_err(), "{bad}");
-        }
-    }
-
-    // a view's form counts visible bodies only, not proxies
-    #[test]
-    #[cfg(tube_box)]
-    fn view_form_counts_visible_parts_only() {
-        let mut s = Session::replay(W).unwrap();
-        s.run(CANVAS).unwrap();
-        s.run(r#"local w = world{horizon=300}
-                  local s = w:spot_at(0, 10)
-                  w = w:proxy(s, body.ellipsoid(s:p(0, 1, 0), s:size(1, 1, 1)))
-                  local v = w:view()
-                  assert(v.form.parts == 0, 'proxy-only: ' .. v.form.parts)
-                  assert(v:part(1) == 0)"#).unwrap();
-        s.run(r#"local w = world{horizon=300}
-                  local a, b = w:spot_at(-3, 12), w:spot_at(3, 12)
-                  w = w:place(a, body.ellipsoid(a:p(0, 1, 0), a:size(1, 1, 1)))
-                  w = w:proxy(a, body.ellipsoid(a:p(0, 5, 0), a:size(1, 1, 1)))
-                  w = w:place(b, body.ellipsoid(b:p(0, 1, 0), b:size(1, 1, 1)))
-                  local v = w:view()
-                  assert(v.form.parts == 2, 'mixed: ' .. v.form.parts)
-                  assert(v:part(1) == 1 and v:part(2) == 0 and v:part(3) == 2)"#).unwrap();
-    }
-
-    /// A new painting's log names the engine it is painted with; a log
-    /// without the line was painted with engine 1, and replays and goes on
-    /// as engine 1 (its log stays without the line).
-    #[test]
-    #[cfg(tube_box)]
-    fn the_log_names_its_engine() {
-        let mut a = Session::new(W).unwrap();
-        a.run(CANVAS).unwrap();
-        let line = format!("{ENGINE_MARK} {}\n", paint::ENGINE);
-        let prog = a.program("t");
-        assert!(prog.contains(&format!("{line}\n{MARK} 1\n")), "{prog}");
-        assert_eq!(logged_engine(&prog), Ok(paint::ENGINE));
-        let old = prog.replace(&line, "");
-        let tubes = box_for(Some(&old)).expect("(EASEL_BOX set in the test's environment?)");
-        let mut b = Session::with_box(W, tubes).unwrap();
-        for c in parse_program(&old) {
-            b.run(&c).unwrap();
-        }
-        assert_eq!(b.canvas().unwrap().engine(), 1);
-        assert_eq!(b.program("t"), old);
-        for bad in ["--@ engine 0", "--@ engine 99", "--@ engine two", "--@ engine 1\n--@ engine 1"] {
-            assert!(logged_engine(&format!("{bad}\n{MARK} 1\n")).is_err(), "{bad}");
-        }
-    }
-
     /// Paintings from before the engine version was recorded (no `--@ engine`
     /// line) replay as engine 1, bit for bit as they did (recorded at 08f6324,
     /// before engine 2, at a small width to keep the test short): two
@@ -1983,7 +1625,6 @@ mod tests {
     // of these two logs, at 128 to 160 px; notes/speed/SKIPPED.md.
     #[test]
     #[ignore = "replays whole paintings: never run"]
-    #[cfg(feature = "replay")]
     fn logs_without_an_engine_line_replay_as_before() {
         for (name, want) in [("studio_6399ad", "4f3abae7eb080221"), ("studio_db6324", "009ec933d082a252")] {
             let (s, _) = replay_fixture(&format!("engine1/{name}"));
@@ -1991,212 +1632,172 @@ mod tests {
         }
     }
 
-    /// The knife lays paint from its bead and scrapes wet paint back onto it.
-    #[test]
-    #[cfg(tube_box)]
-    fn the_knife_lays_and_scrapes() {
-        let mut s = Session::new(W).unwrap();
-        s.run(CANVAS).unwrap();
-        let bare = bits(&s);
-        s.run(r#"k = knife{width=30}; k:load(pile{{"bone black", 1}}, 0.5); full0 = k:fullness()
-                  k:lay({{200, 300}, {600, 300}}, {pressure=0.4})
-                  assert(k:fullness() < full0, "laying takes paint off the blade")"#).unwrap();
-        assert_ne!(bare, bits(&s), "the knife laid paint");
-        s.run(r#"k:wipe(); assert(k:fullness() == 0)
-                  k:scrape({{200, 300}, {600, 300}})
-                  assert(k:fullness() > 0, "scraping takes wet paint onto the blade")"#).unwrap();
-        let e = s.run("knife{width=1}").unwrap_err();
-        assert!(e.contains("2 to 200"), "{e}");
-    }
-
-    #[test]
-    #[cfg(tube_box)]
-    fn knife_rejects_invalid_loads_and_paths_without_changing_state() {
-        let mut s = Session::new(W).unwrap();
-        s.run(CANVAS).unwrap();
-        s.run(r#"k = knife{width=30}; p = pile{{"bone black", 1}}; k:load(p, 0.5)"#).unwrap();
-        for call in ["k:load(p, 3.4e38)", "k:lay({{100, 300}, {0/0, 300}})", "k:scrape({{100, 300}, {1e9, 300}})", "k:lay({{100, 300}}, {angle=math.huge})", "local pts = {}; for i = 1, 24 do pts[i] = {i % 2 == 0 and 20000 or -20000, 300} end; k:lay(pts)"] {
-            let before = bits(&s);
-            let e = s.run(call).unwrap_err();
-            assert!(e.contains("k:"), "{call}: {e}");
-            assert_eq!(before, bits(&s), "{call}");
-        }
-    }
-
-    /// A failed chunk leaves a knife as it was, as it leaves a brush.
-    #[test]
-    #[cfg(tube_box)]
-    fn a_failed_chunk_leaves_the_knife_alone() {
-        let mut s = Session::new(W).unwrap();
-        s.run(CANVAS).unwrap();
-        s.run(r#"k = knife{width=30}; k:load(pile{{"bone black", 1}}, 0.5); full0 = k:fullness()"#).unwrap();
-        let before = bits(&s);
-        let e = s.run("k:lay({{200, 300}, {600, 300}}); error('stop')").unwrap_err();
-        assert!(e.contains("stop"), "{e}");
-        assert_eq!(before, bits(&s));
-        s.run("assert(k:fullness() == full0)").unwrap();
-    }
-
-    /// A double-loaded, streaky pass paints something else than the plain
-    /// pass, and the same again in a second session; a part-loaded brush too.
-    #[test]
-    #[cfg(tube_box)]
-    fn double_loads_and_streaks_paint_and_replay() {
-        let paint = |opts: &str| {
-            let mut s = Session::new(W).unwrap();
-            s.run(CANVAS).unwrap();
-            s.run(&format!(
-                r#"p = pile{{{{"lead white", 3}}, {{"cobalt blue", 1}}}}; q = pile{{{{"vermilion", 1}}}}
-                   work(rect(100, 100, 600, 300), {{pile=p{opts}}})
-                   b = brush("flat", 12); b:load(p, 0.8); b:load(q, 0.5, {{side=1, share=0.4, streak=0.5}}); b:stroke({{{{150, 500}}, {{700, 500}}}})"#
-            ))
-            .unwrap();
-            bits(&s)
-        };
-        let double = paint(", streak=0.8, second={pile=q, load=0.4, side=1, share=0.5}");
-        assert_eq!(double, paint(", streak=0.8, second={pile=q, load=0.4, side=1, share=0.5}"));
-        assert_ne!(double, paint(""));
-        let mut s = Session::new(W).unwrap();
-        s.run(CANVAS).unwrap();
-        let e = s.run(r#"b = brush("flat", 12); b:load(pile{{"vermilion", 1}}, 0.5, {side=2})"#).unwrap_err();
-        assert!(e.contains("side is -1..1"), "{e}");
-        let e = s.run(r#"work(everywhere(), {pile=pile{{"vermilion", 1}}, second={load=0.4}})"#).unwrap_err();
-        assert!(e.contains("work second"), "{e}");
-    }
-
-    /// A sketch's log says it is one, so it replays at its width under any
-    /// file name; a painting's log doesn't.
-    /// The scratch canvas is set up with the painting's `canvas{...}` as the easel wrote it
-    /// back (`Studio::canvas_src`): run in a fresh session it makes the same canvas, every
-    /// option kept (a two-layer ground with texture and absorbent, and a raw canvas).
-    #[test]
-    #[cfg(tube_box)]
-    fn a_canvas_written_back_sets_up_the_same_canvas() {
-        for call in [
-            r#"canvas{size=320, aspect=1.25, linen={14, 17}, seed=9, ground={{pile={{"lead white", 3}, {"yellow ochre", 0.5}}, um=90, apply="brush"}, {pile={{"lead white", 1}}, um=40.5, apply="knife", texture=0.7, absorbent=0.6}}}"#,
-            r#"canvas{size=300, aspect=1, linen=20, seed=4, raw="cotton duck"}"#,
-        ] {
-            let mut a = Session::new(160).unwrap();
-            a.run(call).unwrap();
-            let src = a.st.borrow().canvas_src.clone().expect("canvas{} writes itself back");
-            let mut b = Session::new(160).unwrap();
-            b.run(&src).unwrap_or_else(|e| panic!("{src}: {e}"));
-            let (ca, cb) = (a.canvas().unwrap(), b.canvas().unwrap());
-            let bits = |c: &Canvas| c.seen().iter().flat_map(|p| p.map(f32::to_bits)).collect::<Vec<_>>();
-            assert!(bits(&ca) == bits(&cb), "{call}\nwritten back as {src}: another canvas");
-            assert_eq!(a.st.borrow().setup, b.st.borrow().setup, "{src}");
-        }
-    }
-
-    #[test]
-    #[cfg(tube_box)]
-    fn a_sketch_s_log_says_so() {
-        let mut a = Session::new(SKETCH_WIDTH).unwrap();
-        a.run(CANVAS).unwrap();
-        let prog = a.program("sketch-1");
-        assert!(prog.contains(&format!("\n{SKETCH_MARK}\n\n{MARK} 1\n")), "{prog}");
-        assert!(logged_sketch(&prog));
-        let mut b = Session::new(W).unwrap();
-        b.run(&format!("{CANVAS}\n-- {SKETCH_MARK} (in a chunk it is a comment)")).unwrap();
-        assert!(!logged_sketch(&b.program("sketchbook")));
-    }
-
-    /// What only engine 4 models is refused in a painting painted with an
-    /// older engine, where it would do nothing.
-    #[test]
-    #[cfg(tube_box)]
-    fn an_older_engine_s_painting_refuses_turps_and_absorbent_grounds() {
-        let old = || {
-            let mut tubes = Palette::tube_box();
-            tubes.engine = 2;
-            Session::with_box(W, tubes).unwrap()
-        };
-        let mut s = old();
-        let e = s.run(&CANVAS.replace(r#"apply="brush"}"#, r#"apply="brush", absorbent=true}"#)).unwrap_err();
-        assert!(e.contains("absorbent= needs engine 4"), "{e}");
-        s.run(CANVAS).unwrap();
-        let e = s.run(r#"pile{{"lead white", 1}, turps=0.5}"#).unwrap_err();
-        assert!(e.contains("turps= needs engine 4"), "{e}");
-        // (nor has it the knife: its globals are the ones it was painted with)
-        s.run("assert(knife == nil)").unwrap();
-        let mut s = Session::new(W).unwrap();
-        s.run(&CANVAS.replace(r#"apply="brush"}"#, r#"apply="brush", absorbent=true}"#)).unwrap();
-        s.run(r#"pile{{"lead white", 1}, turps=0.5}; pile{{"lead white", 1}, blot=0.3, oil="poppy"}; pile{{"lead white", 1}, thinner=0.5}"#).unwrap();
-    }
-
-    /// A mix's printed recipe gives each heap its share, whatever its own
-    /// recipe sums to, and p:add counts in the units that recipe prints.
-    #[test]
-    #[cfg(tube_box)]
-    fn a_mix_prints_its_heaps_in_their_shares_and_adds_in_those_units() {
-        let mut s = Session::new(W).unwrap();
-        s.run(CANVAS).unwrap();
-        s.run(r#"local a = pile{{"lead white", 3}, {"cobalt blue", 1}}; local b = pile{{"vermilion", 1}}
-                 m = mix{{a, 1}, {b, 1}}
-                 local w = {}; for _, p in ipairs(m:parts()) do w[p[1]] = p[2] end
-                 assert(math.abs(w["vermilion"] - 1) < 1e-5 and math.abs(w["lead white"] - 0.75) < 1e-5, "half of the mix is vermilion")
-                 m2 = m:add{{"vermilion", 2}}
-                 local v = {}; for _, p in ipairs(m2:parts()) do v[p[1]] = p[2] end
-                 assert(math.abs(v["vermilion"] - 3) < 1e-5, "two parts more in the printed units")"#).unwrap();
-    }
-
-    /// pile{oil=} grinds the paint in that oil: its drying rate against
-    /// linseed's (paint's oil_rate_scales_drying has what the rate does).
-    #[test]
-    #[cfg(tube_box)]
-    fn a_pile_s_oil_sets_its_drying_rate() {
-        let mut s = Session::new(W).unwrap();
-        s.run(CANVAS).unwrap();
-        s.run(r#"pl = pile{{"lead white", 1}}; pli = pile{{"lead white", 1}, oil="linseed"}
-                 pw = pile{{"lead white", 1}, oil="walnut"}; pp = pile{{"lead white", 1}, oil="poppy"}"#).unwrap();
-        let rate = |n: &str| match &s.globals[n].0 {
-            Value::UserData(u) => u.borrow::<api::PileU>().unwrap().mix.oil_rate,
-            o => panic!("{n} is {o:?}"),
-        };
-        assert_eq!([rate("pl"), rate("pli"), rate("pw"), rate("pp")], [1.0, 1.0, 0.8, 0.6]);
-        let e = s.run(r#"pile{{"lead white", 1}, oil="olive"}"#).unwrap_err();
-        assert!(e.contains("linseed"), "{e}");
-    }
-
-    /// A gesture's points are checked before its curve is sampled (a point
-    /// that is nowhere would be sampled without end), and its pressure keeps
-    /// a press that falls between its evenly spaced knots.
-    #[test]
-    #[cfg(tube_box)]
-    fn a_gesture_checks_its_points_and_keeps_a_press() {
-        let mut s = Session::new(W).unwrap();
-        s.run(CANVAS).unwrap();
-        s.run(r#"b = brush("round", 6); b:load(pile{{"bone black", 1}}, 0.9); full0 = b:fullness()"#).unwrap();
-        for bad in ["{{100, 300}, {math.huge, 300}}", "{{100, 300}, {0/0, 300}}", "{{100, 300}, {1e9, 300}}"] {
-            let e = s.run(&format!("b:gesture({bad})")).unwrap_err();
-            assert!(e.contains("not on or near the canvas"), "{bad}: {e}");
-        }
-        let bare = bits(&s);
-        // one pressed point among 33, the others lifted: it paints
-        s.run(r#"local pts = {}; for i = 0, 32 do pts[#pts + 1] = {100 + 20 * i, 300, i == 1 and 1 or 0} end
-                  b:gesture(pts, {ramps={0, 0}})
-                  assert(b:fullness() < full0, "the pressed point laid paint")"#).unwrap();
-        assert_ne!(bare, bits(&s));
-    }
-
-    /// An engine-2 painting replays as engine 2, bit for bit as it did before
+    /// An engine-2 painting replays as engine 2, within image tolerance as it did before
     /// engine 3 (recorded at 7b80cb0, round 23): a test sheet of lead white
     /// and bone black laid at different times over five days, lifted at
     /// every stage of drying and painted across, with waits of hours and
     /// days. Its log goes on naming engine 2.
     #[test]
-    #[cfg(feature = "replay")]
     fn engine_2_logs_replay_as_before() {
         let (s, text) = replay_fixture("engine2/drying_sheet");
         assert_eq!(s.canvas().unwrap().engine(), 2);
         assert_eq!(s.program("painting"), text);
-        let expected = if cfg!(all(target_os = "linux", target_arch = "x86_64")) { "137bcdd02d9ccf64" } else { "2d2bc0a5b6922d4a" };
-        assert_eq!(canvas_hash(&s), expected, "the engine-2 drying sheet no longer replays as it did");
+        for mode in ["normal", "gallery", "relief"] {
+            let view = crate::look::View::parse(&["--mode".into(), mode.into(), "--size".into(), "320".into()]).unwrap();
+            let (_, _, png) = crate::look::render(&s.canvas().unwrap(), &view).unwrap();
+            let expected = image::open(format!("{}/tests/engine2/drying_sheet_{mode}.png", env!("CARGO_MANIFEST_DIR"))).unwrap().to_rgba8();
+            image_tolerance::assert_close(&image::load_from_memory(&png).unwrap().to_rgba8(), &expected);
+        }
+    }
+
+    /// A gesture keeps the pressure its points ask for up to its last point
+    /// (engine 8): a limb drawn to where it forks keeps its width there, and
+    /// meets the forks drawn from it. Before engine 8 the last 5% of every
+    /// gesture lifted off, drawing the limb down to a dotted point short of
+    /// the fork.
+    #[test]
+    fn a_gesture_keeps_its_width_to_its_last_point() {
+        let text = "--@ engine 8\n";
+        let mut s = Session::replay_with(2400, box_for(Some(text)).unwrap()).unwrap();
+        s.run(r#"canvas{size=300, aspect=4, linen=16, seed=3, ground={{pile={{"lead white", 4}, {"yellow ochre", 0.3}}, um=80, apply="knife"}}}"#).unwrap();
+        s.run(r#"local b = brush{kind="round", width=1.6, point=1, stiffness=0.5}
+            b:load(pile{{"bone black", 1}, {"raw umber", 1}}, 0.6)
+            b:gesture({{500, 220, 0.8}, {500, 150, 0.8}, {500, 80, 0.8}})"#).unwrap();
+        let c = s.canvas().unwrap();
+        let across = |y: f32| (-20..=20).map(|k| c.wet_um(500.0 + k as f32 * 0.1, y)).fold(0.0f32, f32::max);
+        let (body, end) = (across(90.0), across(80.5));
+        assert!(end >= 0.5 * body, "0.5 units before its end the gesture lays {end} µm, against {body} µm 10 units before it");
+    }
+
+    /// A new painting's blender feathers (`paint::Canvas::with_blend_feather`)
+    /// and its brushes skim (`paint::Canvas::with_brush_skim`), and its log's
+    /// head says so; a replay of that log and a save of it do too, and a log
+    /// without the lines (every painting before them) does neither.
+    /// Engines 7 and 8 have them.
+    #[test]
+    fn new_paintings_record_the_blend_feather_and_brush_skim_and_older_logs_replay_without_them() {
+        let canvas = "canvas{size=440, aspect=1.25, linen=15, seed=7, ground={{pile={{\"lead white\", 3}, {\"yellow ochre\", 1}}, um=120, apply=\"knife\"}}}";
+        let mut live = Session::with_box(240, box_for(None).unwrap()).unwrap();
+        live.run(canvas).unwrap();
+        let c = live.canvas().unwrap();
+        assert!(c.blend_feather() && c.brush_skim());
+        let text = live.program("p");
+        for mark in [BLEND_FEATHER_MARK, BRUSH_SKIM_MARK] {
+            assert!(text.contains(&format!("\n{mark}\n")), "{text}");
+        }
+        let mut saved = Vec::new();
+        live.canvas().unwrap().write_state(&mut saved, "").unwrap();
+        let (restored, _) = Canvas::read_state(&mut &saved[..]).unwrap();
+        assert!(restored.blend_feather() && restored.brush_skim());
+        for engine in [paint::engine7::ENGINE, paint::REACH_END] {
+            for (feather, skim) in [(false, false), (false, true), (true, false), (true, true)] {
+                let mut log = text.replace("--@ engine 8", &format!("--@ engine {engine}"));
+                for (on, mark) in [(feather, BLEND_FEATHER_MARK), (skim, BRUSH_SKIM_MARK)] {
+                    if !on {
+                        log = log.replace(&format!("{mark}\n"), "");
+                    }
+                }
+                let mut replay = Session::replay_with(240, box_for(Some(&log)).unwrap()).unwrap();
+                for chunk in parse_program(&log) {
+                    replay.run(&chunk).unwrap();
+                }
+                let c = replay.canvas().unwrap();
+                assert_eq!((c.blend_feather(), c.brush_skim()), (feather, skim));
+                assert_eq!(replay.program("p"), log);
+                let mut saved = Vec::new();
+                c.write_state(&mut saved, "").unwrap();
+                let (restored, _) = Canvas::read_state(&mut &saved[..]).unwrap();
+                assert_eq!(restored.engine(), engine);
+                assert_eq!((restored.blend_feather(), restored.brush_skim()), (feather, skim));
+                assert!(restored.knife_skim());
+            }
+        }
+        assert!(box_for(Some(&text.replace("--@ engine 8", "--@ engine 5"))).is_err());
+    }
+
+    /// A new painting's knife skims (`paint::Canvas::with_knife_skim`) and
+    /// its log's head says so; a replay of that log and a save of it skim
+    /// too, and a log without the line (every painting before it) doesn't.
+    /// Engines 7 and 8 can skim.
+    #[test]
+    fn new_paintings_record_the_knife_skim_and_older_logs_replay_without_it() {
+        let canvas = "canvas{size=440, aspect=1.25, linen=15, seed=7, ground={{pile={{\"lead white\", 3}, {\"yellow ochre\", 1}}, um=120, apply=\"knife\"}}}";
+        let mut live = Session::with_box(240, box_for(None).unwrap()).unwrap();
+        live.run(canvas).unwrap();
+        assert!(live.canvas().unwrap().knife_skim());
+        let text = live.program("p");
+        assert!(text.contains(&format!("\n{KNIFE_SKIM_MARK}\n")), "{text}");
+        assert!(text.contains("--@ engine 8\n"), "{text}");
+        let mut saved = Vec::new();
+        live.canvas().unwrap().write_state(&mut saved, "").unwrap();
+        let restored = Canvas::read_state(&mut &saved[..]).unwrap().0;
+        assert!(restored.knife_skim());
+        assert_eq!(restored.engine(), paint::REACH_END);
+        for (log, skims) in [
+            (text.clone(), true),
+            (text.replace(&format!("{KNIFE_SKIM_MARK}\n"), ""), false),
+            (text.replace("--@ engine 8", "--@ engine 7"), true),
+            (text.replace("--@ engine 8", "--@ engine 7").replace(&format!("{KNIFE_SKIM_MARK}\n"), ""), false),
+        ] {
+            let mut replay = Session::replay_with(240, box_for(Some(&log)).unwrap()).unwrap();
+            for chunk in parse_program(&log) {
+                replay.run(&chunk).unwrap();
+            }
+            assert_eq!(replay.canvas().unwrap().knife_skim(), skims);
+            assert_eq!(replay.program("p"), log);
+            let mut saved = Vec::new();
+            replay.canvas().unwrap().write_state(&mut saved, "").unwrap();
+            let restored = Canvas::read_state(&mut &saved[..]).unwrap().0;
+            assert_eq!(restored.engine(), logged_engine(&log).unwrap());
+            assert_eq!(restored.knife_skim(), skims);
+        }
+        assert!(box_for(Some(&text.replace("--@ engine 8", "--@ engine 5"))).is_err());
+    }
+
+    /// A new painting's rag keeps what it lifts and stays inside a mask
+    /// (`paint::Canvas::with_rag_lift`) and its log's head says so; a replay
+    /// of that log and a save of it do too, and a log without the line (every
+    /// painting before it) doesn't. Engines 7 and 8 have it.
+    #[test]
+    fn new_paintings_record_the_rag_lift_and_older_logs_replay_without_it() {
+        let canvas = "canvas{size=440, aspect=1.25, linen=15, seed=7, ground={{pile={{\"lead white\", 3}, {\"yellow ochre\", 1}}, um=120, apply=\"knife\"}}}";
+        let mut live = Session::with_box(240, box_for(None).unwrap()).unwrap();
+        live.run(canvas).unwrap();
+        assert!(live.canvas().unwrap().rag_lift());
+        let text = live.program("p");
+        assert!(text.contains(&format!("\n{RAG_LIFT_MARK}\n")), "{text}");
+        let mut saved = Vec::new();
+        live.canvas().unwrap().write_state(&mut saved, "").unwrap();
+        assert!(Canvas::read_state(&mut &saved[..]).unwrap().0.rag_lift());
+        for engine in [paint::engine7::ENGINE, paint::REACH_END] {
+            for lifts in [false, true] {
+                for other_flags in [false, true] {
+                    let mut log = text.replace("--@ engine 8", &format!("--@ engine {engine}"));
+                    for (on, mark) in [(lifts, RAG_LIFT_MARK), (other_flags, KNIFE_SKIM_MARK), (other_flags, BLEND_FEATHER_MARK), (other_flags, BRUSH_SKIM_MARK)] {
+                        if !on {
+                            log = log.replace(&format!("{mark}\n"), "");
+                        }
+                    }
+                    let mut replay = Session::replay_with(240, box_for(Some(&log)).unwrap()).unwrap();
+                    for chunk in parse_program(&log) {
+                        replay.run(&chunk).unwrap();
+                    }
+                    assert_eq!(replay.canvas().unwrap().rag_lift(), lifts);
+                    assert_eq!(replay.program("p"), log);
+                    let mut saved = Vec::new();
+                    replay.canvas().unwrap().write_state(&mut saved, "").unwrap();
+                    let (restored, _) = Canvas::read_state(&mut &saved[..]).unwrap();
+                    assert_eq!(restored.engine(), engine);
+                    assert_eq!(restored.rag_lift(), lifts, "rag lift's bit 39 must round-trip independently");
+                    assert_eq!((restored.knife_skim(), restored.blend_feather(), restored.brush_skim()), (other_flags, other_flags, other_flags));
+                }
+            }
+        }
+        assert!(box_for(Some(&text.replace("--@ engine 8", "--@ engine 5"))).is_err());
     }
 
     /// Replay `tests/<name>.lua` at 320 px with the box and engine its log
     /// names.
-    #[cfg(feature = "replay")]
     fn replay_fixture(name: &str) -> (Session, String) {
         let text = std::fs::read_to_string(format!("{}/tests/{name}.lua", env!("CARGO_MANIFEST_DIR"))).unwrap();
         let mut s = Session::replay_with(320, box_for(Some(&text)).expect("(EASEL_BOX set in the test's environment?)")).unwrap();
@@ -2207,7 +1808,6 @@ mod tests {
     }
 
     /// FNV-1a of the canvas as seen and its surface relief.
-    #[cfg(feature = "replay")]
     fn canvas_hash(s: &Session) -> String {
         let c = s.canvas().unwrap();
         let mut h = 0xcbf2_9ce4_8422_2325u64;
@@ -2216,5 +1816,321 @@ mod tests {
             h = h.wrapping_mul(0x100_0000_01b3);
         }
         format!("{h:016x}")
+    }
+
+    #[test]
+    fn mixing_and_adding_keep_the_oil_left_after_blotting() {
+        for drain in [false, true] {
+            let log = format!("--@ box sargent\n--@ engine 7\n{}", if drain { "--@ drain\n" } else { "" });
+            let tubes = box_for(Some(&log)).unwrap();
+            let zinc = tubes.tubes.iter().position(|tube| tube.name == "zinc white").unwrap();
+            let blotted = tubes.pile(vec![(zinc, 1.0)]).paint(-0.5).oil - 1.0;
+            let mut live = Session::with_box(32, tubes).unwrap();
+            live.run("canvas{size=120, aspect=1, linen=15, seed=21, ground={{pile={{\"lead white\", 1}}, um=65, apply=\"knife\"}}}").unwrap();
+            live.run(r#"p = pile{{"zinc white", 1}, blot=0.5}
+                q = pile{{"zinc white", 1}}
+                a = pile{{"zinc white", 1}, blot=0.5}
+                a:add{{"zinc white", 1}}
+                m = mix{{p, 1}, {q, 1}}
+                n = mix{{a, 1}, {q, 1}}"#).unwrap();
+            for (name, medium) in [("p", blotted), ("q", 0.0), ("a", blotted * 0.5), ("m", blotted * 0.5), ("n", blotted * 0.25)] {
+                let pile = live.lua.globals().get::<mlua::AnyUserData>(name).unwrap().borrow::<crate::api::PileU>().unwrap().clone();
+                let pile = crate::api::resolve(&live.st, pile);
+                assert!((pile.medium - medium).abs() < 1e-6, "{name}, drain {drain}: stored {} instead of {medium}", pile.medium);
+                assert!((pile.mix.paint(pile.medium).oil - (1.0 + medium)).abs() < 1e-6, "{name}, drain {drain}: its oil is conserved");
+                assert!((live.st.borrow().board.heap(pile.heap).unwrap().medium - medium).abs() < 1e-6, "{name}: the heap carries the effective blotting");
+            }
+        }
+    }
+
+    #[test]
+    fn new_paintings_record_liquid_film_leveling_and_old_logs_keep_it_off() {
+        let mut live = Session::with_box(80, box_for(None).unwrap()).unwrap();
+        live.run("canvas{size=440, aspect=1, linen=15, seed=7, ground={{pile={{\"lead white\", 1}}, um=120, apply=\"knife\"}}}").unwrap();
+        assert!(live.canvas().unwrap().liquid_film_levels());
+        let text = live.program("p");
+        assert!(text.contains(&format!("\n{LIQUID_FILM_LEVELS_MARK}\n")));
+        for (log, levels) in [(text.clone(), true), (text.replace(&format!("{LIQUID_FILM_LEVELS_MARK}\n"), ""), false)] {
+            let b = box_for(Some(&log)).unwrap();
+            assert_eq!(b.clone().liquid_film_levels, levels);
+            assert_eq!(b.only(&["lead white"]).liquid_film_levels, levels);
+            let mut replay = Session::replay_with(80, b).unwrap();
+            for chunk in parse_program(&log) {
+                replay.run(&chunk).unwrap();
+            }
+            assert_eq!(replay.canvas().unwrap().liquid_film_levels(), levels);
+            assert_eq!(replay.program("p"), log);
+            let mut saved = Vec::new();
+            replay.canvas().unwrap().write_state(&mut saved, "").unwrap();
+            let restored = Canvas::read_state(&mut &saved[..]).unwrap().0;
+            assert_eq!(restored.liquid_film_levels(), levels);
+            assert_eq!(restored.seen_lit(315.0, 55.0, 1.0), replay.canvas().unwrap().seen_lit(315.0, 55.0, 1.0));
+            assert!(restored.glaze_film() && restored.rag_lift() && restored.knife_skim() && restored.blend_feather() && restored.brush_skim());
+        }
+        for engine in [4, 5, 7, 8] {
+            assert!(box_for(Some(&format!("--@ engine {engine}\n{LIQUID_FILM_LEVELS_MARK}\n"))).unwrap().liquid_film_levels);
+            assert!(!box_for(Some(&format!("--@ engine {engine}\n--@ chunk 1\n{LIQUID_FILM_LEVELS_MARK}\n"))).unwrap().liquid_film_levels);
+        }
+        assert!(box_for(Some(&format!("--@ engine 3\n{LIQUID_FILM_LEVELS_MARK}\n"))).is_err());
+    }
+
+    /// A new painting's glaze and scumble lay a thin film
+    /// (`paint::Canvas::with_glaze_film`) and its log's head says so; a
+    /// replay of that log and a save of it do too, and a log without the line
+    /// (every painting before it) doesn't. Engines 7 and 8 have it.
+    #[test]
+    fn new_paintings_record_the_glaze_film_and_older_logs_replay_without_it() {
+        let canvas = "canvas{size=440, aspect=1.25, linen=15, seed=7, ground={{pile={{\"lead white\", 3}, {\"yellow ochre\", 1}}, um=120, apply=\"knife\"}}}";
+        let mut live = Session::with_box(240, box_for(None).unwrap()).unwrap();
+        live.run(canvas).unwrap();
+        assert!(live.canvas().unwrap().glaze_film());
+        let text = live.program("p");
+        assert!(text.contains(&format!("\n{GLAZE_FILM_MARK}\n")), "{text}");
+        let mut saved = Vec::new();
+        live.canvas().unwrap().write_state(&mut saved, "").unwrap();
+        assert!(Canvas::read_state(&mut &saved[..]).unwrap().0.glaze_film());
+        for (log, film) in [
+            (text.clone(), true),
+            (text.replace(&format!("{GLAZE_FILM_MARK}\n"), ""), false),
+            (text.replace("--@ engine 8", "--@ engine 7"), true),
+            (text.replace("--@ engine 8", "--@ engine 7").replace(&format!("{GLAZE_FILM_MARK}\n"), ""), false),
+        ] {
+            let mut replay = Session::replay_with(240, box_for(Some(&log)).unwrap()).unwrap();
+            for chunk in parse_program(&log) {
+                replay.run(&chunk).unwrap();
+            }
+            assert_eq!(replay.canvas().unwrap().glaze_film(), film);
+            assert_eq!(replay.program("p"), log);
+            let mut saved = Vec::new();
+            replay.canvas().unwrap().write_state(&mut saved, "").unwrap();
+            let (restored, _) = Canvas::read_state(&mut &saved[..]).unwrap();
+            assert_eq!(restored.engine(), logged_engine(&log).unwrap());
+            assert_eq!(restored.glaze_film(), film);
+            assert!(restored.knife_skim() && restored.blend_feather() && restored.brush_skim());
+        }
+        assert!(box_for(Some(&text.replace("--@ engine 8", "--@ engine 5"))).is_err());
+    }
+
+    /// A new painting 400 px wide (1000 × 800 units): a pale ground with
+    /// `drawing` laid on it and left a month to dry, then `pass`. The
+    /// CIE L* of every pixel before and after the pass, and the change in
+    /// red minus blue (of 255).
+    fn under_a_pass(drawing: &str, pass: &str) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let mut s = Session::with_box(400, box_for(None).unwrap()).unwrap();
+        s.run("canvas{size=440, aspect=1.25, linen=15, seed=7, ground={{pile={{\"lead white\", 3}, {\"yellow ochre\", 0.2}}, um=120, apply=\"knife\"}}}").unwrap();
+        s.run(drawing).unwrap();
+        s.run("wait(30*24*60)").unwrap();
+        let lstar = |c: &[f32; 3]| {
+            let y = paint::color::luminance(*c);
+            if y > 216.0 / 24389.0 { 116.0 * y.cbrt() - 16.0 } else { 24389.0 / 27.0 * y }
+        };
+        let warm = |c: &[f32; 3]| 255.0 * (paint::color::linear_to_srgb(c[0]) - paint::color::linear_to_srgb(c[2]));
+        let before = s.canvas().unwrap().seen();
+        s.run(pass).unwrap();
+        let after = s.canvas().unwrap().seen();
+        (before.iter().map(lstar).collect(), after.iter().map(lstar).collect(), before.iter().zip(&after).map(|(b, a)| warm(a) - warm(b)).collect())
+    }
+
+    /// The pixels of that 400 × 320 canvas whose x lies in the middle 60
+    /// units of a 100-unit bar: the `dark` bars, or the light ones between.
+    fn bars(dark: bool) -> Vec<usize> {
+        let mid = if dark { 20.0..80.0 } else { 120.0..180.0 };
+        (8..312).flat_map(|y| (0..400).map(move |x| (y, x))).filter(|&(_, x)| mid.contains(&((x as f32 + 0.5) * 2.5 % 200.0))).map(|(y, x)| y * 400 + x).collect()
+    }
+
+    /// A glaze is a thin transparent film: over a dry drawing of dark bars a
+    /// medium-rich warm pile (92% medium) brushed over the whole canvas
+    /// shifts the color by about the same small amount everywhere and the
+    /// drawing stays legible. Before the glaze film its strokes laid the
+    /// pile's own pale color in streaks over the bars.
+    #[test]
+    fn a_glaze_tints_the_drawing_under_it_and_keeps_it_legible() {
+        let drawing = "work(mask(function(x, y) return math.floor(x / 100) % 2 == 0 and 1 or 0 end), {hand=\"body\", pile=pile{{\"bone black\", 1}, {\"raw umber\", 1}}, coverage=3, fill=true, clip=true, angle=1.5708, seed=5})";
+        let glaze = "work(everywhere(), {hand=\"glaze\", pile=pile{{\"lead white\", 0.8}, {\"yellow ochre\", 0.55}, {\"vermilion\", 0.12}, {\"bone black\", 0.1}, medium=0.92}, coverage=1, angle=0.05, seed=491})";
+        let (l0, l1, warm) = under_a_pass(drawing, glaze);
+        let mean = |v: &[f32], ix: &[usize]| ix.iter().map(|&i| v[i]).sum::<f32>() / ix.len() as f32;
+        let (dark, light) = (bars(true), bars(false));
+        let kept = (mean(&l1, &light) - mean(&l1, &dark)) / (mean(&l0, &light) - mean(&l0, &dark));
+        let dl: Vec<f32> = light.iter().map(|&i| l1[i] - l0[i]).collect();
+        let sd = (dl.iter().map(|d| d * d).sum::<f32>() / dl.len() as f32 - (dl.iter().sum::<f32>() / dl.len() as f32).powi(2)).sqrt();
+        let shift = light.iter().chain(&dark).map(|&i| warm[i]).sum::<f32>() / (light.len() + dark.len()) as f32;
+        eprintln!("glaze: contrast kept {kept}, L* change sd over the light bars {sd}, warm shift {shift}");
+        assert!(kept > 0.8, "the drawing's contrast kept: {kept}");
+        assert!(sd < 1.5, "the film is uneven over the light bars: L* change sd {sd}");
+        assert!((2.0..12.0).contains(&shift), "the warm shift (R - B, of 255): {shift}");
+    }
+
+    /// A scumble is a broken veil: at coverage 0.5 a pale body pile scumbled
+    /// over dry dark paint reaches about half of its rect and leaves the dark
+    /// showing in the gaps, and where it lands the dark shows through it.
+    /// Before the glaze film its scrubbing strokes closed over nearly all of
+    /// it.
+    #[test]
+    fn a_scumble_at_half_coverage_leaves_gaps() {
+        let drawing = "work(everywhere(), {hand=\"body\", pile=pile{{\"raw umber\", 1}, {\"bone black\", 0.3}, {\"lead white\", 0.1}}, coverage=3, fill=true, seed=5})";
+        let scumble = "work(rect(100, 100, 800, 600), {hand=\"scumble\", pile=pile{{\"lead white\", 2}, {\"yellow ochre\", 0.4}, {\"raw umber\", 0.3}}, coverage=0.5, angle=0.2, seed=41})";
+        let (l0, l1, _) = under_a_pass(drawing, scumble);
+        let inside: Vec<usize> = (48..272).flat_map(|y| (48..352).map(move |x| y * 400 + x)).collect();
+        let reached: Vec<usize> = inside.iter().copied().filter(|&i| l1[i] - l0[i] > 2.0).collect();
+        let share = reached.len() as f32 / inside.len() as f32;
+        let lift = reached.iter().map(|&i| l1[i] - l0[i]).sum::<f32>() / reached.len().max(1) as f32;
+        let under = inside.iter().map(|&i| l0[i]).sum::<f32>() / inside.len() as f32;
+        eprintln!("scumble: reached {share}, L* {under} up by {lift} where it landed");
+        assert!((0.3..0.7).contains(&share), "the scumble reached {share} of its rect at coverage 0.5");
+        assert!(lift < 0.75 * (80.0 - under), "where it lands it hides the dark: L* {under} up by {lift}");
+    }
+    /// The paper-and-pastel switch is read from a log's head only, needs
+    /// engine 5, and is what lets `canvas{paper=}` set up a sheet: without it
+    /// (an older painting's log) paper is refused by name; with it the log
+    /// says so, and replays, rebuilds and checkpoints the same sheet.
+    #[test]
+    fn paper_comes_with_the_switch_in_the_log_s_head() {
+        assert!(logged_paper(&format!("{ENGINE_MARK} 5\n  {PAPER_MARK}  \n{MARK} 1\n")));
+        assert!(!logged_paper(&format!("{ENGINE_MARK} 5\n{MARK} 1\n{PAPER_MARK}\n")));
+        assert!(!logged_paper(&format!("{ENGINE_MARK} 5\n{PAPER_MARK}-ish\n{MARK} 1\n")));
+        let e = box_for(Some(&format!("{ENGINE_MARK} 4\n{PAPER_MARK}\n{MARK} 1\n"))).unwrap_err();
+        assert!(e.contains(PAPER_MARK), "{e}");
+        let sheet = r#"canvas{size=200, aspect=1.25, seed=3, paper={grammage=200, felt=false}}"#;
+        let mut old = Session::new(96).unwrap();
+        let e = old.run(sheet).unwrap_err();
+        assert!(e.contains(PAPER_MARK), "{e}");
+        old.run(CANVAS).unwrap();
+        assert!(!logged_paper(&old.program("old")));
+        let mut live = Session::new(96).unwrap().with_paper(true).unwrap();
+        live.run(sheet).unwrap();
+        let log = live.program("paper");
+        assert!(log.contains(&format!("{ENGINE_MARK} {}\n{PAPER_MARK}\n\n{MARK} 1\n", paint::ENGINE)), "{log}");
+        let mut replay = Session::replay_with(96, box_for(Some(&log)).unwrap()).unwrap().with_paper(logged_paper(&log)).unwrap();
+        for chunk in parse_program(&log) {
+            replay.run(&chunk).unwrap();
+        }
+        let state = |s: &Session| {
+            let mut bytes = Vec::new();
+            s.canvas().unwrap().write_state(&mut bytes, "").unwrap();
+            bytes
+        };
+        let bytes = state(&live);
+        let original = live.canvas().unwrap().clone();
+        assert_eq!(&bytes[..8], b"PAINTC13");
+        assert_canvas_close(&replay.canvas().unwrap(), &original);
+        assert!(replay.st.borrow().paper);
+        assert_eq!(replay.program("paper"), log);
+        live.rebuild().unwrap();
+        assert_canvas_close(&live.canvas().unwrap(), &original);
+        assert!(live.st.borrow().paper);
+        assert_eq!(live.program("paper"), log);
+    }
+
+    /// A save keeps the paper-and-pastel switch and the sheet: read back
+    /// (`save::read`), the session has the switch, the same canvas bit for
+    /// bit (a sheet: version 13), paints on as the live one does, and writes
+    /// the switch into its log's head.
+    #[test]
+    fn paper_survives_a_save() {
+        let sheet = r#"canvas{size=200, aspect=1.25, seed=3, paper={grammage=200, felt=false}}"#;
+        for setup in [CANVAS, sheet] {
+            let path = std::env::temp_dir().join(format!("easel-paper-save-{}-{}.ckpt", std::process::id(), setup.len()));
+            let mut live = Session::new(96).unwrap().with_paper(true).unwrap();
+            live.run(setup).unwrap();
+            live.run("b = brush(\"round\", 6); b:load(pile{{\"raw umber\", 1}}, 0.6); b:stroke({{100, 300}, {800, 320}})").unwrap();
+            crate::save::write(&live, &live.program("t"), &path).unwrap();
+            let mut restored = crate::save::read(&path).unwrap().session;
+            let saved = |s: &Session| {
+                let mut bytes = Vec::new();
+                s.canvas().unwrap().write_state(&mut bytes, "").unwrap();
+                bytes
+            };
+            assert!(restored.st.borrow().paper);
+            assert_eq!(saved(&restored), saved(&live));
+            assert_eq!(&saved(&live)[..8] == b"PAINTC13", setup == sheet);
+            restored.run("wait(1)").unwrap();
+            live.run("wait(1)").unwrap();
+            assert_canvas_close(&restored.canvas().unwrap(), &live.canvas().unwrap());
+            assert!(logged_paper(&restored.program("t")));
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod progress {
+    use super::*;
+
+    #[test]
+    fn a_kept_chunk_is_reported_as_in_the_log() {
+        let p = Progress { lines: AtomicUsize::new(6), line: AtomicUsize::new(5), marks0: AtomicU64::new(0), marks: AtomicU64::new(0), clock0: AtomicU64::new(0), clock: AtomicU64::new(0), kept: AtomicUsize::new(0) };
+        assert!(p.report(Duration::from_secs(3)).starts_with("painting a chunk (at line 5 of 6)"));
+        p.keep(2);
+        assert_eq!(p.report(Duration::from_secs(75)), "the chunk is in the log (chunk 2); the easel is finishing its reply, running for 1 min 15 s");
+        p.clear();
+        assert!(p.report(Duration::from_secs(1)).starts_with("painting a chunk: starting"));
+    }
+}
+
+/// The Lua memory cap (LUA_MAX_BYTES, Serials::held, Serials::capped).
+#[cfg(test)]
+mod memory_cap_tests {
+    use super::*;
+
+    const W: usize = 160;
+
+    const CANVAS: &str = r#"canvas{size=440, aspect=1.5, linen=15, seed=2, ground={{pile={{"lead white", 3}, {"red earth", 1}}, um=110, apply="knife"}, {pile={{"lead white", 5}, {"yellow ochre", 1}}, um=60, apply="brush"}}}"#;
+
+    /// A chunk that asks for more memory than the cap errors and leaves the
+    /// session as it was, instead of swapping the machine. 8 GB is past
+    /// LUA_MAX_BYTES, a constant, so this never allocates it.
+    #[test]
+    fn a_runaway_allocation_errors() {
+        let mut s = Session::new(W).unwrap();
+        s.run(CANVAS).unwrap();
+        let e = s.run("x = string.rep('x', 8 * 1024 * 1024 * 1024)").unwrap_err();
+        assert!(e.contains("memory"), "{e}");
+        s.run("assert(x == nil)").unwrap();
+    }
+
+    /// A chunk that catches the cap's error still fails: a live heap holds a
+    /// snapshot a replay's doesn't, so what the cap refused live a replay
+    /// might allow, and the chunk would paint differently there.
+    #[test]
+    fn a_caught_runaway_allocation_still_fails_the_chunk() {
+        let mut s = Session::new(W).unwrap();
+        s.run(CANVAS).unwrap();
+        let e = s.run("ok = pcall(string.rep, 'x', 8 * 1024 * 1024 * 1024)").unwrap_err();
+        assert!(e.contains("memory"), "{e}");
+        assert!(!s.globals.contains_key("ok"), "the failed chunk's globals were kept");
+        s.run("assert(ok == nil)").unwrap();
+        assert_eq!(s.log.len(), 2, "the failed chunk was logged");
+    }
+
+    /// A painting that fits under the cap can still be snapshotted, so the
+    /// next chunk runs (and can let the big table go) though heap and
+    /// snapshot together are past the cap.
+    #[test]
+    fn a_painting_near_the_cap_can_still_paint() {
+        let mut s = Session::new(W).unwrap();
+        s.run(CANVAS).unwrap();
+        s.run("t = {} for i = 1, 2000000 do t[i] = i end").unwrap();
+        s._serials.cap.set(s._serials.used.get() + (1 << 20));
+        s.run("assert(#t == 2000000) t = nil").unwrap();
+        s.run("u = 1").unwrap();
+        assert_eq!(s.log.len(), 4);
+    }
+
+    /// The snapshot's credit is the snapshot's blocks as they are now: its
+    /// temporaries, once collected, are no longer credited, and none is left
+    /// once the snapshot is gone.
+    #[test]
+    fn the_snapshot_credit_follows_its_blocks() {
+        let mut s = Session::new(W).unwrap();
+        s.run(CANVAS).unwrap();
+        s.run("t = {} for i = 1, 20000 do t[i] = {i} end").unwrap();
+        let snap = s.snap().unwrap();
+        let taken = s._serials.held.get();
+        assert!(taken > 0);
+        s.lua.gc_collect().unwrap();
+        assert!(s._serials.held.get() < taken, "the snapshot's collected temporaries are still credited");
+        drop(snap);
+        s.lua.gc_collect().unwrap();
+        assert_eq!(s._serials.held.get(), 0, "credit left after the snapshot is gone");
     }
 }

@@ -3,9 +3,14 @@
 Source: https://github.com/aliceisjustplaying/claude-paint (Alice; code MIT,
 texts and paintings CC BY 4.0). Gallery: https://stillwet.art.
 
-Merged: `693f49f2` (2026-10-13; before it `78c86ce`, 2026-10-10), on branch `upstream` (her files, unmodified,
-at our paths) and merged into `main`. The exact commit is in `tools/upstream/commit`; every work records it
-(`engine_upstream` in its manifest). First taken: `a198dd0` (2026-10-03, after tag `round-22.1`).
+Merged: `fea9aa62` (2026-10-21; before it `693f49f2`, 2026-10-13, and `78c86ce`, 2026-10-10), on branch `upstream`
+(her files, unmodified, at our paths) and merged into `main`. The exact commit is in `tools/upstream/commit`; every
+work records it (`engine_upstream` in its manifest). First taken: `a198dd0` (2026-10-03, after tag `round-22.1`).
+
+She rewrote her history on 2026-10-18/19 (the paintings' records and binaries moved out): `a198dd0`, `78c86ce` and
+`693f49f2` are no longer on her main; their code is (`693f49f2`'s twin is `0dc2a5eb`, the same files on every mapped
+path). Our branch `upstream` still holds what we took from each, and import.sh copies files, so nothing here depends
+on her old ids; anything that compares with her history (`git log`, `merge-base`) starts from the twin.
 
 What we take, and where it lives here: `tools/upstream/map.txt`. Not taken: the research notes on individual
 painters and motifs (they steer a painter's subject), the pi harness's runner (painter.ts, its prompt and
@@ -17,9 +22,10 @@ as an option (`--@ width`, her default 2400). If she does, "The atelier's change
 2026-10-12, a follow-up there: measured with `runner/startprobe.py`, her `scratch` description stopped 32 of 60 starts,
 ours 1 of 60; a small PR with the wording offered. If her description changes, ours goes (server.ts and below) and
 the probe runs again on the merged tools.
-2026-10-13: https://github.com/aliceisjustplaying/claude-paint/pull/66, the width as an option (`EASEL_WIDTH=4800`, the
-`--@ width` head line, the chunk limit and crop scale), from the owner's fork. If she merges it, our ATELIER/NEW_WIDTH,
-WIDTH_MARK and LOOK_SCALE changes go, and the painters' easel is started with EASEL_WIDTH=4800 instead.
+2026-10-13: https://github.com/aliceisjustplaying/claude-paint/pull/66, the width as an option, from the owner's fork;
+merged as #101 (2026-10-15; after her history's rewrite `d68525eb`). Since the sync of 2026-10-21 the width is hers:
+a file `width` (4800) beside the painter's easel, written by tools/build-engine.sh and copied by runner/studio.py;
+our ATELIER/NEW_WIDTH, WIDTH_MARK and LOOK_SCALE changes are gone.
 
 ## Taking a newer claude-paint
 
@@ -45,17 +51,26 @@ She develops actively; this is routine. In a worktree of its own (the runner pai
 
 ## The atelier's changes (kept on every merge)
 
-- `engine/crates/easel/src/main.rs`: `ATELIER` (on when `tools/build-engine.sh` builds: `ATELIER_BUILD`): a new
-  painting at `NEW_WIDTH` 4800 px, the journal named `journal`. Off in a plain `cargo test`, so her tests hold.
-  Its help names "the journal" and "the easel guide" (not her paths), `run` replays "at the log's width", and the
-  width errors give `NEW_WIDTH` (2026-10-21; these go with the width code at the sync that takes her 76bedb8).
-- `engine/crates/easel/src/session.rs`: `WIDTH_MARK` (`--@ width 4800` in a log's head), `logged_width`,
-  `chunk_limit_for` (the chunk limit scaled with the pixel count); her `width_for` (main.rs) reads it. Test
-  `the_log_names_its_width`; `the_guide_shows_the_painters_box` (the guide's table is the every box's).
-- `engine/crates/easel/src/look.rs`: a crop is shown at 2.4 px a unit (`LOOK_SCALE`) whatever the canvas's width.
-- `engine/scripts/check_painting`: `EASEL_NO_BUILD=1` uses the replay easel already built.
+- `engine/crates/easel/src/main.rs`: `ATELIER` (on when `tools/build-engine.sh` builds: `ATELIER_BUILD`): the journal
+  named `journal`, and a new painting without the paper-and-pastel switch (`--@ paper`: the atelier paints in oil;
+  the owner, 2026-10-21). Its help names "the journal" and "the easel guide", not her paths. Off in a plain
+  `cargo test`, so her tests hold.
+- `engine/crates/easel/src/api.rs`: `CANVAS_HELP` offers no `paper=` in the atelier's build (`crate::ATELIER`).
+- `engine/crates/easel/src/session.rs` `root()`: built with `--cfg atelier_painter` (the painter's easel), it leaves out
+  her fallback to `CARGO_MANIFEST_DIR`, the one build path no remapping reaches (ENG-7); the cfg is declared in
+  `engine/crates/easel/Cargo.toml` (`[lints.rust]`).
+- `engine/scripts/check_painting` and `engine/scripts/compare_images.py`: ours, not hers. Since her #166 (b04d78a6)
+  her check says "check: ok" when the replay meets an image tolerance (±2 levels a channel), and her compare_images.py
+  applies that tolerance on the same platform too. Ours ask for the replay to equal the live canvas byte for byte on
+  the same platform, as REC-4 does (the tolerance only across platforms), `EASEL_NO_BUILD=1` uses the replay easel
+  already built, and check_painting clears every `PAINT_*` variable first (hers change engine 5's and later output:
+  `PAINT_SMALL_TILES`, `PAINT_COARSE_AGING`). On every merge, keep ours. Her tests of hers
+  (`engine/scripts/tests/check_painting_test.py`, the image tolerance tests) then fail here: known, see below.
 - `tools/build-engine.sh`: no local paths in the binaries (ENG-7); byte-identical builds (her release profile is
-  incremental since 2026-10-05 and accepts drift between builds: ours is not); a painter's easel per box.
+  incremental and accepts drift between builds: ours is not); the replay easel, and the painter's easel (one binary
+  since her #165) set up per box in `target/painter/boxes/<box>/` with `studio` ("painter <box>"), `width` (4800) and
+  `tubes.md`. Nothing in a painter's easel is reachable by the painter (bin/ is hidden), so all boxes in one binary
+  is no white-room matter; its replies name only its own box.
 - `engine/Cargo.toml`: `[profile.release] incremental = false`, so a plain `cargo build --release` (scripts/replay_easel,
   the scripts' tests) makes a replay easel that paints as the painter's does, not only build-engine.sh's. An
   incremental one left work i-010 unverified (2026-10-18). Test `engine/scripts/tests/release_profile.sh`.
@@ -64,19 +79,25 @@ She develops actively; this is routine. In a worktree of its own (the runner pai
   reworded for the white room ("as dirty as a working palette gets", "as many tiles as one reply holds"); the
   scratch canvas's log without its paths (`log` with `scratch: true`; put aside "with its log"), and a whole view
   "about 21% of a 4800-pixel canvas's width" (hers: 42% of 2400) (2026-10-21).
-- `materials/easel_guide.md`, since 693f49f (the owner, 2026-10-13): without her section "Color, planes and open
-  coverage" (warm and cool space, tilted planes, facets, multiple viewpoints: a way of painting, unnamed but
-  recognisable, offered to every painter). The guide documents tools; a manner is the painter's to find. On a merge
-  that brings the section back or changes it, take it out again.
+- `materials/easel_guide.md`, since fea9aa6 (the owner, 2026-10-21): without paper and pastel (the `paper` canvas
+  option, the section "Paper", pastel in "Drawing" with the sheet, the dry brush, the knife over pastel, the puff and
+  the tap; the pastel stick held up), without `probe`, `reference`/`reference_list` and look's `edges` mode (not
+  served: numbers and a computed map are not a painter's way of looking; the subject is the painter's), and "a mask
+  that is already soft" for her "graded". Her section "Color, planes and open coverage" (left out since 693f49f) she
+  took out herself (90f9ae48); if it comes back, take it out again.
 - `easel-mcp/src/server.ts`: her painter tools over MCP, with the atelier's read/write/edit; the log without its
-  box line (a box may be named after a painter); its own survey reply (hers speaks of a budget).
-- `easel-mcp/src/upstream/easel-client.ts`: `WAIT_MS` raised for 4800 px (`do` 48 minutes, `rebuild` 120; see below);
-  `tail()`'s default note points to `log` with an offset, not to the painting's file.
+  box line (a box may be named after a painter); its own survey reply (hers speaks of a budget); `note` without the
+  journal's path; a rebuild's progress without the painter's chunk count; no `probe`, `ref`, reference tools,
+  `edges` mode or pastel stick (its header says what was last ported).
+- `easel-mcp/src/upstream/easel-client.ts`: `tail()`'s default note points to `log` with an offset, not to the
+  painting's file. Her chunk waits are taken as they are (`WIDE_WAIT_MS`, 48 and 50 minutes at 4800 px).
 - `easel-mcp/src/upstream/journal.ts`: `JOURNAL` is `journal` (hers `notes/journal.md`). server.ts names it so in
   `note`'s reply (`noted in journal`, `revised in journal`), where the easel and journal.ts give its absolute path.
+- `tools/upstream/import.sh`: the cache's fetch takes tags she moved (`--force`).
 
-Known, hers: `rag::tests::a_dry_rag_leaves_a_pale_tint_and_spirits_lift_nearly_to_the_ground` fails here at 78c86ce
-and 693f49f alike (0.8993 against its 0.9); the paint crate is hers unchanged.
+Known, hers: `rag::tests::a_dry_rag_leaves_a_pale_tint_and_spirits_lift_nearly_to_the_ground` failed here at 78c86ce
+and 693f49f alike (0.8993 against its 0.9); at fea9aa6 it passes. Her script tests that expect her tolerant
+check_painting and compare_images.py (`engine/scripts/test`'s baseline guards) fail on ours, by design (above).
 
 A copy of the repository for a sync (git worktree) needs two local links the clone doesn't carry:
 `engine/notes/easel_guide.md -> ../../materials/easel_guide.md` (her tests read the guide there) and

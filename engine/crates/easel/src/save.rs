@@ -10,7 +10,7 @@
 //! on the palette), the `canvas{}` setup and the style's relief (`relief()`
 //! reads it; the rest of the style is the box's oil style, which no finishing
 //! verb reads); and the chunk and call counters. The header also names the
-//! box and engine and holds the log's FNV-1a hash and chunk count, so a save
+//! box and engine (and the drain switch, if on) and holds the log's FNV-1a hash and chunk count, so a save
 //! is used only with the log it was written from.
 //!
 //! The header is plain `key=value` lines and holds no time or path: a replay
@@ -47,6 +47,24 @@ fn header(s: &Session, program: &str) -> String {
     kv("chunks", s.log.len().to_string());
     kv("box", st.tubes.name.to_string());
     kv("engine", st.tubes.engine.to_string());
+    if st.tubes.carried_paint {
+        kv("carried_paint", "1".to_string());
+    }
+    if st.tubes.limbs_join_nearest {
+        kv("limbs", "nearest".to_string());
+    }
+    if st.tubes.blend_at_masks {
+        kv("masks", "blend-at".to_string());
+    }
+    if st.tubes.reload_finite {
+        kv("reload", "finite".to_string());
+    }
+    if st.tubes.drain {
+        kv("drain", "1".to_string());
+    }
+    if st.paper {
+        kv("paper", "1".to_string());
+    }
     kv("width", st.width.to_string());
     kv("seed", st.seed.to_string());
     kv("chunk", st.chunk.to_string());
@@ -117,25 +135,21 @@ pub fn write(s: &Session, program: &str, path: &std::path::Path) -> Result<bool,
 }
 
 /// A save read back: the session holding its state, and what ties it to its log.
-#[cfg(feature = "replay")]
 pub struct Restored {
     pub session: Session,
     pub chunks: usize,
     pub log_fnv: u64,
 }
 
-#[cfg(feature = "replay")]
 fn field<'a>(h: &'a std::collections::BTreeMap<&str, &str>, k: &str) -> Result<&'a str, String> {
     h.get(k).copied().ok_or_else(|| format!("the save has no {k}= in its header"))
 }
 
-#[cfg(feature = "replay")]
 fn parse<T: std::str::FromStr>(h: &std::collections::BTreeMap<&str, &str>, k: &str) -> Result<T, String> {
     let v = field(h, k)?;
     v.parse().map_err(|_| format!("the save's {k}={v:?} doesn't parse"))
 }
 
-#[cfg(feature = "replay")]
 fn hex64(h: &std::collections::BTreeMap<&str, &str>, k: &str) -> Result<u64, String> {
     let v = field(h, k)?;
     u64::from_str_radix(v, 16).map_err(|_| format!("the save's {k}={v:?} isn't hex"))
@@ -144,9 +158,8 @@ fn hex64(h: &std::collections::BTreeMap<&str, &str>, k: &str) -> Result<u64, Str
 /// Read a save into a fresh replay session: the canvas, and the studio fields as the live
 /// session left them. Its next chunk runs as chunk `chunks + 1`, as it would at the end of
 /// the log.
-#[cfg(feature = "replay")]
 pub fn read(path: &std::path::Path) -> Result<Restored, String> {
-    use crate::session::{BOX_MARK, ENGINE_MARK};
+    use crate::session::{BOX_MARK, DRAIN_MARK, ENGINE_MARK, PAPER_MARK};
     use std::rc::Rc;
     let f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let input: Box<dyn std::io::Read> = if path.extension().is_some_and(|e| e == "zst") {
@@ -174,9 +187,42 @@ pub fn read(path: &std::path::Path) -> Result<Restored, String> {
     if engine != 1 {
         logged.push_str(&format!("{ENGINE_MARK} {engine}\n"));
     }
-    let tubes = crate::session::box_for(Some(&logged))?;
+    let drain = match h.get("drain") {
+        None => false,
+        Some(&"1") => true,
+        Some(v) => return Err(format!("the save's drain={v:?} isn't 1")),
+    };
+    if drain != canvas.drain() {
+        return Err(format!("{}: the save's header and its canvas disagree on the drain switch", path.display()));
+    }
+    if drain {
+        logged.push_str(&format!("{DRAIN_MARK}\n"));
+    }
+    let paper = match h.get("paper") {
+        None => false,
+        Some(&"1") => true,
+        Some(v) => return Err(format!("the save's paper={v:?} isn't 1")),
+    };
+    if paper {
+        logged.push_str(&format!("{PAPER_MARK}\n"));
+    }
+    let mut tubes = crate::session::box_for(Some(&logged))?;
+    tubes.quarter_tiles = canvas.quarter_tiles();
+    tubes.adaptive_sweep = canvas.adaptive_sweep();
+    tubes.glaze_film = canvas.glaze_film();
+    tubes.liquid_film_levels = canvas.liquid_film_levels();
+    tubes.sealed_drawing_guide = canvas.sealed_drawing_guide();
+    tubes.drawing_optics = canvas.drawing_optics();
+    tubes.rag_lift = canvas.rag_lift();
+    tubes.knife_skim = canvas.knife_skim();
+    tubes.blend_feather = canvas.blend_feather();
+    tubes.brush_skim = canvas.brush_skim();
+    tubes.carried_paint = h.get("carried_paint") == Some(&"1");
+    tubes.limbs_join_nearest = h.get("limbs") == Some(&"nearest");
+    tubes.blend_at_masks = h.get("masks") == Some(&"blend-at");
+    tubes.reload_finite = h.get("reload") == Some(&"finite");
     let width: usize = parse(&h, "width")?;
-    let mut s = Session::replay_with(width, tubes.clone()).map_err(|e| e.to_string())?;
+    let mut s = Session::replay_with(width, tubes.clone()).and_then(|s| s.with_paper(paper)).map_err(|e| e.to_string())?;
     {
         let mut st = s.st.borrow_mut();
         st.seed = parse(&h, "seed")?;

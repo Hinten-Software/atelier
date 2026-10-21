@@ -184,7 +184,7 @@ pub fn exchange_kj() -> (f32, f32) {
 /// constant. A power of two, so quarter minutes fall on it exactly.
 pub const FLOW_TICKS: u32 = 64;
 
-type FlowCell = (f32, f32, crate::wet::Latent, crate::wet::Prop, f32, bool, f32, f32);
+type FlowCell = (f32, f32, crate::wet::Latent, crate::wet::Prop, f32, bool, f32, f32, f32);
 
 #[derive(Default)]
 struct FlowScratch {
@@ -279,6 +279,16 @@ impl Canvas {
     pub(crate) fn spread(&mut self, dt: f32, solvent: &mut Vec<usize>) {
         if solvent.is_empty() { return; }
         let (w, h) = (self.f.w, self.f.h);
+        // the drain switch: paint packed on an absorbent ground
+        // (`bristle::ground_drain`) stays where it is; only the liquid above
+        // it flows, the paint in it as rich as the film's surface
+        // (`bristle::surface_oil`)
+        let drain = self.drain;
+        let packed = |wet: &crate::wet::Wet, i: usize| if drain { wet.hide[i][7].clamp(0.0, 1.0) } else { 0.0 };
+        // and paint the flow brings to a pixel is laid there as a brush lays
+        // it (`Surf::add`): fluid, and drained by the ground under it while
+        // its pores take oil, from that pixel's absorbency
+        let soaks = drain && self.engine >= 4 && self.absorb_any;
         let dx = self.px_mm();
         let timed = self.wet.clock.px.len() == w * h;
         // the mobility (mm²/min) of each pixel in the dirty box
@@ -291,7 +301,9 @@ impl Canvas {
             let fl = if timed { crate::drying::fluid(cure) } else { 1.0 };
             spread_mm2_min(s / (v + s)) * fl * thin_film((v + s) * COAT_UM)
         };
-        let mob = |wet: &crate::wet::Wet, i: usize| -> f32 { mob_of(wet.vol[i], wet.solv[i] / COAT_UM, if timed { wet.clock.px[i].cure } else { 0.0 }) };
+        // (with the drain switch, of the liquid above any packed paint, which
+        // doesn't flow; the sparse set below is built from it)
+        let mob = |wet: &crate::wet::Wet, i: usize| -> f32 { mob_of(wet.vol[i] * (1.0 - packed(wet, i)), wet.solv[i] / COAT_UM, if timed { wet.clock.px[i].cure } else { 0.0 }) };
         // the largest mobility, and the box of the pixels that have any
         // (only they can give liquid; each substep reaches one pixel further)
         let wet = &self.wet;
@@ -331,6 +343,7 @@ impl Canvas {
             let (rw, rh) = (x1 - x0, y1 - y0);
             let wet = &self.wet;
             let height = &self.height;
+            let absorb = &self.absorb;
             let sparse = active.len() < rw * rh / 8;
             indices.clear();
             if sparse {
@@ -356,7 +369,9 @@ impl Canvas {
                     let (x, y) = (i % w, i / w);
                     let l = wet.vol[i] + wet.solv[i] / COAT_UM;
                     let m = mob(wet, i);
-                    if m <= 0.0 || l <= 0.0 {
+                    // (what can leave: the liquid above any packed paint)
+                    let lm = l - wet.vol[i] * packed(wet, i);
+                    if m <= 0.0 || l <= 0.0 || lm <= 0.0 {
                         return [0.0; 4];
                     }
                     let z = height[i] + l * COAT_UM;
@@ -373,8 +388,8 @@ impl Canvas {
                             }
                         }
                     }
-                    if sum > MAX_OUT * l {
-                        let f = MAX_OUT * l / sum;
+                    if sum > MAX_OUT * lm {
+                        let f = MAX_OUT * lm / sum;
                         for v in &mut q {
                             *v *= f;
                         }
@@ -404,7 +419,21 @@ impl Canvas {
                     let l = v + s;
                     let gone: f32 = out[k2].iter().sum();
                     let keep = if l > 0.0 { ((l - gone) / l).max(0.0) } else { 0.0 };
-                    let (mut pv, mut ps, mut lat, mut hide, mut cure) = (v * keep, s * keep, wet.lat[i], wet.hide[i], cure_of(i));
+                    let (mut pv, mut ps, mut lat, mut hide, mut cure) = (v * keep, s * keep, wet.lat[i].clone(), wet.hide[i], cure_of(i));
+                    let pk = packed(wet, i);
+                    if pk > 0.0 && gone > 0.0 {
+                        // the liquid left from above the packed paint, which
+                        // stays: the film's packed share grows, its oil falls
+                        // by the surface paint's
+                        let lm = l - v * pk;
+                        let (pl, sl) = (gone * v * (1.0 - pk) / lm, gone * s / lm);
+                        (pv, ps) = ((v - pl).max(0.0), (s - sl).max(0.0));
+                        if pv > 1e-9 {
+                            let top = crate::bristle::surface_oil(&hide);
+                            hide[4] = ((hide[4] * v - top * pl) / pv).max(0.0);
+                            hide[7] = (pk * v / pv).min(1.0);
+                        }
+                    }
                     let mut changed = gone > 0.0;
                     let (mut qin, mut thin) = (0.0f32, 0.0f32);
                     // from the left neighbor (its rightward flow), the right
@@ -418,25 +447,37 @@ impl Canvas {
                             continue;
                         }
                         let j = fy * w + fx;
-                        let lj = wet.vol[j] + wet.solv[j] / COAT_UM;
+                        // (the liquid above any packed paint, which came)
+                        let vj = wet.vol[j] * (1.0 - packed(wet, j));
+                        let lj = vj + wet.solv[j] / COAT_UM;
                         if lj <= 0.0 {
                             continue;
                         }
-                        let (qp, qs) = (q * wet.vol[j] / lj, q * (wet.solv[j] / COAT_UM) / lj);
+                        let (qp, qs) = (q * vj / lj, q * (wet.solv[j] / COAT_UM) / lj);
                         if qp > 0.0 {
                             qin += qp;
                             thin += qp * th_of(j);
                             cure = if pv + qp > 0.0 { cure + (cure_of(j) - cure) * qp / (pv + qp) } else { cure };
-                            crate::wet::mix_into(&mut pv, &mut lat, &mut hide, qp, &wet.lat[j], wet.hide[j]);
+                            let hj = wet.hide[j];
+                            let hj = if drain { let mut h = crate::bristle::fluid_of(hj); h[4] = crate::bristle::surface_oil(&hj); h } else { hj };
+                            crate::wet::mix_into(&mut pv, &mut lat, &mut hide, qp, &wet.lat[j], hj);
                         }
                         ps += qs;
                         changed = true;
+                    }
+                    // (the drain switch: the ground here drains the film the
+                    // paint came into, as `Surf::add` does; what is left of
+                    // its pores goes back with the rest)
+                    let mut cap = if soaks { absorb[i] } else { 0.0 };
+                    if soaks && qin > 0.0 {
+                        pv = crate::bristle::ground_drain(&mut cap, pv, &mut hide);
                     }
                     let cure = if pv <= 0.0 { 0.0 } else { cure };
                     // (the drying thickness a bare pixel takes, by amount)
                     let own = th_of(i);
                     let th_in = if qin <= 0.0 { own } else if own > 0.0 && v * keep > 0.0 { (own * v * keep + thin) / (v * keep + qin) } else { thin / qin };
-                    (pv, ps, lat, hide, cure, changed, mob_of(pv, ps, cure), th_in)
+                    let flowing = if drain { pv * (1.0 - hide[7].clamp(0.0, 1.0)) } else { pv };
+                    (pv, ps, lat, hide, cure, changed, mob_of(flowing, ps, cure), th_in, cap)
                 })
                 .collect_into_vec(&mut next);
             // the largest mobility now: every pixel that has any is in the
@@ -447,7 +488,7 @@ impl Canvas {
             active.extend(next.iter().enumerate().filter_map(|(k, c)| (c.6 > 0.0).then(|| index(k))));
             // write back
             let px_ok = timed;
-            for (k2, (pv, ps, lat, hide, cure, changed, _, th_in)) in next.iter().copied().enumerate() {
+            for (k2, (pv, ps, lat, hide, cure, changed, _, th_in, cap)) in next.iter().cloned().enumerate() {
                 if !changed {
                     continue;
                 }
@@ -463,6 +504,9 @@ impl Canvas {
                 self.wet.solv[i] = ps * COAT_UM;
                 self.wet.lat[i] = lat;
                 self.wet.hide[i] = hide;
+                if soaks {
+                    self.absorb[i] = cap;
+                }
                 if was_bare && pv >= 1e-5 {
                     self.wet.cover[i] = 1.0;
                 }
@@ -510,13 +554,8 @@ impl Canvas {
 
 #[cfg(test)]
 mod tests {
-    use crate::bristle::{Gesture, Held, Tool, Touch};
     use crate::canvas::Canvas;
     use crate::color::hex;
-    use crate::handling::Handling;
-    use crate::mask::Mask;
-    use crate::palette::Palette;
-    use crate::stipple::Stipple;
     use crate::wet::Paint;
 
     fn canvas(engine: u32) -> Canvas {
@@ -530,566 +569,111 @@ mod tests {
         if t > 0.0 { p.with_thinner(t) } else { p }
     }
 
-    fn thinned_brush(t: f32) -> Held {
-        let mut h = Held::new(Tool::filbert(30.0), 3);
-        h.load(sienna(t), 0.6);
-        h
-    }
-
-    fn total(c: &Canvas, f: impl Fn(&Canvas, f32, f32) -> f32) -> f64 {
-        let fr = c.frame();
-        (0..fr.w * fr.h).map(|i| f(c, fr.ux(i % fr.w), fr.uy(i / fr.w)) as f64).sum()
-    }
-
-    /// Thinner is engine 3 only: before it the film has no solvent, so every
-    /// way of putting a thinned brush or pass on such a canvas panics before
-    /// drawing, rather than letting the solvent vanish.
+    /// With the drain switch the flow's sparse set (`spread`'s `active` and
+    /// its mobilities, built from `mob`) reads each film's packed share: two
+    /// lone spots of paint packed through, under solvent, give up only their
+    /// solvent, which still flows (they are in the set); half packed, they
+    /// keep their packed paint and what leaves is the liquid above it, leaner
+    /// in paint than an unpacked film's (and, thinner, it flows faster);
+    /// without the switch the packed share is not read. (Two spots 60 px apart: the set is sparse, 2 of a box
+    /// some 60 × 3 px.)
     #[test]
-    fn thinned_paint_is_refused_before_engine_3() {
-        type Use = fn(&mut Canvas);
-        let uses: [(&str, Use); 4] = [
-            ("Canvas::drag", |c| c.drag(&mut thinned_brush(0.5), &Gesture::new(vec![(200.0, 500.0), (800.0, 500.0)]), None)),
-            ("Canvas::touch", |c| c.touch(&mut thinned_brush(0.5), &Touch::at(500.0, 500.0), None)),
-            ("Canvas::work", |c| {
-                let (m, pal) = (Mask::full(c.frame()), Palette::named_box("inness").unwrap());
-                c.work(&m, &Handling::new(Tool::filbert(30.0)).piled(&pal, pal.pile(vec![(0, 1.0)]), 0.0).thinner(0.5), 1)
-            }),
-            ("Canvas::stipple", |c| {
-                let (m, pal) = (Mask::full(c.frame()), Palette::named_box("inness").unwrap());
-                c.stipple(&m, &Stipple::new(Tool::stippler(20.0)).piled(&pal, pal.pile(vec![(0, 1.0)]), 0.0).thinner(0.5), 1)
-            }),
-        ];
-        for (name, f) in uses {
-            for engine in [1, 2] {
-                let mut c = canvas(engine);
-                let before = c.seen();
-                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&mut c)));
-                let msg = r.expect_err(name);
-                let msg = msg.downcast_ref::<String>().cloned().unwrap_or_default();
-                assert!(msg.contains(name) && msg.contains("needs engine 3"), "{name}, engine {engine}: {msg}");
-                assert!(c.seen() == before, "{name}, engine {engine}: drew before refusing");
+    fn the_sparse_flow_set_moves_only_the_liquid_above_packed_paint() {
+        let run = |drain: bool, pk: f32| {
+            let mut c = canvas(5).with_drain(drain);
+            c.wet.ensure_solvent();
+            let w = c.f.w;
+            let y = c.f.h / 2;
+            let lat = sienna(0.0).latent();
+            let spots = [y * w + 30, y * w + 90];
+            for &i in &spots {
+                c.wet.vol[i] = 2.0;
+                c.wet.solv[i] = super::COAT_UM;
+                c.wet.lat[i] = lat.clone();
+                c.wet.hide[i] = [0.8, 0.6, 1.0, 0.0, 1.0, 0.7, 0.6, pk, 0.5, 0.0];
+                c.wet.stroke[i] = 1;
             }
-            // engine 3 takes it
-            let mut c = canvas(3);
-            f(&mut c);
-            assert!(total(&c, Canvas::solvent_um) > 0.0, "{name}: engine 3 laid no solvent");
-        }
-    }
-
-    /// `dry()` on a canvas with solvent in its paint is the same as waiting
-    /// on the minute grid until the solvent has gone, then drying: the film
-    /// flows and loses its solvent first, it isn't baked as it lies.
-    #[test]
-    fn dry_with_solvent_waits_it_out_first() {
-        let mut a = canvas(3);
-        for k in 0..6 {
-            let y = 300.0 + 80.0 * k as f32;
-            a.drag(&mut thinned_brush(0.6), &Gesture::new(vec![(150.0, y), (850.0, y + 30.0)]), None);
-        }
-        assert!(total(&a, Canvas::solvent_um) > 0.0);
-        let mut b = a.clone();
-        a.dry();
-        let mut minutes = 0;
-        while total(&b, Canvas::solvent_um) > 0.0 {
-            b.wait(1.0);
-            minutes += 1;
-            assert!(minutes < 10_000, "the solvent never went");
-        }
-        b.dry();
-        assert!(a.seen() == b.seen(), "dry() differs from waiting the solvent out, then drying");
-        assert_eq!(a.clock(), b.clock());
-    }
-
-    /// A stroke's ceiling counts only that stroke's own film: when the
-    /// stroke ids wrap and a new stroke gets an id an old one had, it still
-    /// lays about as much as a stroke under a fresh id. (Not exactly as
-    /// much: the reused id also marks the old stroke's film as the new
-    /// one's own in `Wet::stroke`, which predates the thinner; it costs
-    /// about 5% here. Before the ceilings were forgotten on a wrap, the
-    /// second stroke found its ceiling used up and took paint away: −83
-    /// against 318.)
-    #[test]
-    fn a_reused_stroke_id_starts_a_fresh_ceiling() {
-        let lay = |wrap: bool| -> f64 {
-            let mut c = canvas(3);
-            let g = Gesture::new(vec![(200.0, 500.0), (800.0, 520.0)]);
-            c.drag(&mut thinned_brush(0.5), &g, None);
-            // `current` is one past the last id handed out: the stroke was 1
-            let first = c.wet.current;
-            assert_eq!(first, 2, "the first stroke's id is 1");
-            if wrap {
-                // the next stroke's id wraps round to the first one's
-                c.wet.current = u32::MAX;
-            }
-            let before = total(&c, Canvas::wet_um);
-            c.drag(&mut thinned_brush(0.5), &g, None);
-            if wrap {
-                assert_eq!(c.wet.current, first, "the second stroke's id wrapped round to 1, the first one's");
-            }
-            total(&c, Canvas::wet_um) - before
+            let mut solvent: Vec<usize> = spots.to_vec();
+            c.spread(10.0, &mut solvent);
+            let moved: f64 = spots.iter().flat_map(|&i| [i - 1, i + 1, i - w, i + w]).map(|j| c.wet.vol[j] as f64).sum();
+            let solv: f64 = spots.iter().flat_map(|&i| [i - 1, i + 1, i - w, i + w]).map(|j| c.wet.solv[j] as f64).sum();
+            (c.wet.vol.clone(), spots.map(|i| c.wet.vol[i]), moved, solv)
         };
-        let (fresh, reused) = (lay(false), lay(true));
-        assert!(fresh > 0.0);
-        assert!(reused >= 0.9 * fresh, "a reused id laid {reused}, a fresh one {fresh}");
+        let (_, kept, moved, solv) = run(true, 1.0);
+        assert!(kept == [2.0, 2.0] && moved == 0.0 && solv > 0.0, "packed through: only the solvent leaves ({kept:?} {moved} {solv})");
+        let (fluid, half) = (run(true, 0.0), run(true, 0.5));
+        assert!(fluid.2 > 0.0 && half.2 > 0.0 && half.1.iter().all(|&v| v >= 1.0 - 1e-6), "half packed keeps its packed paint: {:?}", half.1);
+        assert!(half.2 / half.3 < fluid.2 / fluid.3, "the liquid above packed paint is leaner: {} < {}", half.2 / half.3, fluid.2 / fluid.3);
+        crate::tests::image_tolerance::assert_fields_close(run(false, 1.0).0, fluid.0);
     }
 
-    /// HANDOVER 6.2 (1): equal 0.02-minute waits from different places on
-    /// the clock should move about the same paint. Prints the share of the
-    /// paint each wait moves (half the summed |change| over the total).
-    /// `cargo test --release -p paint --lib thinner::tests::short_waits -- --ignored --nocapture`
+    /// With the drain switch, thinned paint that flows off a film whose
+    /// ground is saturated onto bare absorbent ground is laid there as a
+    /// brush lays it (`Surf::add`): the ground drains it (`ground_drain`),
+    /// so its packed share rises and the ground's absorbency there falls by
+    /// the oil it took, and the paint is thinner by that oil. Without the
+    /// switch the flow doesn't read the absorbency: it moves the paint as on
+    /// an oil ground and leaves the absorbency as it was; with the switch on
+    /// an oil ground it flows as without it.
     #[test]
-    #[ignore]
-    fn short_waits() {
-        let mut c = Canvas::new(480, 1.0, hex("#d8cdb8")).with_engine(3);
-        c.prime(hex("#b9a98c"), 0.9, 40.0, 0.6, 0.0, 7);
-        for k in 0..6 {
-            let y = 300.0 + 25.0 * k as f32;
-            let mut h = Held::new(Tool::hog_flat(40.0), 10 + k);
-            h.load(sienna(0.5), 0.9);
-            c.drag(&mut h, &Gesture::new(vec![(250.0, y), (750.0, y + 3.0)]).pressure(0.85, 0.85), None);
-        }
-        let c0 = c;
-        for phase in [0.10f32, 0.50, 0.97, 0.99] {
-            let mut c = c0.clone();
-            let to = (c.clock().floor() + 1.0) as f32 + phase - c.clock() as f32;
-            c.wait(to);
-            let before = c.wet.vol.clone();
-            c.wait(0.02);
-            let moved: f64 = c.wet.vol.iter().zip(&before).map(|(a, b)| (a - b).abs() as f64).sum::<f64>() / 2.0;
-            let all: f64 = before.iter().map(|&v| v as f64).sum();
-            println!("0.02 min from phase {phase:.2}: moved {:.4}% of the paint", 100.0 * moved / all);
-        }
-    }
-
-
-    /// How long a wait with solvent takes (wall clock): a thinned patch at
-    /// 2400 px, then `wait(30)` and `wait(240)`.
-    /// `cargo test --release -p paint --lib thinner::tests::wait_cost -- --ignored --nocapture`
-    #[test]
-    #[ignore]
-    fn wait_cost() {
-        let mut c = Canvas::new(2400, 1.5, hex("#d8cdb8")).with_engine(3);
-        c.prime(hex("#b9a98c"), 0.9, 40.0, 0.6, 0.0, 7);
-        for k in 0..12 {
-            let y = 150.0 + 25.0 * k as f32;
-            let mut h = Held::new(Tool::hog_flat(40.0), 10 + k);
-            h.load(sienna(0.5), 0.9);
-            c.drag(&mut h, &Gesture::new(vec![(150.0, y), (850.0, y + 3.0)]).pressure(0.85, 0.85), None);
-        }
-        for m in [30.0f32, 240.0] {
-            let mut d = c.clone();
-            let t = std::time::Instant::now();
-            d.wait(m);
-            println!("wait({m}): {:.2} s", t.elapsed().as_secs_f64());
-        }
-    }
-
-
-    /// HANDOVER 6.2 (3): one stroke at thinner 0.5, 0.75 and 0.9 on a flat
-    /// ground, then five minutes: the share of its paint the flow moves.
-    /// `cargo test --release -p paint --lib thinner::tests::single_strokes -- --ignored --nocapture`
-    #[test]
-    #[ignore]
-    fn single_strokes() {
-        for t in [0.5f32, 0.75, 0.9] {
-            let mut c = Canvas::new(480, 1.0, hex("#d8cdb8")).with_engine(3);
-            c.prime(hex("#b9a98c"), 0.9, 40.0, 0.6, 0.0, 7);
-            let mut h = Held::new(Tool::hog_flat(40.0), 10);
-            h.load(sienna(t), 0.9);
-            c.drag(&mut h, &Gesture::new(vec![(250.0, 500.0), (750.0, 503.0)]).pressure(0.85, 0.85), None);
-            let before = c.wet.vol.clone();
-            let liquid: Vec<f32> = (0..before.len()).map(|i| before[i] * crate::surface::COAT_UM + c.wet.solv.get(i).copied().unwrap_or(0.0)).filter(|&l| l > 0.01).collect();
-            let mut l = liquid.clone();
-            l.sort_by(f32::total_cmp);
-            c.wait(5.0);
-            let moved: f64 = c.wet.vol.iter().zip(&before).map(|(a, b)| (a - b).abs() as f64).sum::<f64>() / 2.0;
-            let all: f64 = before.iter().map(|&v| v as f64).sum();
-            println!("thinner {t}: wet film median {:.2} µm, p90 {:.2}; 5 min moved {:.4}% of the paint", l[l.len() / 2], l[l.len() * 9 / 10], 100.0 * moved / all);
-        }
-    }
-
-
-    /// Pictures for HANDOVER 6.2 (3): raw umber strokes at thinner 0.5, 0.75
-    /// and 0.9 and a broad thinned wash, each after 5 minutes, saved to
-    /// `THIN_EXP_DIR` with the prefix `THIN_EXP_TAG`.
-    #[test]
-    #[ignore]
-    fn flow_pictures() {
-        use crate::canvas::Crop;
-        let pal = Palette::named_box("inness").unwrap();
-        let umber = pal.pile(vec![(pal.tubes.iter().position(|t| t.name == "raw umber").unwrap(), 1.0)]).laid(0.0);
-        let d = std::path::PathBuf::from(std::env::var("THIN_EXP_DIR").unwrap());
-        let tag = std::env::var("THIN_EXP_TAG").unwrap();
-        let mut c = Canvas::new_window(2400, 1.5, hex("#d8cdb8"), Some(Crop { units: [260.0, 190.0, 740.0, 490.0], margin: 30.0 })).with_engine(3).with_size_mm(440.0);
-        c.prime(hex("#e4dcc8"), 0.9, 40.0, 0.6, 0.0, 7);
-        for (k, t) in [0.5f32, 0.75, 0.9].into_iter().enumerate() {
-            let y = 230.0 + 45.0 * k as f32;
-            let mut h = Held::new(Tool::hog_flat(40.0), 10 + k as u64);
-            h.load(umber.with_thinner(t), 0.9);
-            c.drag(&mut h, &Gesture::new(vec![(290.0, y), (710.0, y + 3.0)]).pressure(0.85, 0.85), None);
-        }
-        for k in 0..5 {
-            let y = 380.0 + 22.0 * k as f32;
-            let mut h = Held::new(Tool::hog_flat(40.0), 50 + k);
-            h.load(umber.with_thinner(0.5), 0.9);
-            c.drag(&mut h, &Gesture::new(vec![(290.0, y), (710.0, y + 3.0)]).pressure(0.85, 0.85), None);
-        }
-        c.wait(5.0);
-        c.save(d.join(format!("{tag}.png"))).unwrap();
-    }
-
-
-    /// Check 9 under the flow without `FLOW_MIN`: for every pixel-minute
-    /// check 9 examines, how much of the miss against exp(-1/τ) comes from
-    /// the flow (solvent in/out) and how much from evaporation alone.
-    /// `cargo test --release -p paint --lib thinner::tests::c09_probe -- --ignored --nocapture`
-    #[test]
-    #[ignore]
-    fn c09_probe() {
-        use super::evaporation_tau_min;
-        let pal = Palette::named_box("inness").unwrap();
-        let i = pal.tubes.iter().position(|t| t.name == "raw sienna").unwrap();
-        let rs = pal.pile(vec![(i, 1.0)]).laid(0.0).with_thinner(0.5);
-        let mut c = Canvas::new(300, 1.0, hex("#d8cdb8")).with_engine(3);
-        c.prime(hex("#b9a98c"), 0.9, 60.0, 0.6, 0.0, 7);
-        let patch = |c: &mut Canvas, x: (f32, f32), seed: u64| {
-            for k in 0..((700.0f32 - 300.0) / 25.0).ceil() as usize {
-                let yk = 300.0 + 400.0 * (k as f32 + 0.5) / 16.0;
-                let mut h = Held::new(Tool::hog_flat(40.0), seed + k as u64);
-                h.load(rs, 0.9);
-                c.drag(&mut h, &Gesture::new(vec![(x.0, yk), (x.1, yk + 3.0)]).pressure(0.85, 0.85), None);
-            }
+    fn paint_the_flow_brings_onto_absorbent_ground_drains_there() {
+        let run = |drain: bool, absorbent: f32| {
+            let mut c = canvas(5).with_drain(drain);
+            c.ground_finish(absorbent);
+            c.wet.ensure_solvent();
+            let (w, y) = (c.f.w, c.f.h / 2);
+            let lat = sienna(0.0).latent();
+            let src = y * w + 60;
+            // (thick paint under as much solvent: the ground under it took
+            // all it could)
+            c.wet.vol[src] = 3.0;
+            c.wet.solv[src] = 3.0 * super::COAT_UM;
+            c.wet.lat[src] = lat;
+            c.wet.hide[src] = [0.8, 0.0, 1.0, 0.0, 0.9, 0.7, 0.6, 0.0, 0.5, 0.0];
+            c.wet.stroke[src] = 1;
+            c.absorb[src] = 0.0;
+            let mut solvent = vec![src];
+            c.spread(10.0, &mut solvent);
+            let near: Vec<usize> = [src - 1, src + 1, src - w, src + w].into();
+            (c.wet.vol.clone(), c.wet.solv.clone(), c.wet.hide.clone(), c.absorb.clone(), near)
         };
-        patch(&mut c, (100.0, 450.0), 41);
-        for k in 0..5 {
-            patch(&mut c, (550.0, 900.0), 141 + 20 * k);
+        let full = crate::canvas::ABSORB_COATS;
+        let (vol, _, hide, absorb, near) = run(true, 1.0);
+        for &j in &near {
+            assert!(vol[j] > 0.0 && hide[j][7] > 0.5 && absorb[j] < full - 1e-4, "drained where it came: {} coats packed {} absorbency {}", vol[j], hide[j][7], absorb[j]);
+            assert!(hide[j][4] < 0.9, "leaner: {:?}", hide[j]);
         }
-        let f = c.frame();
-        let (w, hh) = (f.w, f.h);
-        let ids: Vec<usize> = (0..w * hh)
-            .filter(|&i| {
-                let (x, y) = (f.ux(i % w), f.uy(i / w));
-                (x >= 150.0 && x < 400.0 || x >= 600.0 && x < 850.0) && y >= 350.0 && y < 650.0
-            })
-            .collect();
-        let pu = |c: &Canvas| -> Vec<f32> { ids.iter().map(|&i| c.wet.vol[i] * super::COAT_UM).collect() };
-        let su = |c: &Canvas| -> Vec<f32> { ids.iter().map(|&i| c.wet.solv[i]).collect() };
-        let (mut examined, mut fails) = (0usize, 0usize);
-        let mut worst = (0.0f64, 0usize, 0usize, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
-        let mut flow_abs = Vec::new();
-        let eps = [1e-3f64, 3e-3, 1e-2, 3e-2];
-        let mut sel = vec![(0usize, 0usize, [0usize; 2]); eps.len()];
-        for m in 1..=40 {
-            let (ph, ps) = (pu(&c), su(&c));
-            let ph_all: Vec<f32> = c.wet.vol.iter().map(|v| v * super::COAT_UM).collect();
-            let ps_all = c.wet.solv.clone();
-            // per pixel: product of evaporation-only keeps; net solvent the flow moved
-            let mut keep = vec![1.0f64; ids.len()];
-            let mut flow = vec![0.0f64; ids.len()];
-            for _ in 0..super::FLOW_TICKS {
-                let s0 = su(&c);
-                let mut d = c.clone();
-                let mut solvent = d.wet.solv.iter().enumerate().filter_map(|(i, &s)| (s > 0.0).then_some(i)).collect();
-                d.evaporate_indices(1.0 / super::FLOW_TICKS as f32, &mut solvent);
-                let se = su(&d);
-                c.wait(1.0 / super::FLOW_TICKS as f32);
-                let s1 = su(&c);
-                for k in 0..ids.len() {
-                    if s0[k] > 0.0 {
-                        keep[k] *= se[k] as f64 / s0[k] as f64;
-                    }
-                    flow[k] += (s1[k] - se[k]) as f64;
-                }
-            }
-            let (h1, s1) = (pu(&c), su(&c));
-            for k in 0..ids.len() {
-                let (a, b) = (ps[k] as f64, s1[k] as f64);
-                let d = ((h1[k] - ph[k]) / ph[k].max(1e-6)).abs() as f64;
-                if ph[k] < 1.0 || d > 1e-3 || a < 0.01 {
-                    continue;
-                }
-                // the 4-neighborhood's solvent ÷ paint at the minute's start
-                let r = |j: usize| ps[j] as f64 / (ph[j] as f64).max(1e-9);
-                let (x, y) = (ids[k] % w, ids[k] / w);
-                let mut spread = 0.0f64;
-                for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
-                    let j = ((y as i64 + dy) as usize) * w + (x as i64 + dx) as usize;
-                    let jr = ps_all[j] as f64 / (ph_all[j] as f64).max(1e-9);
-                    spread = spread.max((jr - r(k)).abs() / r(k));
-                }
-                for (e, cnt) in eps.iter().zip(sel.iter_mut()) {
-                    if spread <= *e {
-                        cnt.0 += 1;
-                        if (b / a - (-1.0f64 / evaporation_tau_min(ph[k])).exp()).abs() > 1e-4 + 2.0 * d {
-                            cnt.1 += 1;
-                        }
-                        cnt.2[if f.ux(ids[k] % w) < 500.0 { 0 } else { 1 }] += 1;
-                    }
-                }
-                examined += 1;
-                let want = (-1.0f64 / evaporation_tau_min(ph[k])).exp();
-                let got = b / a;
-                flow_abs.push((flow[k] / a).abs());
-                let miss = (got - want).abs() - (1e-4 + 2.0 * d);
-                if miss > 0.0 {
-                    fails += 1;
-                }
-                if miss > worst.0 || worst.1 == 0 {
-                    worst = (miss, m, ids[k], got - want, keep[k] - want, flow[k] / a, d);
-                }
-            }
+        let (off, oil) = (run(false, 1.0), run(false, 0.0));
+        crate::tests::image_tolerance::assert_fields_close(off.0.iter().copied(), oil.0.iter().copied());
+        crate::tests::image_tolerance::assert_fields_close(off.1.iter().copied(), oil.1.iter().copied());
+        crate::tests::image_tolerance::assert_fields_close(off.2.iter().flatten().copied(), oil.2.iter().flatten().copied());
+        assert!(off.3.iter().filter(|&&a| a != full).count() == 1, "nor changed (but under the source, set saturated)");
+        for &j in &near {
+            assert!(off.2[j][7] == 0.0 && vol[j] < off.0[j], "unpacked, and thicker by the oil: {} > {}", off.0[j], vol[j]);
         }
-        for (e, cnt) in eps.iter().zip(&sel) {
-            println!("neighbors' ratio within {e:.0e}: {} pixel-minutes (thin {}, thick {}), {} over", cnt.0, cnt.2[0], cnt.2[1], cnt.1);
-        }
-        flow_abs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let q = |p: f64| flow_abs[((flow_abs.len() - 1) as f64 * p) as usize];
-        println!("pixel-minutes examined {examined}, over check 9's tolerance {fails}");
-        println!("flow's net solvent / solvent at minute start, |.|: median {:.2e}, p99 {:.2e}, max {:.2e}", q(0.5), q(0.99), q(1.0));
-        println!("worst: margin {:.2e} at minute {}, pixel {}: got-law {:.3e} = evaporation-only {:.3e} + flow {:.3e} (paint change d {:.2e}, allowed {:.2e})",
-            worst.0, worst.1, worst.2, worst.3, worst.4, worst.5, worst.6, 1e-4 + 2.0 * worst.6);
+        let on_oil = run(true, 0.0);
+        crate::tests::image_tolerance::assert_fields_close(on_oil.0, oil.0);
+        crate::tests::image_tolerance::assert_fields_close(on_oil.1, oil.1);
+        crate::tests::image_tolerance::assert_fields_close(on_oil.2.iter().flatten().copied(), oil.2.iter().flatten().copied());
     }
 
-    /// AGENT_BRIEF_V2 §4c: today's rule against the exchange experiment
-    /// (`set_exchange`), raw umber thinned 0.5, on linen and on a smooth
-    /// ground. Scenes: one stroke; a broad pass (8 overlapping strokes,
-    /// each freshly loaded); three such passes wet; three with the paint
-    /// dried between; one load scrubbed 4 times over a band (lifted between,
-    /// no reload); one exact stroke against the same stroke in two calls.
-    /// Prints paint (µm) mean and relative spread in the middle, solvent,
-    /// and the brush's paint left, right after and after 5 minutes. With
-    /// `EXCH_DIR`, saves each canvas as PNG.
-    /// `EXCH_DIR=/tmp/x cargo test --release -p paint --lib thinner::tests::exchange_scenes -- --ignored --nocapture`
     #[test]
-    #[ignore]
-    fn exchange_scenes() {
-        use crate::Linen;
-        let pal = Palette::named_box("inness").unwrap();
-        let umber = pal.pile(vec![(pal.tubes.iter().position(|t| t.name == "raw umber").unwrap(), 1.0)]).laid(0.0).with_thinner(0.5);
-        let out = std::env::var("EXCH_DIR").ok().map(std::path::PathBuf::from);
-        let base = |linen: bool| {
-            let mut c = Canvas::new(1200, 0.7, hex("#d8cdb8")).with_engine(3);
-            if linen {
-                c = c.with_linen(Linen::fine(3));
-            }
-            c.prime(hex("#e4dcc8"), 0.9, 60.0, 0.6, if linen { 0.2 } else { 0.0 }, 7);
-            c
-        };
-        let g = |pts: Vec<(f32, f32)>| Gesture::new(pts).pressure(0.85, 0.85);
-        let pass = |c: &mut Canvas, seed: u64| {
-            for k in 0..8 {
-                let y = 250.0 + 25.0 * k as f32;
-                let mut h = Held::new(Tool::hog_flat(40.0), seed + k);
-                h.load(umber, 0.9);
-                c.drag(&mut h, &g(vec![(250.0, y), (750.0, y + 3.0)]), None);
-            }
-        };
-        // (paint µm mean, relative spread, solvent µm mean) in a rectangle
-        let stats = |c: &Canvas, r: (f32, f32, f32, f32)| {
-            let f = c.f;
-            let (mut n, mut sp, mut sp2, mut ss) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
-            for i in 0..f.w * f.h {
-                let (x, y) = (f.ux(i % f.w), f.uy(i / f.w));
-                if x >= r.0 && x < r.2 && y >= r.1 && y < r.3 {
-                    let p = (c.wet.vol[i] * super::COAT_UM) as f64;
-                    n += 1.0;
-                    sp += p;
-                    sp2 += p * p;
-                    ss += c.wet.solv[i] as f64;
-                }
-            }
-            let m = sp / n;
-            (m, (sp2 / n - m * m).max(0.0).sqrt() / m.max(1e-9), ss / n)
-        };
-        let mid = (350.0, 280.0, 650.0, 420.0);
-        for linen in [true, false] {
-            let sets: Vec<(bool, f32, f32)> = std::env::var("EXCH_SETS").ok().map_or(vec![(false, 0.0, 0.0), (true, 0.0, 0.0)], |v| {
-                v.split(';').map(|t| if t == "today" { (false, 0.0, 0.0) } else { let (k, j) = t.split_once(',').unwrap(); (true, k.parse().unwrap(), j.parse().unwrap()) }).collect()
-            });
-            if !linen && std::env::var("EXCH_LINEN_ONLY").is_ok() {
-                continue;
-            }
-            for (ex, kk, jj) in sets {
-                super::set_exchange(ex);
-                super::set_exchange_kj(kk, jj);
-                let tag = format!("{}-{}", if linen { "linen" } else { "smooth" }, if ex { format!("k{kk}j{jj}") } else { "today".into() });
-                let mut report = |name: &str, c: &mut Canvas, r: (f32, f32, f32, f32), brush: Option<f64>| {
-                    let a = stats(c, r);
-                    let mut d = c.clone();
-                    d.wait(5.0);
-                    let b = stats(&d, r);
-                    println!(
-                        "{tag:>16} {name:<14} paint {:6.2} µm (spread {:.2}) solvent {:5.2} | after 5 min paint {:6.2} (spread {:.2}) solvent {:5.2}{}",
-                        a.0, a.1, a.2, b.0, b.1, b.2,
-                        brush.map_or(String::new(), |p| format!(" | brush paint left {:.0}%", 100.0 * p))
-                    );
-                    if let Some(o) = &out {
-                        std::fs::create_dir_all(o).unwrap();
-                        c.save(o.join(format!("{tag}-{}.png", name.replace(' ', "_")))).unwrap();
-                    }
-                };
-                // one stroke
-                let mut c = base(linen);
-                let mut h = Held::new(Tool::hog_flat(40.0), 5);
-                h.load(umber, 0.9);
-                let p0 = h.carried().0;
-                c.drag(&mut h, &g(vec![(250.0, 350.0), (750.0, 353.0)]), None);
-                report("1 stroke", &mut c, (350.0, 340.0, 650.0, 362.0), Some(h.carried().0 / p0));
-                // a broad pass, three wet, three dried between
-                for (name, n, dry) in [("broad pass", 1, false), ("3 passes wet", 3, false), ("3 passes dry", 3, true)] {
-                    let mut c = base(linen);
-                    for p in 0..n {
-                        if p > 0 && dry {
-                            c.dry();
-                        }
-                        pass(&mut c, 100 * p as u64 + 1);
-                    }
-                    report(name, &mut c, mid, None);
-                }
-                // one load scrubbed back and forth 4 times
-                let mut c = base(linen);
-                let mut h = Held::new(Tool::hog_flat(40.0), 9);
-                h.load(umber, 0.9);
-                let p0 = h.carried().0;
-                for k in 0..4 {
-                    let (a, b) = if k % 2 == 0 { (250.0, 750.0) } else { (750.0, 250.0) };
-                    c.drag(&mut h, &g(vec![(a, 350.0), (b, 352.0)]), None);
-                    if k == 0 || k == 3 {
-                        report(&format!("scrub {}", k + 1), &mut c, (350.0, 340.0, 650.0, 362.0), Some(h.carried().0 / p0));
-                    }
-                }
-                // one exact stroke, whole and in two calls
-                let exact = |pts: Vec<(f32, f32)>| {
-                    let mut g = g(pts);
-                    (g.attack, g.release, g.shake) = (0.0, 0.0, 0.0);
-                    g
-                };
-                let mut whole = base(linen);
-                let mut h = Held::new(Tool::hog_flat(40.0), 13);
-                h.load(umber, 0.9);
-                whole.drag(&mut h, &exact(vec![(250.0, 350.0), (750.0, 350.0)]), None);
-                let mut split = base(linen);
-                let mut h2 = Held::new(Tool::hog_flat(40.0), 13);
-                h2.load(umber, 0.9);
-                split.drag(&mut h2, &exact(vec![(250.0, 350.0), (500.0, 350.0)]), None);
-                split.drag(&mut h2, &exact(vec![(500.0, 350.0), (750.0, 350.0)]), None);
-                let (a, b) = (stats(&whole, (350.0, 340.0, 650.0, 362.0)), stats(&split, (350.0, 340.0, 650.0, 362.0)));
-                let maxd = whole.wet.vol.iter().zip(&split.wet.vol).map(|(x, y)| ((x - y) * super::COAT_UM).abs()).fold(0.0f32, f32::max);
-                println!("{tag:>16} whole/2 calls  paint {:.2} / {:.2} µm, largest pixel difference {:.2} µm", a.0, b.0, maxd);
-            }
-        }
-        super::set_exchange(false);
-        super::set_exchange_kj(0.0, 0.0);
+    fn drained_flow_conserves_integrated_scattering() {
+        let mut c = canvas(5).with_drain(true);
+        c.ground_finish(1.0);
+        c.wet.ensure_solvent();
+        let src = (c.f.h / 2) * c.f.w + c.f.w / 2;
+        c.wet.vol[src] = 3.0;
+        c.wet.solv[src] = 3.0 * super::COAT_UM;
+        c.wet.lat[src] = sienna(0.0).latent();
+        c.wet.hide[src] = [0.8, 0.0, 1.0, 0.0, 0.9, 0.7, 0.6, 0.0, 0.5, 0.0];
+        c.wet.stroke[src] = 1;
+        c.absorb[src] = 0.0;
+        let mut solvent = vec![src];
+        c.spread(10.0, &mut solvent);
+        let mass: f64 = c.wet.vol.iter().zip(&c.wet.hide).map(|(&v, h)| (v * h[0]) as f64).sum();
+        let volume: f32 = c.wet.vol.iter().sum();
+        assert!(volume < 3.0 - 1e-4);
+        assert!((mass - 2.4).abs() < 1e-6, "2.4 -> {mass}");
     }
-
-    /// Side checks for `exchange_scenes`: linen against smooth at light
-    /// pressure; where a stroke in two calls differs from it whole.
-    #[test]
-    #[ignore]
-    fn exchange_side() {
-        use crate::Linen;
-        let pal = Palette::named_box("inness").unwrap();
-        let umber = pal.pile(vec![(pal.tubes.iter().position(|t| t.name == "raw umber").unwrap(), 1.0)]).laid(0.0).with_thinner(0.5);
-        let base = |linen: bool| {
-            let mut c = Canvas::new(1200, 0.7, hex("#d8cdb8")).with_engine(3);
-            if linen {
-                c = c.with_linen(Linen::fine(3));
-            }
-            c.prime(hex("#e4dcc8"), 0.9, 60.0, 0.6, if linen { 0.2 } else { 0.0 }, 7);
-            c
-        };
-        for p in [0.85f32, 0.5, 0.3] {
-            for load in [0.9f32, 0.3] {
-                let mut m = [0.0f64; 2];
-                for (k, linen) in [true, false].into_iter().enumerate() {
-                    let mut c = base(linen);
-                    let mut h = Held::new(Tool::hog_flat(40.0), 5);
-                    h.load(umber, load);
-                    c.drag(&mut h, &Gesture::new(vec![(250.0, 350.0), (750.0, 353.0)]).pressure(p, p), None);
-                    m[k] = c.wet.vol.iter().map(|v| *v as f64).sum::<f64>() * super::COAT_UM as f64;
-                }
-                println!("pressure {p} load {load}: paint laid linen {:.0} smooth {:.0} (µm·px)", m[0], m[1]);
-            }
-        }
-        for ex in [false, true] {
-            super::set_exchange(ex);
-            let exact = |pts: Vec<(f32, f32)>| {
-                let mut g = Gesture::new(pts).pressure(0.85, 0.85);
-                (g.attack, g.release, g.shake) = (0.0, 0.0, 0.0);
-                g
-            };
-            let mut whole = base(true);
-            let mut h = Held::new(Tool::hog_flat(40.0), 13);
-            h.load(umber, 0.9);
-            whole.drag(&mut h, &exact(vec![(250.0, 350.0), (750.0, 350.0)]), None);
-            let mut split = base(true);
-            let mut h2 = Held::new(Tool::hog_flat(40.0), 13);
-            h2.load(umber, 0.9);
-            split.drag(&mut h2, &exact(vec![(250.0, 350.0), (500.0, 350.0)]), None);
-            split.drag(&mut h2, &exact(vec![(500.0, 350.0), (750.0, 350.0)]), None);
-            // the same line in one call with 51 points
-            let mut dense = base(true);
-            let mut h3 = Held::new(Tool::hog_flat(40.0), 13);
-            h3.load(umber, 0.9);
-            dense.drag(&mut h3, &exact((0..=50).map(|k| (250.0 + 10.0 * k as f32, 350.0)).collect()), None);
-            let dd = whole.wet.vol.iter().zip(&dense.wet.vol).map(|(x, y)| ((x - y) * super::COAT_UM).abs()).fold(0.0f32, f32::max);
-            println!("exchange {ex}: 2 points against 51 in one call: largest difference {dd:.3} µm");
-            let f = whole.f;
-            // the difference by x band (units), largest and mean
-            let mut bands = vec![(0.0f32, 0.0f64, 0usize); 20];
-            for i in 0..f.w * f.h {
-                let d = ((whole.wet.vol[i] - split.wet.vol[i]) * super::COAT_UM).abs();
-                let b = ((f.ux(i % f.w) / 50.0) as usize).min(19);
-                bands[b].0 = bands[b].0.max(d);
-                bands[b].1 += d as f64;
-                bands[b].2 += 1;
-            }
-            let row: Vec<String> = bands.iter().enumerate().filter(|(_, b)| b.0 > 0.0).map(|(k, b)| format!("x{}:{:.1}", k * 50, b.0)).collect();
-            println!("exchange {ex}: largest difference by 50-unit band: {}", row.join(" "));
-        }
-        super::set_exchange(false);
-    }
-
-    /// Fingerprint of the thinner's state after thinned strokes and waits
-    /// (for checking that a refactor leaves results bit-identical).
-    #[test]
-    #[ignore]
-    fn fingerprint() {
-        fn h(acc: &mut u64, v: &[f32]) {
-            for x in v {
-                for b in x.to_bits().to_le_bytes() {
-                    *acc = (*acc ^ b as u64).wrapping_mul(0x100000001b3);
-                }
-            }
-        }
-        let mut c = Canvas::new(480, 1.0, hex("#d8cdb8")).with_engine(3);
-        c.prime(hex("#b9a98c"), 0.9, 40.0, 0.6, 0.0, 7);
-        for (k, t) in [0.5f32, 0.75, 0.9, 0.95].into_iter().enumerate() {
-            let y = 200.0 + 60.0 * k as f32;
-            let mut hd = Held::new(Tool::hog_flat(40.0), 10 + k as u64);
-            hd.load(sienna(t), 0.9);
-            hd.load(sienna(t), 0.9);
-            c.drag(&mut hd, &Gesture::new(vec![(250.0, y), (750.0, y + 3.0)]).pressure(0.85, 0.85), None);
-        }
-        for k in 0..6 {
-            let y = 520.0 + 20.0 * k as f32;
-            let mut hd = Held::new(Tool::hog_flat(40.0), 40 + k);
-            hd.load(sienna(0.5), 0.9);
-            c.drag(&mut hd, &Gesture::new(vec![(200.0, y), (800.0, y + 3.0)]).pressure(0.85, 0.85), None);
-        }
-        for (step, m) in [0.02f32, 0.37, 1.0, 3.0, 0.02, 10.0, 30.0].into_iter().enumerate() {
-            c.wait(m);
-            if step == 3 {
-                let mut hd = Held::new(Tool::hog_flat(30.0), 99);
-                hd.load(sienna(0.6), 0.9);
-                c.drag(&mut hd, &Gesture::new(vec![(300.0, 150.0), (320.0, 700.0)]).pressure(0.8, 0.8), None);
-            }
-            let mut acc = 0xcbf29ce484222325u64;
-            h(&mut acc, &c.wet.vol);
-            h(&mut acc, &c.wet.solv);
-            h(&mut acc, &c.film);
-            println!("FP step {step} wait {m}: {acc:016x}");
-        }
-    }
-
 }

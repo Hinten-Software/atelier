@@ -75,7 +75,7 @@ pub fn asks(o: &Table) -> Result<bool> {
 
 const PALETTES: &str = "friedrich_1820, friedrich_early, friedrich_1820_greens, friedrich_early_greens";
 
-fn palette_named(name: &str, engine: u32) -> Result<Palette> {
+fn palette_named(name: &str, engine: u32, drain: bool) -> Result<Palette> {
     let mut p = match name {
         "friedrich_1820" | "friedrich" => Palette::cobalt_box(),
         "friedrich_early" => Palette::smalt_box(),
@@ -84,6 +84,7 @@ fn palette_named(name: &str, engine: u32) -> Result<Palette> {
         o => return err(format!("palette {o:?}: {PALETTES}")),
     };
     p.engine = engine;
+    p.drain = drain;
     Ok(p)
 }
 
@@ -118,14 +119,15 @@ pub fn canvas(lua: &Lua, st: &S, o: Table) -> Result<Value> {
     if st.borrow().canvas.is_some() {
         return err("the canvas is already set up (canvas{} is the first chunk)");
     }
-    let engine = st.borrow().tubes.engine;
+    let (engine, drain) = (st.borrow().tubes.engine, st.borrow().tubes.drain);
     let name: String = o.get::<Option<String>>("style")?.unwrap_or_else(|| "friedrich".into());
     let palname = o.get::<Option<String>>("palette")?;
     let mut sty = match name.as_str() {
-        "friedrich" => friedrich(palette_named(palname.as_deref().unwrap_or("friedrich_1820"), engine)?),
-        "friedrich_early" => friedrich_early(palette_named(palname.as_deref().unwrap_or("friedrich_early"), engine)?),
+        "friedrich" => friedrich(palette_named(palname.as_deref().unwrap_or("friedrich_1820"), engine, drain)?),
+        "friedrich_early" => friedrich_early(palette_named(palname.as_deref().unwrap_or("friedrich_early"), engine, drain)?),
         o => return err(format!("style {o:?}: friedrich or friedrich_early")),
     };
+    sty.palette.quarter_tiles = st.borrow().tubes.quarter_tiles;
     if let Some(mm) = num(&o, "size")? {
         if !(50.0..=5000.0).contains(&mm) {
             return err("size: the canvas width in mm, 50 to 5000");
@@ -138,7 +140,7 @@ pub fn canvas(lua: &Lua, st: &S, o: Table) -> Result<Value> {
     }
     let seed = o.get::<Option<u64>>("seed")?.unwrap_or(1);
     let width = st.borrow().width;
-    let mut c = crate::ground_cache::prepare(&sty, width, aspect, seed);
+    let mut c = crate::ground_cache::prepare(&sty, width, aspect, seed).with_drain(drain);
     let h = c.height();
     let pal = Pal(Rc::new(sty.palette.clone()));
     {
@@ -149,6 +151,7 @@ pub fn canvas(lua: &Lua, st: &S, o: Table) -> Result<Value> {
         s.clock = 0.0;
         time::start(&mut c);
         s.hand = time::Hand::default();
+        s.recording_ground = crate::live_frames::ground_signature(&c);
         s.canvas = Some(c);
         s.style = Some(Rc::new(sty));
         let sz = num(&o, "size")?.map(|mm| format!(", size={mm}")).unwrap_or_default();
@@ -242,7 +245,7 @@ fn color_field(st: &S, v: &Value, b: (f32, f32, f32, f32)) -> Result<FieldBox<Rg
 /// `color_over=`: {shift={dL, da, db}} or function(x, y, under) -> color,
 /// read against what is on the canvas before the pass (on the field grid).
 fn over_field(st: &S, v: &Value, b: (f32, f32, f32, f32)) -> Result<FieldBox<Rgb>> {
-    let under = |x: f32, y: f32| -> Result<Rgb> { Ok(st.borrow().canvas.as_ref().ok_or_else(no_canvas)?.under(x, y, api::FIELD_STEP * 0.5)) };
+    let under = |x: f32, y: f32| -> Result<Rgb> { time::read("color_over", || Ok(st.borrow().canvas.as_ref().ok_or_else(no_canvas)?.under(x, y, api::FIELD_STEP * 0.5))) };
     match v {
         Value::Table(t) => {
             let sh: Vec<f32> = t.get("shift")?;
@@ -364,7 +367,7 @@ pub fn brushload(st: &S, p: &Value, extra: &Value) -> Result<Option<(paint::Pain
     if let Value::UserData(u) = p
         && let Ok(pu) = u.borrow::<PaintU>()
     {
-        return Ok(Some((pu.0, pu.0.color)));
+        return Ok(Some((pu.0.clone(), pu.0.color)));
     }
     if !matches!(p, Value::String(_) | Value::Table(_)) && !matches!(p, Value::UserData(u) if u.borrow::<Col>().is_ok()) {
         return Ok(None);
@@ -391,7 +394,7 @@ fn paint_of(want: Rgb, o: Option<&Table>) -> Result<paint::Paint> {
     Ok(paint::Paint::new(want, h, s))
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct PaintU(pub paint::Paint);
 impl UserData for PaintU {
     fn add_methods<M_: UserDataMethods<Self>>(m: &mut M_) {
@@ -465,7 +468,10 @@ fn install(lua: &Lua, st: &S) -> Result<()> {
         Ok(Col(paint::shift(rgb_of(&c)?, dl, da.unwrap_or(0.0), db.unwrap_or(0.0))))
     })?)?;
     let engine = st.borrow().tubes.engine;
-    g.set("palette", lua.create_function(move |_, name: String| Ok(Pal(Rc::new(palette_named(&name, engine)?))))?)?;
+    // (the drain switch read when it is called: it may be set after the
+    // globals, `Session::with_drain`)
+    let st1 = st.clone();
+    g.set("palette", lua.create_function(move |_, name: String| Ok(Pal(Rc::new(palette_named(&name, engine, st1.borrow().tubes.drain)?))))?)?;
     let st1 = st.clone();
     g.set("paint", lua.create_function(move |_, (c, o): (Value, Option<Table>)| {
         let _ = &st1;
@@ -474,8 +480,10 @@ fn install(lua: &Lua, st: &S) -> Result<()> {
     // sample(x, y, r?): what is on the canvas there
     let st1 = st.clone();
     g.set("sample", lua.create_function(move |_, (x, y, r): (f32, f32, Option<f32>)| {
-        let s = st1.borrow();
-        Ok(Col(s.canvas.as_ref().ok_or_else(no_canvas)?.under(x, y, r.unwrap_or(1.0))))
+        Ok(Col(time::read("sample", || {
+            let s = st1.borrow();
+            Ok(s.canvas.as_ref().ok_or_else(no_canvas)?.under(x, y, r.unwrap_or(1.0)))
+        })?))
     })?)?;
     // show(...): an overlay for looking; nothing on the canvas
     g.set("show", lua.create_function(|_, _: Variadic<Value>| Ok(()))?)?;
@@ -528,21 +536,25 @@ fn install(lua: &Lua, st: &S) -> Result<()> {
             s.canvas.as_mut().ok_or_else(no_canvas)?.wait((h * 60.0) as f32);
             Ok(())
         })?;
+        let tally = time::read("rest_tally", || Ok(st1.borrow().canvas.as_ref().ok_or_else(no_canvas)?.tally()))?;
         let mut s = st1.borrow_mut();
         s.hand = time::Hand::default();
         let (n, _, _) = si.get();
-        si.set((n + 1, s.clock, s.canvas.as_ref().ok_or_else(no_canvas)?.tally()));
+        si.set((n + 1, s.clock, tally));
         Ok(s.clock)
     })?)?;
     let (st1, si) = (st.clone(), sitting);
     g.set("timesheet", lua.create_function(move |lua, ()| {
         time::flush(&st1, true);
+        let (sh, tally) = time::read("timesheet", || {
+            let s = st1.borrow();
+            let c = s.canvas.as_ref().ok_or_else(no_canvas)?;
+            Ok((c.stage_shares(), c.tally()))
+        })?;
         let s = st1.borrow();
-        let c = s.canvas.as_ref().ok_or_else(no_canvas)?;
         let (n, start, base) = si.get();
         let t: Table = lua.create_table()?;
-        let sh = c.stage_shares();
-        let k = c.tally().since(&base);
+        let k = tally.since(&base);
         t.set("clock", s.clock)?;
         t.set("sitting", s.clock - start)?;
         t.set("sittings", n)?;
@@ -1033,56 +1045,4 @@ pub fn world_method(lua: &Lua, key: &str) -> Result<Value> {
         _ => return Ok(Value::Nil),
     };
     Ok(Value::Function(f))
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::session::{Session, box_for, parse_program};
-
-    /// Replay an old log to its end at a small width; the chunk that fails, if one does.
-    /// The six tests below replay whole paintings (20 to 38 chunks): no test command runs
-    /// them (the overnight plan of 2026-10-04 forbids painting replays in tests; see
-    /// notes/speed/SKIPPED.md for the coverage this leaves out).
-    fn replays(log: &str) {
-        let path = format!("{}/../../notes/{log}", env!("CARGO_MANIFEST_DIR"));
-        let text = std::fs::read_to_string(&path).unwrap();
-        let mut s = Session::replay_with(200, box_for(Some(&text)).unwrap()).unwrap();
-        for (i, c) in parse_program(&text).iter().enumerate() {
-            if let Err(e) = s.run(c) {
-                panic!("{log}: chunk {} failed:\n{e}", i + 1);
-            }
-        }
-        assert!(s.st.borrow().canvas.is_some());
-    }
-
-    #[test]
-    #[ignore = "replays whole paintings: never run"]
-    fn easel3_free_replays() {
-        replays("amnesia3/easel3_free.lua");
-    }
-    #[test]
-    #[ignore = "replays whole paintings: never run"]
-    fn easel3_green_replays() {
-        replays("amnesia3/easel3_green.lua");
-    }
-    #[test]
-    #[ignore = "replays whole paintings: never run"]
-    fn easel3_near_replays() {
-        replays("amnesia3/easel3_near.lua");
-    }
-    #[test]
-    #[ignore = "replays whole paintings: never run"]
-    fn easel4_free_replays() {
-        replays("amnesia4/easel4_free.lua");
-    }
-    #[test]
-    #[ignore = "replays whole paintings: never run"]
-    fn easel4_green_replays() {
-        replays("amnesia4/easel4_green.lua");
-    }
-    #[test]
-    #[ignore = "replays whole paintings: never run"]
-    fn easel4_near_replays() {
-        replays("amnesia4/easel4_near.lua");
-    }
 }

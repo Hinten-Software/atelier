@@ -14,7 +14,7 @@ easel=$repo/engine/target/painter/boxes/$box/easel
 s=$(mktemp -d /Users/Shared/atelier/live-check.XXXXXX)
 trap '"$s/bin/easel" close >/dev/null 2>&1 || true; rm -rf "$s"' EXIT
 mkdir -p "$s/bin" "$s/paintings/lua" "$s/notes"
-cp "$easel" "$s/bin/easel"
+cp "$easel" "$s/bin/easel"; cp "$(dirname "$easel")/studio" "$(dirname "$easel")/width" "$s/bin/"  # a painter's easel, as runner/studio.py sets one up
 E() { (cd "$s" && "$s/bin/easel" "$@"); }
 chunk() { E do - <<<"$1" | tail -1; }
 E open >/dev/null

@@ -186,6 +186,10 @@ def prepare(artist: Artist, theme: str | None, box: str = DEFAULT_BOX) -> dict:
     if easel.exists():  # a work that ended outside finish() (its ceiling, a killed runner) left its easel serving
         subprocess.run([str(easel), "close"], cwd=s, capture_output=True, timeout=120,
                        env={"PATH": "/usr/bin:/bin", "HOME": str(artist.root)})
+    # beside it, first: `studio` makes it a painter's easel for this box, `width` a new painting's width (4800 px);
+    # an easel without `studio` would be a developer's
+    for f in ("studio", "width"):
+        shutil.copy2(painter_easel(box).with_name(f), s / "bin" / f)
     # a new file, not the old one written over: macOS kills every exec of a binary changed in place while it runs
     tmp = easel.with_name("easel.new")
     shutil.copy2(painter_easel(box), tmp)

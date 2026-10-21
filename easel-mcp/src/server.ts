@@ -15,8 +15,12 @@
  * Nothing here counts the artist's work or times the machine (see upstream/easel-client.ts).
  *
  * Kept in step with upstream/easel-tools.ts (her current version, for reference): when it changes (tools/upstream),
- * the same change is made here, in MCP's terms. Last ported: claude-paint 78c86ce (scratch canvas; look's light,
- * relief and gallery modes, survey, compare, hold, palette; the painting's clock in paint's reply).
+ * the same change is made here, in MCP's terms. Last ported: claude-paint fea9aa6 (2026-10-21: look's mask and
+ * scaled crops, compare of any studio image, value in the gallery light; log's find; status of a running chunk and of
+ * a rebuild; the fresh scratch canvas and glaze coverage in paint's description; her client's timeouts that say what
+ * landed). Not served (the owner, 2026-10-21): probe and look's edges mode (numbers and a computed map, not a
+ * painter's way of looking), ref and the reference library (the subject is the painter's), pastel's pose and side.
+ * Before that: 78c86ce (scratch canvas; look's light, relief and gallery modes, survey, compare, hold, palette).
  */
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, relative, resolve, sep } from "node:path";
@@ -25,7 +29,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { reviseJournal } from "./upstream/journal.ts";
 import {
-	atEasel, hideCounters, logReply, lookArgs, paintReply, renameLooks, statusReply, studioPath, tail, toolWords,
+	atEasel, hideCounters, logFind, logReply, lookArgs, paintReply, renameLooks, statusReply, studioPath, tail, toolWords,
 } from "./upstream/easel-client.ts";
 
 const studio = resolve(process.argv[2] ?? process.cwd());
@@ -46,7 +50,17 @@ function sent(r: { content: Content[]; isError?: boolean }) {
 	return r;
 }
 const say = (t: string) => sent({ content: [{ type: "text", text: t }] as Content[] });
-const fail = (t: string) => sent({ content: [{ type: "text", text: t }] as Content[], isError: true });
+// the easel says how far a rebuild of the painting from its log has got in the painter's chunks ("rebuilding from the
+// log (3 of 20 chunks)"): nothing here counts the artist's work (requirements NFR-9), so it says only that it rebuilds
+// (and a reopen that fails relays the easel's own lines: "resuming chunk 3/20", "reconstructed 18 chunks from
+// /Users/Shared/<xx>/studio/out/easel/painting/replay.ckpt in 4.2 s")
+const uncounted = (t: string) => t
+	.replace(/rebuilding from the log \(\d+ of \d+ chunks\)/g, "rebuilding the painting from its log")
+	.replace(/^reconstructed \d+ chunks from .* in [\d.]+ s$/gm, "reopened the painting from its saved state")
+	.replace(/\b(resum(?:ing|ed)) chunk \d+\/\d+/g, "$1 the painting")
+	.replaceAll(`${studio}/`, "");
+const MODES = new Set(["", "normal", "value", "gray", "squint", "blur", "mirror", "relief", "raking", "gallery"]);
+const fail = (t: string) => sent({ content: [{ type: "text", text: uncounted(t) }] as Content[], isError: true });
 
 /** One tool call at a time: the easel is one hand at one canvas (pi ran these with executionMode "sequential"). */
 let queue: Promise<unknown> = Promise.resolve();
@@ -96,12 +110,13 @@ const unboxed = (log: string) => log.replace(/^--@ box .*\n/m, "");
 server.registerTool("paint", {
 	description:
 		"Run a chunk of Lua at the easel (the easel guide). The reply is what the chunk printed, the painting's current clock, then `ok`. " +
-		"A chunk that stops with an error changes nothing.",
+		"A chunk that stops with an error changes nothing, with one exception: new_scratch replaces the scratch canvas before its chunk runs, so the old trial stays put aside even when the chunk fails. " +
+		"In `work`, `coverage` counts layers of strokes over each point, except for the `glaze` and `scumble` hands, where it is the share of the mask their thin film reaches (1: all of it).",
 	inputSchema: {
 		lua: z.string().optional().describe("the chunk"),
 		file: z.string().optional().describe("\"toolkit\": run your toolkit as the chunk"),
 		scratch,
-		new_scratch: z.boolean().optional().describe("with scratch: put the scratch canvas aside and start a fresh one before this chunk"),
+		new_scratch: z.boolean().optional().describe("with scratch: put the scratch canvas aside and start a fresh one before this chunk, even if the chunk then stops with an error"),
 	},
 }, serial(async (p: { lua?: string; file?: string; scratch?: boolean; new_scratch?: boolean }) => {
 	let { lua } = p;
@@ -124,17 +139,19 @@ server.registerTool("paint", {
 server.registerTool("look", {
 	description:
 		"Look at the canvas as it is now. Without options: the whole canvas, scaled down. " +
-		"crop: \"x0,y0,x1,y1\" in canvas units (two opposite corners), shown close up. " +
-		"mode: \"value\", \"squint\", \"mirror\", \"relief\" (a raking light on the paint's ridges and furrows), \"gallery\" (the light the picture hangs in) or several, comma-separated. " +
+		"crop: \"x0,y0,x1,y1\" in canvas units (two opposite corners), shown close up, up to 1200 pixels a side; larger crops are scaled down. The reply gives the scale in pixels per canvas unit. " +
+		"mask: a global mask's name (or several, comma-separated), shown as outlines and a light fill over the view. " +
+		"mode: \"value\" (the picture in grays, its lightness alone, in the gallery light), \"squint\", \"mirror\", \"relief\" (a raking light on the paint's ridges and furrows), \"gallery\" (the light the picture hangs in) or several, comma-separated. " +
 		"light: \"azimuth,elevation\" in degrees for the relief light (default \"135,25\", from the upper left). size: the long side in pixels. " +
 		"grid: true, or a spacing in canvas units. " +
 		"survey: true surveys the whole canvas at full detail, as several tiles (with mode, not crop or size); a partial reply lists remaining tiles to read in separate turns. " +
-		"compare: the path of an earlier look, shown left of the current view; supply matching crop, mode and light options explicitly. " +
-		"hold: the name of a knife (what is on it) or a pile (a fresh load), with at: \"x,y\" (canvas units): the loaded knife held up to the canvas there, its paint thick on the blade (crop sets the passage). Supports mode value, squint, relief or gallery and light; size, grid and mirror are unavailable with hold. It shows the paint on the knife, not how it would look laid. " +
+		"compare: the path of an image in this studio, usually an earlier look, resized to the current view's height and shown left of it; to compare an earlier look, supply matching crop, mode and light options explicitly. " +
+		"hold: the name of a knife (what is on it) or a pile (a fresh load), with at: \"x,y\" (canvas units): the loaded knife held up to the canvas there, its paint thick on the blade (crop sets the passage). Supports mode value, squint, relief or gallery, light and mask; size, grid and mirror are unavailable with hold. It shows the paint on the knife, not how it would look laid. " +
 		"palette: true shows the palette board instead: each pile knifed out thick and smeared thin across a black stripe.",
 	inputSchema: {
 		scratch,
 		crop: z.string().optional(),
+		mask: z.string().optional(),
 		mode: z.string().optional(),
 		light: z.string().optional(),
 		survey: z.boolean().optional(),
@@ -146,19 +163,21 @@ server.registerTool("look", {
 		grid: z.union([z.boolean(), z.number()]).optional(),
 	},
 }, serial(async (p: {
-	scratch?: boolean; crop?: string; mode?: string; light?: string; survey?: boolean; compare?: string; hold?: string; at?: string;
+	scratch?: boolean; crop?: string; mask?: string; mode?: string; light?: string; survey?: boolean; compare?: string; hold?: string; at?: string;
 	palette?: boolean; size?: number; grid?: boolean | number;
 }) => {
 	const { scratch: onScratch, ...view } = p;
 	let said: string;
 	try {
+		// the modes a painter has; the easel's computed edge map ("edges", "edge") isn't one (owner, 2026-10-21, as probe)
+		if (p.mode !== undefined && !p.mode.split(",").every((m) => MODES.has(m.trim()))) return fail("look: mode is value, squint, mirror, relief or gallery, or several of them");
 		lookArgs(view); // its combinations, before compare's path is resolved
 		if (p.survey && p.compare) return fail("look: survey and compare are two looks; ask for one");
 		// compare: an earlier look of this studio, nothing outside it (as `read`)
 		let compare = p.compare || undefined;
 		if (compare !== undefined) {
 			compare = studioPath(studio, compare);
-			if (compare === undefined) return fail("look: compare is the path of an earlier look in this studio");
+			if (compare === undefined) return fail("look: compare is the path of an image in this studio");
 		}
 		said = await atEasel(studio, ["look", ...on(p), ...lookArgs({ ...view, compare })], undefined);
 	} catch (e) {
@@ -187,16 +206,17 @@ server.registerTool("note", {
 		if (p.replaces !== undefined) return say(journalNamed(reviseJournal(studio, p.replaces, p.text)));
 		return say(journalNamed(await atEasel(studio, ["note", "-"], p.text)));
 	} catch (e) {
-		return fail((e as Error).message.replaceAll(`${studio}/`, ""));  // an easel error names the journal by its path
+		// an easel error names the journal by its path; a timeout, by claude-paint's path (notes/journal.md)
+		return fail((e as Error).message.replaceAll(`${studio}/`, "").replace("read notes/journal.md", "read your journal"));
 	}
 }));
 
 server.registerTool("status", {
-	description: "The canvas's setup.",
+	description: "The canvas's setup. While a chunk is still running, how far it has got; while the easel rebuilds the painting from its log, that it is doing so.",
 	inputSchema: { scratch },
 }, serial(async (p: { scratch?: boolean }) => {
 	try {
-		return say(tag(p, statusReply(await atEasel(studio, ["status", ...on(p)], undefined))));
+		return say(tag(p, uncounted(statusReply(await atEasel(studio, ["status", ...on(p)], undefined)))));
 	} catch (e) {
 		return fail((e as Error).message);
 	}
@@ -204,11 +224,15 @@ server.registerTool("status", {
 
 server.registerTool("log", {
 	description: "The painting so far: every chunk that ran, in order. With offset (the first line, from 1) and limit " +
-		"(how many lines), that part of it, with line numbers.",
-	inputSchema: { scratch, offset: z.number().int().optional(), limit: z.number().int().optional() },
-}, serial(async (p: { scratch?: boolean; offset?: number; limit?: number }) => {
+		"(how many lines), that part of it, with line numbers. With find, only the lines that hold that text.",
+	inputSchema: {
+		scratch, offset: z.number().int().optional(), limit: z.number().int().optional(),
+		find: z.string().optional().describe("Text to look for, in any case. Only the lines that hold it come back, each after its line number in the log and a colon, with the two lines before and after it, numbered with a dash."),
+	},
+}, serial(async (p: { scratch?: boolean; offset?: number; limit?: number; find?: string }) => {
 	try {
 		const log = unboxed(logReply(await atEasel(studio, ["log", ...on(p)], undefined)));
+		if (p.find) return say(tag(p, logFind(log, p.find, "the log")));
 		if (p.offset === undefined && p.limit === undefined) return say(tag(p, tail(log, MAX_CHARS, "`log` with an offset shows them")));
 		return say(tag(p, numbered(log, "the log", p.offset, p.limit)));
 	} catch (e) {

@@ -381,7 +381,7 @@ $('picker').addEventListener('focusout', e => { if (e.relatedTarget && !e.relate
 async function loadSessions() {
   allSessions = await (await fetch(STATIC ? 'data/sessions.json' : '/api/sessions', STATIC ? {cache: 'no-store'} : {})).json();
   if (Q === null) {
-    $('all').checked = localStorage.getItem('studio.all') === '1';
+    try { $('all').checked = localStorage.getItem('studio.all') === '1'; } catch (e) {}  // storage may be blocked (claude-paint fea9aa6)
     const u = new URLSearchParams(location.search), ps = allSessions.filter(s => $('all').checked || s.painter);
     // a first-time visitor lands on the painter at work that's furthest along (a blank ground minutes in shows
     // nothing yet), else the newest with a picture
@@ -396,7 +396,7 @@ async function loadSessions() {
   renderHeader(); if (otherK >= 0 && events[otherK] && events[otherK].ref) second(otherK);  // (the reference's label names the artist once the list has it)
   if ($('picker').hidden) renderPicker();  // don't rebuild the list under the visitor's focus
 }
-$('all').onchange = () => { localStorage.setItem('studio.all', $('all').checked ? '1' : '0'); renderPicker(); };
+$('all').onchange = () => { try { localStorage.setItem('studio.all', $('all').checked ? '1' : '0'); } catch (e) {} renderPicker(); };
 let gen = 0, busy = false;  // one poll at a time; a reset (new painter, rebuilt stream) makes in-flight polls stale
 function reset() { gen++; busy = false; staticV = null; stop(); events = []; nUpd = 0; epoch = null; cwd = ''; liveText = null; typed = -1; sitStarts = [0]; nSittings = 1; hasLooks = false; $('strip').innerHTML = ''; $('ticks').innerHTML = ''; noPicture(); }
 const NOPIC = "No picture yet: the painter hasn't looked at their canvas.<br>Their first look will show here.";
@@ -840,8 +840,10 @@ Promise.all([loadGallery(), loadSessions()]).then(() => { renderHeader(); if ($(
   setInterval(loadSessions, 30000); });
 if (STATIC) {
   document.body.classList.add('static');
-  if (!localStorage.getItem('studio.intro') && !STREAM) $('intro').hidden = false;  // (not over a livestream)
-  $('introok').onclick = () => { $('intro').hidden = true; localStorage.setItem('studio.intro', '1'); };
+  let introSeen = null;
+  try { introSeen = localStorage.getItem('studio.intro'); } catch (e) {}
+  if (!introSeen && !STREAM) $('intro').hidden = false;  // (not over a livestream)
+  $('introok').onclick = () => { $('intro').hidden = true; try { localStorage.setItem('studio.intro', '1'); } catch (e) {} };
 }
 </script>
 </body></html>
