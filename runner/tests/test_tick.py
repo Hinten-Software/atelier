@@ -104,7 +104,7 @@ def main():
         (studio / "bin" / "easel").write_text("#!/bin/sh\n")
         (studio / "bin" / "easel").chmod(0o755)
         events, detached = [], []
-        misfit = type("W", (), {"id": "iii-007", "artist": type("A", (), {"studio": studio})(),
+        misfit = type("W", (), {"id": "iii-007", "artist": type("A", (), {"studio": studio, "root": studio.parent})(),
                                 "set": lambda self, st: self.state.update(state=st)})()
         misfit.state = {"state": "stopped", "sittings": [{"n": 1, "how": "audit"}], "hits": ["a safety classifier's notice"],
                         "contaminated": True}

@@ -173,6 +173,15 @@ def guide_for(box: str) -> str:
     return "".join(lines[:start]) + table + "".join(lines[end:])
 
 
+def close_easel(studio: Path, home: Path):
+    """Close the studio's easel, if it has one (its session saves; nothing if none is serving): the one way the runner,
+    the probes and prepare() close it, as a painter's process would, with only PATH and HOME (the root it paints from)."""
+    easel = studio / "bin" / "easel"
+    if easel.exists():
+        subprocess.run([str(easel), "close"], cwd=studio, capture_output=True, timeout=120,
+                       env={"PATH": "/usr/bin:/bin", "HOME": str(home)})
+
+
 def prepare(artist: Artist, theme: str | None, box: str = DEFAULT_BOX) -> dict:
     """Set the studio up for a new work (RUN-4): the easel, the two texts, this work's brief, an empty journal and
     easel. The notebook, toolkit and walls stay as the artist left them. Returns hashes for the manifest.
@@ -183,9 +192,7 @@ def prepare(artist: Artist, theme: str | None, box: str = DEFAULT_BOX) -> dict:
     for d in ("bin", "paintings/lua", "walls"):
         (s / d).mkdir(parents=True, exist_ok=True)
     easel = s / "bin" / "easel"
-    if easel.exists():  # a work that ended outside finish() (its ceiling, a killed runner) left its easel serving
-        subprocess.run([str(easel), "close"], cwd=s, capture_output=True, timeout=120,
-                       env={"PATH": "/usr/bin:/bin", "HOME": str(artist.root)})
+    close_easel(s, artist.root)  # a work that ended outside finish() (its ceiling, a killed runner) left it serving
     # beside it, first: `studio` makes it a painter's easel for this box, `width` a new painting's width (4800 px);
     # an easel without `studio` would be a developer's
     for f in ("studio", "width"):

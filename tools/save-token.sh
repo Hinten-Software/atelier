@@ -18,15 +18,15 @@
 # replace the token on the clipboard. Lines the terminal wrapped are joined; the clipboard is cleared.
 set -euo pipefail
 if [ "${1:-}" = tunnel ]; then
-  f="${ATELIER_TOKEN_FILE:-$HOME/.atelier/secrets/tunnel.env}"; start=eyJ; re='eyJ[A-Za-z0-9_=+/-]{100,}'; pre=TUNNEL_TOKEN=
+  f="$HOME/.atelier/secrets/tunnel.env"; start=eyJ; re='eyJ[A-Za-z0-9_=+/-]{100,}'; pre=TUNNEL_TOKEN=
 elif [ "${1:-}" = turnstile ]; then
-  f="${ATELIER_TOKEN_FILE:-$HOME/.atelier/secrets/turnstile-secret}"; start="0x"; re='0x[A-Za-z0-9_-]{20,}'; pre=
+  f="$HOME/.atelier/secrets/turnstile-secret"; start="0x"; re='0x[A-Za-z0-9_-]{20,}'; pre=
 elif [ "${1:-}" = cloudflare ]; then
-  f="${ATELIER_TOKEN_FILE:-$HOME/.atelier/secrets/cloudflare-api-token}"; start="its first character"; re='[A-Za-z0-9_-]{30,}'; pre=
+  f="$HOME/.atelier/secrets/cloudflare-api-token"; start="its first character"; re='[A-Za-z0-9_-]{30,}'; pre=
 elif [ "${1:-}" = nas ]; then
-  f="${ATELIER_TOKEN_FILE:-$HOME/.atelier/secrets/nas-sync-password}"; start="its first character"; re='[^[:space:]]{8,}'; pre=
+  f="$HOME/.atelier/secrets/nas-sync-password"; start="its first character"; re='[^[:space:]]{8,}'; pre=
 else
-  f="${ATELIER_TOKEN_FILE:-$HOME/.atelier/secrets/claude-oauth-token}"; start=sk-ant-; re='sk-ant-[A-Za-z0-9_-]{40,}'; pre=
+  f="$HOME/.atelier/secrets/claude-oauth-token"; start=sk-ant-; re='sk-ant-[A-Za-z0-9_-]{40,}'; pre=
 fi
 
 mkdir -p "$(dirname "$f")" && chmod 700 "$(dirname "$f")"  # the secrets folder: the owner alone

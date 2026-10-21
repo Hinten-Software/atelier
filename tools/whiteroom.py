@@ -54,12 +54,10 @@ ALLOW = {
     ("easel_guide.md", "Bitwise operators"): "Lua operators",
     # claude-paint 78c86ce (the atelier's port, 2026-10-10)
     ("easel_guide.md", "lit as in the gallery view"): "a light mode's name (the light a picture hangs in)",
-    ("easel_guide.md", "Judge a mix there"): "the painter's own judgement of a mix",
     ("easel_guide.md", "a limited"): "a limited palette (fewer tubes set out)",
     ("easel_guide.md", "The thickness limits"): "paint thickness (physics)",
     ("easel_guide.md", "graded color"): "a colour gradient",
     ("easel_guide.md", '`mode: "gallery"`'): "a light mode's name (the light a picture hangs in)",
-    ("easel_guide.md", "`survey: true`"): "the gallery light mode, named in the survey's options",
     ("easel_guide.md", "`hold: "): "the gallery light mode, named in hold's options",
     ("easel_guide.md", "A trial judges a passage"): "the painter's own trial of a passage",
     ("server.ts", "(the light the picture hangs in)"): "a light mode's name (the light a picture hangs in)",

@@ -9,7 +9,7 @@
 set -uo pipefail
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 DATA=${ATELIER_DATA:-$HOME/atelier-data}
-easel=${REPLAY_EASEL:-$repo/engine/target/release/easel}
+easel=$repo/engine/target/release/easel
 [ -x "$easel" ] || { echo "verify: no replay easel at $easel (bash tools/build-engine.sh)" >&2; exit 2; }
 jobs=${VERIFY_JOBS:-1}  # one at a time: each replay at 4800 px takes the machine's cores for 10-15 minutes
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/atelier-verify.XXXXXX")

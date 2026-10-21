@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """The morning report (the owner, 2026-10-11): what the night did and what, if anything, needs a person.
 
-    python3 runner/report.py [--hours 24] [--quiet]
+    python3 runner/report.py
 
 Run at 07:30 by launchd (deploy/mac/atelier.report.plist). Reads only what the runner already writes (history.md,
 the works' manifests, the ledger, the logs); changes nothing. Writes DATA/run/reports/<date>.md and shows a macOS
-notification: "nothing to do", or how many things need a person (--quiet: no notification).
+notification: "nothing to do", or how many things need a person (the last 24 hours).
 """
-import argparse
 import json
 import re
 import subprocess
@@ -134,20 +133,15 @@ def notify(title: str, text: str):
 
 
 def main():
-    p = argparse.ArgumentParser()
-    p.add_argument("--hours", type=float, default=24)
-    p.add_argument("--quiet", action="store_true")
-    a = p.parse_args()
-    text, needs = report(a.hours)
+    text, needs = report(24)
     out = RUN / "reports"
     out.mkdir(parents=True, exist_ok=True)
     f = out / f"{datetime.now():%Y-%m-%d}.md"
     f.write_text(text)
     print(text)
-    if not a.quiet:
-        fin = len(re.findall(r"^- \S+ .*\((?:replay|REPLAY)", text, re.M))
-        notify("Atelier: nothing to do" if not needs else f"Atelier: {len(needs)} thing(s) need you",
-               f"{fin} painting(s) finished. " + ("; ".join(needs)[:180] if needs else "All well."))
+    fin = len(re.findall(r"^- \S+ .*\((?:replay|REPLAY)", text, re.M))
+    notify("Atelier: nothing to do" if not needs else f"Atelier: {len(needs)} thing(s) need you",
+           f"{fin} painting(s) finished. " + ("; ".join(needs)[:180] if needs else "All well."))
 
 
 if __name__ == "__main__":

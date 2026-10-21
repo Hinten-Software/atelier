@@ -22,7 +22,7 @@ import audit
 import budget
 from config import (CHECK_PAINTING, CLAUDE, CLAUDE_VERSION, CONTEXT_LIMIT, CRASH_WAITS, DATA, EASEL_MCP, LIMIT_GIVE_UP_S,
                     LIMIT_RETRY_S, MAX_INVOLUNTARY, NODE, DEFAULT_BOX, REPLAY_EASEL, REPO, TEXTS, TOOLS, artist_env, painter_easel)
-from studio import BRIEF, JOURNAL, NOTEBOOK, NOTES, PACKAGE_NAMES, TOOLKIT, Artist, hang, next_wall_number, now, prepare, sha256
+from studio import BRIEF, JOURNAL, NOTEBOOK, NOTES, PACKAGE_NAMES, TOOLKIT, Artist, close_easel, hang, next_wall_number, now, prepare, sha256
 
 # claude-paint's viewer (its transcript parser and title rule), loaded by path: it is also called studio.py
 _spec = importlib.util.spec_from_file_location("viewer_studio", REPO / "viewer" / "studio.py")
@@ -73,6 +73,11 @@ def slug(path: Path) -> str:
     return re.sub(r"[^A-Za-z0-9]", "-", str(path))
 
 
+def transcript_of(config: Path, studio: Path, sid: str) -> Path:
+    """Where Claude Code writes a session's transcript: <config>/projects/<studio's slug>/<session id>.jsonl."""
+    return config / "projects" / slug(studio) / f"{sid}.jsonl"
+
+
 def boot_time() -> str:
     """When the machine last started: a pid recorded before a reboot names some other process after it."""
     return subprocess.run(["/usr/sbin/sysctl", "-n", "kern.boottime"], capture_output=True, text=True).stdout.strip()
@@ -91,7 +96,10 @@ def engine_upstream() -> str:
 
 
 def archive_engines(box: str = DEFAULT_BOX) -> dict:
-    """Both easels, kept by hash, so any work replays with the binaries that painted it (ENG-3)."""
+    """Both easels, kept by hash, so any work replays with the binaries that painted it (ENG-3). Since claude-paint
+    fea9aa6 the painter's easel is one binary for every box: a studio's bin/ holds it with `studio` ("painter <box>",
+    the box in the work's manifest) and `width` (4800), which tools/build-engine.sh writes; without `studio` the binary
+    is a developer's easel."""
     out = {}
     for name, path in (("painter", painter_easel(box)), ("replay", REPLAY_EASEL)):
         h = sha256(path)
@@ -285,7 +293,7 @@ class Work:
         replies = self.run / f"{sid}.replies.jsonl"
         cmd = claude_cmd(a.studio, self.run, message, sid, a_model(a), a_effort(a), replies)
         strip_profile(a.config)
-        transcript = a.config / "projects" / slug(a.studio) / f"{sid}.jsonl"
+        transcript = transcript_of(a.config, a.studio, sid)
         rec = {"n": n, "session": sid, "message": message, "start": now(), "end": None, "how": None,
                "transcript": str(transcript), "date_shown": None, "exit": None, "pgid": None}
         self.state["sittings"].append(rec)
@@ -355,18 +363,22 @@ class Work:
         a, pkg, s = self.artist, self.pkg, self.artist.studio
         done = self.state.setdefault("finish_done", [])
         if "check" not in done:
-            subprocess.run([str(s / "bin" / "easel"), "close"], cwd=s, capture_output=True, timeout=120,
-                           env={"PATH": "/usr/bin:/bin", "HOME": str(a.root)})
+            close_easel(s, a.root)
             check = self.run / "check"
             shutil.rmtree(check, ignore_errors=True)
             h = self.state["hashes"].get("replay_easel")
-            env, swapped = replay_env(h, self.run / "replay-target")
-            r = subprocess.run([str(CHECK_PAINTING), str(s), str(check)], capture_output=True, text=True,
-                               env=os.environ | {"EASEL_NO_BUILD": "1", "PATH": f"/opt/homebrew/opt/rustup/bin:{os.environ.get('PATH', '')}"} | env)
-            shutil.rmtree(self.run / "replay-target", ignore_errors=True)
-            verdict = next((l for l in reversed(r.stdout.splitlines()) if l.startswith("check:")), "check: no verdict")
-            note = f"replay easel: {REPLAY_EASEL} is {swapped}, not {h} as at the work's start; checked with the archived {h}\n"
-            (self.run / "check.txt").write_text((note if swapped else "") + r.stdout + r.stderr)
+            try:
+                env, swapped = replay_env(h, self.run / "replay-target")
+            except RuntimeError as e:  # no copy of the work's replay easel: no check, and the canvas hangs all the same
+                verdict, swapped = f"check: not run: {e}", None
+                (self.run / "check.txt").write_text(verdict + "\n")
+            else:
+                r = subprocess.run([str(CHECK_PAINTING), str(s), str(check)], capture_output=True, text=True,
+                                   env=os.environ | {"EASEL_NO_BUILD": "1", "PATH": f"/opt/homebrew/opt/rustup/bin:{os.environ.get('PATH', '')}"} | env)
+                shutil.rmtree(self.run / "replay-target", ignore_errors=True)
+                verdict = next((l for l in reversed(r.stdout.splitlines()) if l.startswith("check:")), "check: no verdict")
+                note = f"replay easel: {REPLAY_EASEL} is {swapped}, not {h} as at the work's start; checked with the archived {h}\n"
+                (self.run / "check.txt").write_text((note if swapped else "") + r.stdout + r.stderr)
             if swapped:
                 self.state["replay_easel_swapped"] = swapped
             self.state.update(verdict=verdict, verified=verdict.startswith("check: ok"))

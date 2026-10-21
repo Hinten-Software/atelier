@@ -10,15 +10,15 @@ DATA = Path(os.environ.get("ATELIER_DATA", Path.home() / "atelier-data"))
 # where the export builds and keeps the site: the store itself, unless ATELIER_WORK names another folder
 WORK = Path(os.environ.get("ATELIER_WORK", DATA))
 # artists' roots live here, outside every home folder, so no account name is in any path an artist sees (ENG-7)
-ROOTS = Path(os.environ.get("ATELIER_ROOTS", "/Users/Shared"))
+ROOTS = Path("/Users/Shared")
 
-CLAUDE_VERSION = os.environ.get("ATELIER_CLAUDE_VERSION", "2.1.288")
+CLAUDE_VERSION = "2.1.288"
 # pinned copy, never the auto-updating install (RUN-15); ATELIER_CLAUDE: tests only (tests/fake_claude.py)
 CLAUDE = Path(os.environ.get("ATELIER_CLAUDE", DATA / "bin" / f"claude-{CLAUDE_VERSION}"))
 # secrets live outside the store: the store is backed up to the NAS, a secret never is
 SECRETS = Path(os.environ.get("ATELIER_SECRETS", Path.home() / ".atelier" / "secrets"))
 TOKEN = SECRETS / "claude-oauth-token"  # `claude setup-token`, written by the owner (RUN-13)
-NODE = Path(os.environ.get("ATELIER_NODE", "/opt/homebrew/bin/node"))
+NODE = Path("/opt/homebrew/bin/node")
 EASEL_MCP = REPO / "easel-mcp" / "src" / "server.ts"
 # a studio's bin/ per box (tools/build-engine.sh): the painter's easel, `studio` ("painter <box>") and `width`
 PAINTER_BOXES = REPO / "engine" / "target" / "painter" / "boxes"

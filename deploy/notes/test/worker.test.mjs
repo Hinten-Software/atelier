@@ -215,16 +215,11 @@ test('rate limit: 20 notes per UTC day, reset the next day', async () => {
   assert.equal((await post({ text: 'new day' })).status, 201);
 });
 
-test('old rate rows are pruned on write and by the scheduled handler', async () => {
+test('old rate rows are pruned on write', async () => {
   env.DB.sqlite.exec("INSERT INTO rate VALUES ('old', '2026-10-03', '2026-10-03T10', 3), ('yday', '2026-10-05', '2026-10-05T10', 1)");
   mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-06T07:00:00Z') });
   await post({ text: 'hello' });
   assert.deepEqual(env.DB.dump().rate.map((r) => r.key).filter((k) => k.length < 10), ['yday']);
-
-  mock.timers.setTime(Date.parse('2026-10-08T03:00:00Z'));
-  await worker.scheduled({ cron: '17 3 * * *' }, env, ctx);
-  await ctx.settle();
-  assert.equal(env.DB.dump().rate.length, 0);
 });
 
 // ---------------------------------------------------------------- GET

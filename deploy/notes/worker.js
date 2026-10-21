@@ -27,10 +27,6 @@ export default {
       return error(500, 'Something went wrong. Please try again later.');
     }
   },
-
-  async scheduled(_controller, env, ctx) {
-    ctx.waitUntil(pruneRate(env, new Date()));
-  },
 };
 
 // ---------------------------------------------------------------- GET

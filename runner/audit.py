@@ -121,6 +121,12 @@ OWN_ARGUMENT_ERROR = re.compile(r"MCP error -32602: Input validation error: Inva
 # carries only the name the painter wrote, so nothing from outside. The exact form, a plain tool name; anything else
 # in a tool_use_error is still a hit.
 NO_SUCH_TOOL = re.compile(r"<tool_use_error>Error: No such tool available: [A-Za-z0-9_-]{1,64}</tool_use_error>")
+IMAGE_NOTE = "[Image: source: "  # Claude Code's note of where it saved an image
+
+
+def foreign_image(text: str, config_dir) -> str | None:
+    """A hit for an image note that points outside the artist's config folder; None for one inside it."""
+    return None if text.startswith(f"{IMAGE_NOTE}{config_dir}/") else f"image note outside the artist's config: {text[:200]!r}"
 
 
 def _tool_result(x: dict, config_dir: Path, replies: Replies | None) -> list[str]:
@@ -132,9 +138,9 @@ def _tool_result(x: dict, config_dir: Path, replies: Replies | None) -> list[str
         for p in parts or []:
             if p.get("type") == "text":
                 text = p.get("text", "")
-                if text.startswith("[Image: source: "):  # Claude Code's note of where it saved an image
-                    if not text.startswith(f"[Image: source: {config_dir}/"):
-                        return [f"image note outside the artist's config: {text[:200]!r}"]
+                if text.startswith(IMAGE_NOTE):
+                    if hit := foreign_image(text, config_dir):
+                        return [hit]
                     continue
                 texts.append(text)
             elif p.get("type") != "image":
@@ -178,9 +184,9 @@ def check_line(d: dict, messages: set[str], config_dir: Path, replies: Replies |
                 hits.append(f"a user entry of unexpected shape: {json.dumps(x)[:200]}")
             elif x.get("type") == "text":
                 text = x.get("text", "")
-                if text.startswith("[Image: source: "):  # Claude Code's note of where it saved an image
-                    if not text.startswith(f"[Image: source: {config_dir}/"):
-                        hits.append(f"image note outside the artist's config: {text[:200]!r}")
+                if text.startswith(IMAGE_NOTE):
+                    if hit := foreign_image(text, config_dir):
+                        hits.append(hit)
                 elif text.startswith("Your response above was stopped by a safety classifier"):
                     hits.append(f"a safety classifier's notice reached the model: {text[:200]!r}")
                 elif text.strip() and text not in messages:

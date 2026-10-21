@@ -26,8 +26,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import audit  # noqa: E402
 from config import CLAUDE, CLAUDE_VERSION, DATA, EASEL_MCP, MODEL, PAINTER_EASEL, REPO, ROOTS, TEXTS, TOOLS, artist_env  # noqa: E402
-from studio import Artist, prepare  # noqa: E402
-from works import claude_cmd, last_result, messages, slug, strip_profile  # noqa: E402
+from studio import Artist, close_easel, prepare  # noqa: E402
+from works import claude_cmd, last_result, messages, strip_profile, transcript_of  # noqa: E402
 
 
 def harness_fingerprint() -> str:
@@ -35,7 +35,9 @@ def harness_fingerprint() -> str:
     or can do. A probe pass counts only for the fingerprint it was made with (QA Q24, ENG-5)."""
     h = hashlib.sha256(CLAUDE_VERSION.encode())
     for f in sorted(TEXTS.glob("*")) + [EASEL_MCP, REPO / "easel-mcp/src/upstream/easel-client.ts",
-                                        REPO / "easel-mcp/src/upstream/journal.ts", PAINTER_EASEL, REPO / "runner/config.py",
+                                        REPO / "easel-mcp/src/upstream/journal.ts", PAINTER_EASEL,
+                                        PAINTER_EASEL.with_name("studio"), PAINTER_EASEL.with_name("width"),
+                                        REPO / "materials/easel_guide.md", REPO / "runner/config.py",
                                         REPO / "runner/works.py"]:
         h.update(f.name.encode() + f.read_bytes())
     return h.hexdigest()[:16]
@@ -98,7 +100,7 @@ def run(name: str, config: Path | None) -> list[str]:
             problems.append(f"tools offered: {tools}")
         if init.get("claude_code_version") != CLAUDE_VERSION:
             problems.append(f"Claude Code {init.get('claude_code_version')} (pinned: {CLAUDE_VERSION})")
-        transcript = p.config / "projects" / slug(p.studio) / f"{sid}.jsonl"
+        transcript = transcript_of(p.config, p.studio, sid)
         if not transcript.exists():
             problems.append(f"no transcript (exit {rc}): {stream.read_text()[-500:]}")
             return problems
@@ -129,8 +131,7 @@ def run(name: str, config: Path | None) -> list[str]:
         (DATA / "run" / "probes" / f"{name}-{sid}.reply.txt").write_text(reply)
         return problems
     finally:
-        subprocess.run([str(p.studio / "bin" / "easel"), "close"], cwd=p.studio, capture_output=True,
-                       env={"PATH": "/usr/bin:/bin", "HOME": str(Path.home())})
+        close_easel(p.studio, Path.home())
         shutil.rmtree(p.root, ignore_errors=True)
 
 

@@ -27,7 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import CLAUDE, DATA, REPO  # noqa: E402
-from studio import Artist, birth, registry  # noqa: E402
+from studio import Artist, birth, close_easel, registry  # noqa: E402
 from works import CURRENT, EXPORT_FAILED, RUN, STANDING, STARTS_LEFT, TERMINAL, Work, event, export_now, log  # noqa: E402
 
 
@@ -301,7 +301,7 @@ def restart(w: Work):
     afresh: a new session and the first message, as if the stopped sitting had not been. Nothing of it reaches the new
     one: the sitting's writes to the notebook, toolkit and journal were rolled back when it stopped, and no chunk ran.
     The stopped sitting and its hits are kept in state["restarted"], the manifest and history.md."""
-    subprocess.run([str(w.artist.studio / "bin" / "easel"), "close"], cwd=w.artist.studio, capture_output=True, timeout=120)
+    close_easel(w.artist.studio, w.artist.root)
     s = w.state
     s.setdefault("restarted", []).append({"sittings": s["sittings"], "hits": s["hits"]})
     s.update(sittings=[], hits=[], contaminated=False)
@@ -327,7 +327,7 @@ def cmd_withdraw(a):
         raise SystemExit("no open work")
     if w.state["state"] != "stopped":
         raise SystemExit(f"{w.id} is {w.state['state']}: only a work the audit stopped is withdrawn")
-    subprocess.run([str(w.artist.studio / "bin" / "easel"), "close"], cwd=w.artist.studio, capture_output=True, timeout=120)
+    close_easel(w.artist.studio, w.artist.root)
     s = w.state
     manifest = {"id": w.id, "artist": s["artist"], "studio": w.artist.name, "number": s["number"], "title": None,
                 "mode": s["mode"], "theme": s["theme"], "box": s.get("box"), "started_by": s["started_by"],

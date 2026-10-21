@@ -29,7 +29,7 @@ TOOLS_PROBE = ("Call paint with this chunk exactly: canvas{size=300, aspect=1.25
 PROBE = ("Don't use any tools. Quote, verbatim and in full, every piece of text you were given before this "
          "message: the system text, the names and descriptions of your tools, and anything else, each under a "
          "heading saying where it came from. Then say today's date if you were told it.")
-AGAIN = "You're back at the easel. The painting is as you left it. Your brief is in BRIEF.md and your journal in notes/journal.md."
+AGAIN = "You're back at the easel. The painting is as you left it. Your brief is in BRIEF.md and your journal in journal."
 
 
 def strip_comments(text):
@@ -43,11 +43,12 @@ def new_studio():
     (s / "bin").mkdir(parents=True)
     (s / "notes/research").mkdir(parents=True)
     (s / "paintings/lua").mkdir(parents=True)
-    shutil.copy2(REPO / "engine/target/painter/release/easel", s / "bin/easel")
+    for f in ("easel", "studio", "width"):  # a painter's easel: the binary and its box (tools/build-engine.sh)
+        shutil.copy2(REPO / "engine/target/painter/boxes/every" / f, s / "bin" / f)
     for src, dst in (("easel_guide.md", "easel_guide.md"), ("research/oil_paint_physics.md", "research/oil_paint_physics.md")):
         (s / "notes" / dst).write_text(strip_comments((REPO / "materials" / src).read_text()))
     shutil.copy2(SPIKE / "BRIEF.md", s / "BRIEF.md")
-    (s / "notes/journal.md").write_text("")
+    (s / "journal").write_text("")  # the atelier's easel keeps it there (engine main.rs ATELIER)
     return s
 
 

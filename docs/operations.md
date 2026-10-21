@@ -99,6 +99,11 @@ stop: in the painting window it sets the stopped work aside (withdrawn, never pu
 goes on; outside the window the stop waits for a person. A failed export (DATA/run/export-failed) is tried again. If DATA/run/starts-left holds a number, the tick starts only that many new works and counts down (the
 open work goes on regardless). To end it early: `launchctl unload ~/Library/LaunchAgents/atelier.tick.plist` (or delete DATA/run/until).
 
+A painting on demand, at any hour: `touch DATA/run/open`, then `atelier paint <studio> --by owner` (optionally
+`--theme "..."` or `--box <box>`). While DATA/run/open is there the studios paint at any hour and without the daily cap
+(each work's own cap stays; runner/budget.py OPEN); the tick removes it once the standing go's count of new works is
+used up and nothing is open, or delete it yourself to return to the night window.
+
 ## The owner's essays
 
 Written as plain text files in DATA/essays/<name>.md: a `# Title` line, then `frontispiece: <work id>` (optional: the

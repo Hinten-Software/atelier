@@ -9,8 +9,8 @@
 # only read (fetched into a cache, never built or run from here).
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/../.." && pwd)
-url=${CLAUDE_PAINT_URL:-https://github.com/aliceisjustplaying/claude-paint.git}
-cache=${CLAUDE_PAINT_CACHE:-$HOME/.cache/atelier/claude-paint.git}
+url=https://github.com/aliceisjustplaying/claude-paint.git
+cache=$HOME/.cache/atelier/claude-paint.git
 ref=${1:-main}
 
 [ -d "$cache" ] || git clone -q --bare "$url" "$cache"
