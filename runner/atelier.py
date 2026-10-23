@@ -2,6 +2,8 @@
 """The atelier's runner (requirements 5.10). Started by a person (Q1); carries a work through its sittings.
 
     atelier birth                              a new artist (after the probe suite has passed: RUN-16)
+    atelier birth --local MODEL                a painter on a local model in LM Studio, in a private store
+                                               (tools/local.sh birth --local MODEL: never pushed to the NAS)
     atelier paint <artist> [--theme TEXT] --by owner|operator
                                                start a work; the runner continues in the background
     atelier status                             the artists, and the open work and its state
@@ -26,7 +28,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import CLAUDE, DATA, REPO  # noqa: E402
+from config import CLAUDE, DATA, LOCAL_URL, REPO  # noqa: E402
 from studio import Artist, birth, close_easel, registry  # noqa: E402
 from works import CURRENT, EXPORT_FAILED, RUN, STANDING, STARTS_LEFT, TERMINAL, Work, event, export_now, log  # noqa: E402
 
@@ -66,10 +68,17 @@ def detach(w: Work):
 
 
 def cmd_birth(a):
-    from probes import harness_fingerprint
-    ok = (DATA / "run" / f"probe-ok-{harness_fingerprint()}.json").exists()
-    if not ok and not a.without_probes:
-        raise SystemExit("the probe suite hasn't passed for this harness yet (RUN-16): run runner/probes.py first")
+    from config import local_ready
+    from probes import probe_ok
+    local = {"url": a.local_url, "model": a.local} if a.local else None
+    if local and (DATA / "nas.json").exists():
+        raise SystemExit("a painter on a local model is born in a private store, not one pushed to the NAS: "
+                         "tools/local.sh birth --local MODEL")
+    if local and isinstance(ready := local_ready(local), str):
+        raise SystemExit(ready)
+    if not probe_ok(local).exists() and not a.without_probes:
+        raise SystemExit("the probe suite hasn't passed for this harness yet (RUN-16): run runner/probes.py"
+                         + (f" --local {a.local}" if local else "") + " first")
     walls = Path(a.walls).expanduser() if a.walls else None
     if walls and not (walls.is_dir() and any(walls.iterdir())):
         raise SystemExit(f"--walls {walls}: no paintings there")
@@ -81,12 +90,14 @@ def cmd_birth(a):
     note = Path(a.temperament_note).expanduser().read_text() if a.temperament_note else None
     if note is not None and not temperament:
         raise SystemExit("--temperament-note goes with --temperament")
-    artist = birth(studio=a.studio, walls=walls, temperament=temperament, temperament_note=note)
+    artist = birth(studio=a.studio, walls=walls, temperament=temperament, temperament_note=note, local=local,
+                   **({"model": a.local} if local else {}))
     rec = json.loads((artist.home / "birth.json").read_text())
     hung = rec["walls_at_birth"]
     event(f"{artist.name} born ({artist.id}), model and effort in the birth record"
           + (f"; {hung} paintings hung before their first work (the owner's, recreated from recollection)" if hung else "")
-          + ("; given a temperament by the owner, the first page of their notebook" if rec.get("temperament_note") else ""))
+          + ("; given a temperament by the owner, the first page of their notebook" if rec.get("temperament_note") else "")
+          + (f"; on the local model {a.local}" if local else ""))
     print(f"{artist.name} ({artist.id}) is born")
 
 
@@ -376,6 +387,8 @@ def main():
     b.add_argument("--walls", help="a folder of paintings named 1, 2, ... to hang before the first work")
     b.add_argument("--temperament", help="a text file: the owner's temperament for the painter, their notebook's first page")
     b.add_argument("--temperament-note", help="a text file: what visitors read about the temperament (first line: its heading)")
+    b.add_argument("--local", metavar="MODEL", help="a painter on this model in LM Studio (its id, as `lms ls` gives it)")
+    b.add_argument("--local-url", default=LOCAL_URL, help=f"LM Studio's server (default {LOCAL_URL})")
     pp = sub.add_parser("paint")
     pp.add_argument("artist")
     pp.add_argument("--theme")

@@ -32,7 +32,9 @@ ACCEPTED = {
                               r" - Primary working directory: /Users/Shared/[a-z0-9]+/studio\n - Is a git repository: false\n"
                               r" - Platform: darwin\n - Shell: [\w./-]+\n - OS Version: [\w. ]+\n</system-reminder>$"),
     "model": re.compile(r"(?s)^<system-reminder>\nYou are powered by the model named [\w. ]+\. The exact model ID is "
-                        r"[\w-]+\. Assistant knowledge cutoff is \w+ \d{4}\.\n</system-reminder>$"),
+                        r"[\w-]+\. Assistant knowledge cutoff is \w+ \d{4}\.\n</system-reminder>$"
+                        # ... and for a local model (2026-10-22), whose name and cutoff Claude Code doesn't know
+                        r"|^<system-reminder>\nYou are powered by the model [\w.-]+(?:/[\w.-]+)?\.\n</system-reminder>$"),
     # ... and, in a sitting that runs past midnight, its notice of the new date (ii-007, 2026-10-11)
     "date": re.compile(r"^<system-reminder>\n(?:Today's date is \d{4}-\d{2}-\d{2}\.|The date has changed\. Today's date is now "
                        r"\d{4}-\d{2}-\d{2}\. No need to announce the new date — the user's own clock shows it\.)\n</system-reminder>$"),
@@ -122,6 +124,10 @@ OWN_ARGUMENT_ERROR = re.compile(r"MCP error -32602: Input validation error: Inva
 # in a tool_use_error is still a hit.
 NO_SUCH_TOOL = re.compile(r"<tool_use_error>Error: No such tool available: [A-Za-z0-9_-]{1,64}</tool_use_error>")
 IMAGE_NOTE = "[Image: source: "  # Claude Code's note of where it saved an image
+# what Claude Code itself says to a local model that gave an empty reply (iv-003, 2026-10-22): its own words, nothing
+# from outside, so for a painter on a local model it is accepted as the runner's messages are (the owner: their errors
+# shouldn't end a work unless harmful). This sentence exactly; any other text is still a hit
+LOCAL_NUDGES = {"[Your previous response had no visible output. Please continue and produce a user-visible response.]"}
 
 
 def foreign_image(text: str, config_dir) -> str | None:

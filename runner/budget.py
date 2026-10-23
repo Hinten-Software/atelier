@@ -53,15 +53,17 @@ def cost(usage: dict, model: str | None) -> float:
 
 
 class Meter:
-    """A sitting's spend so far, from its transcript's assistant messages (each API message counted once)."""
+    """A sitting's spend so far, from its transcript's assistant messages (each API message counted once). free: a
+    local model's sitting, which costs nothing."""
 
-    def __init__(self):
+    def __init__(self, free: bool = False):
         self.by_message: dict[str, float] = {}
+        self.free = free
 
     def add(self, d: dict):
         m = d.get("message") or {}
         if d.get("type") == "assistant" and m.get("id") and m.get("usage"):
-            self.by_message[m["id"]] = cost(m["usage"], m.get("model"))
+            self.by_message[m["id"]] = 0.0 if self.free else cost(m["usage"], m.get("model"))
 
     @property
     def usd(self) -> float:

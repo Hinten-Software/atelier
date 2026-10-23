@@ -44,6 +44,14 @@ UUID_RE = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 IP_RE = re.compile(r"\b(?:10|192\.168|172\.(?:1[6-9]|2\d|3[01]))(?:\.\d{1,3}){2,3}\b")  # 127.x (loopback) names no machine
 
 
+def private_artists() -> set[str]:
+    """Painters on a local model (the owner, 2026-10-22: tried in private first), in a store pushed to the NAS: none
+    of theirs is exported there. They belong in a store of their own (tools/local.sh), whose export stays on the Mac."""
+    if not (DATA / "nas.json").exists():
+        return set()
+    return {p.parent.name for p in (DATA / "artists").glob("*/birth.json") if json.loads(p.read_text()).get("local")}
+
+
 def hidden(rel: Path) -> bool:
     """A dot-file or a NAS's own folder, anywhere in the path: not ours, never published."""
     return any(part.startswith(".") or part in NAS_OWN for part in rel.parts)
@@ -53,8 +61,10 @@ def farm():
     """Each work's transcripts, in sitting order, as the viewer's per-painter session folders."""
     for old in FARM.glob("w-*/*"):
         old.unlink()
-    works = []
+    works, private = [], private_artists()
     for w in sorted((DATA / "works").glob("*-[0-9][0-9][0-9]")):
+        if w.name.split("-")[0] in private:
+            continue
         sf = DATA / "run" / w.name / "state.json"
         state = json.loads(sf.read_text()) if sf.exists() else {}
         man = json.loads((w / "manifest.json").read_text()) if (w / "manifest.json").exists() else {}
@@ -137,7 +147,8 @@ def works_json(works):
         pub["viewer"] = f"w-{w.name}"
         pub["artist"] = w.name.split("-")[0]
         out.append(pub)
-    births = [json.loads(p.read_text()) for p in sorted((DATA / "artists").glob("*/birth.json"))]
+    private = private_artists()
+    births = [json.loads(p.read_text()) for p in sorted((DATA / "artists").glob("*/birth.json")) if p.parent.name not in private]
     return {"works": out, "artists": births}
 
 
@@ -242,7 +253,12 @@ def main() -> int:
     for stale in (STAGE / "studio" / "data").glob("w-*"):
         if stale.name not in keep:
             shutil.rmtree(stale)
+    for stale in (STAGE / "studio" / "data").glob("walls-*"):  # a private painter's walls an earlier export staged
+        if stale.name.removeprefix("walls-") in private_artists():
+            shutil.rmtree(stale)
     for born in sorted((DATA / "artists").glob("*/walls-at-birth")):  # paintings hung before a studio's first work
+        if born.parent.name in private_artists():
+            continue
         dst = STAGE / "studio" / "data" / f"walls-{born.parent.name}"
         dst.mkdir(parents=True, exist_ok=True)
         for png in born.glob("*.png"):

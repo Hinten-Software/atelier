@@ -76,13 +76,14 @@ class Artist:
 
 
 def birth(model: str = MODEL, effort: str = EFFORT, studio: str | None = None, walls: Path | None = None,
-          temperament: str | None = None, temperament_note: str | None = None) -> Artist:
+          temperament: str | None = None, temperament_note: str | None = None, local: dict | None = None) -> Artist:
     """A new artist: a neutral root, an empty studio, its own Claude config, and a public birth record (ART-2).
     studio: which studio ("iii"); default the first one not yet born. walls: a folder of paintings to hang before the
     artist first wakes (named 1, 2, ...: the walls' standard), without cards; the painter is told nothing of them.
     temperament: the owner's text, the notebook's first page at birth, unsigned; the painter is told nothing of it
     and may keep, revise or outgrow it. The public record holds it (temperament_text) and the owner's note for
-    visitors (temperament_note); a copy is kept as DATA/artists/<id>/temperament-at-birth."""
+    visitors (temperament_note); a copy is kept as DATA/artists/<id>/temperament-at-birth.
+    local: {"url", "model"}: a painter on a local model (config.artist_env), the model given as `model` too."""
     reg = registry()
     id = (studio or next(r.lower() for r in ROMAN if r.lower() not in reg)).lower()
     if id in reg or id.upper() not in ROMAN:
@@ -108,6 +109,7 @@ def birth(model: str = MODEL, effort: str = EFFORT, studio: str | None = None, w
         "walls_note": WALLS_NOTE if walls else None,
         "temperament_note": (temperament_note.strip() if temperament_note else TEMPERAMENT_NOTE) if temperament else None,
         "temperament_text": temperament.strip() if temperament else None,
+        **({"local": local} if local else {}),
     }, indent=1))
     first_page = temperament.strip() + "\n" if temperament else ""
     if temperament:
@@ -159,7 +161,10 @@ def brief_text(artist: Artist, theme: str | None) -> str:
     direction = msgs["direction_themed"].replace("{THEME}", theme.strip().rstrip(".")) if theme else msgs["direction_free"]
     # the walls are mentioned once anything hangs there, painted here or hung at birth, in words that claim neither
     notebook = msgs["notebook_later"] if any((artist.home / "walls").glob("*.json")) else msgs["notebook_first"]
-    return (TEXTS / "brief.md").read_text().replace("{DIRECTION}", direction).replace("{NOTEBOOK}", notebook)
+    text = (TEXTS / "brief.md").read_text().replace("{DIRECTION}", direction).replace("{NOTEBOOK}", notebook)
+    # a painter on a local model ends their brief with a go (the owner, 2026-10-22: gemma read it, then waited)
+    local = json.loads((artist.home / "birth.json").read_text()).get("local") if (artist.home / "birth.json").exists() else None
+    return text.rstrip("\n") + "\n\nNow paint.\n" if local else text
 
 
 def guide_for(box: str) -> str:

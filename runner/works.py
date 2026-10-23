@@ -21,7 +21,8 @@ from pathlib import Path
 import audit
 import budget
 from config import (CHECK_PAINTING, CLAUDE, CLAUDE_VERSION, CONTEXT_LIMIT, CRASH_WAITS, DATA, EASEL_MCP, LIMIT_GIVE_UP_S,
-                    LIMIT_RETRY_S, MAX_INVOLUNTARY, NODE, DEFAULT_BOX, REPLAY_EASEL, REPO, TEXTS, TOOLS, artist_env, painter_easel)
+                    LIMIT_RETRY_S, LOCAL_MAX_SITTINGS, LOCAL_UNPAINTED, LOCAL_NOT_READY_RETRY_S, MAX_INVOLUNTARY, NODE, DEFAULT_BOX,
+                    REPLAY_EASEL, REPO, TEXTS, TOOLS, artist_env, local_context_limit, local_ready, painter_easel)
 from studio import BRIEF, JOURNAL, NOTEBOOK, NOTES, PACKAGE_NAMES, TOOLKIT, Artist, close_easel, hang, next_wall_number, now, prepare, sha256
 
 # claude-paint's viewer (its transcript parser and title rule), loaded by path: it is also called studio.py
@@ -226,7 +227,7 @@ class Work:
             elif st == "limit-wait":
                 self.wait_limit()
             elif st == "crash-wait":
-                k = min(self.state["crashes"], len(CRASH_WAITS)) - 1
+                k = 0 if a_local(self.artist) else min(self.state["crashes"], len(CRASH_WAITS)) - 1  # local: 90 s
                 self.sleep(CRASH_WAITS[k], "crash-wait")
                 self.set("between")
             elif st == "finishing":
@@ -263,8 +264,9 @@ class Work:
             return self.set("not-finished", why="the usage limit held for 7 days")
         until = self.state.get("limit_until") or time.time() + LIMIT_RETRY_S
         start = now()
-        self.sleep(max(min(60, LIMIT_RETRY_S), until - time.time()), "usage limit")
-        self.state["pauses"].append({"from": start, "to": now(), "why": "usage limit"})
+        why = self.state.get("waiting_for") or "usage limit"
+        self.sleep(max(min(60, LIMIT_RETRY_S), until - time.time()), why)
+        self.state["pauses"].append({"from": start, "to": now(), "why": why})
         self.set("between")  # a fresh sitting: no limit message ever enters the artist's history (RUN-6)
 
     # -- one sitting --------------------------------------------------------------------------------------------
@@ -281,6 +283,22 @@ class Work:
     def sitting(self):
         a, n = self.artist, len(self.state["sittings"]) + 1
         self.kill_leftover()
+        local, limit = a_local(a), CONTEXT_LIMIT
+        if local:  # a local painter's server and model must be up, with room enough: else no sitting, and a wait as
+            ready = local_ready(local)  # for a usage limit (given up after 7 days), not a crash
+            if isinstance(ready, str):
+                self.state["not_ready"] = f"{now()} {ready}"  # no sitting began: nothing in "sittings"
+                log(f"{self.id}: no sitting: {ready}")
+                self.state["limit_since"] = self.state["limit_since"] or time.time()
+                self.state["limit_until"] = time.time() + LOCAL_NOT_READY_RETRY_S
+                self.state["waiting_for"] = "the local model"
+                return self.set("limit-wait")
+            self.state["waiting_for"] = None
+            if n > LOCAL_MAX_SITTINGS:
+                # finish() closes it: packaged, not hung (no sitting ended of the painter's own accord), and no longer open
+                event(f"work {self.id} reached the local ceiling of {LOCAL_MAX_SITTINGS} sittings")
+                return self.set("finishing")
+            limit = local_context_limit(ready)
         msgs = messages()
         painted = (a.studio / "paintings" / "lua" / "painting.lua").exists()
         message = msgs["again"] if painted else msgs["first"]  # "as you left it" only if there is a painting (QA Q19)
@@ -300,11 +318,12 @@ class Work:
         self.set("sitting")
         stream, errf = self.run / f"{sid}.stream.jsonl", self.run / f"{sid}.stderr.txt"
         with open(stream, "w") as out, open(errf, "w") as err:
-            proc = subprocess.Popen(cmd, cwd=a.studio, env=artist_env(a.config, a.root), stdin=subprocess.DEVNULL,
+            proc = subprocess.Popen(cmd, cwd=a.studio, env=artist_env(a.config, a.root, local), stdin=subprocess.DEVNULL,
                                     stdout=out, stderr=err, start_new_session=True)
             rec["pgid"] = proc.pid
             self.save()
-            watch = Watcher(proc, transcript, set(msgs.values()), a.config, replies, self.id)
+            accepted = set(msgs.values()) | (audit.LOCAL_NUDGES if local else set())
+            watch = Watcher(proc, transcript, accepted, a.config, replies, self.id, limit, free=bool(local))
             watch.start()
             rc = proc.wait()
             watch.stop()
@@ -327,6 +346,16 @@ class Work:
                 event(f"work {self.id} reached its ceiling of ${budget.WORK_USD:.0f}")
                 return self.set("not-finished", why="the work's budget ceiling")
             return self.set("closed", closed_why=watch.budget_end)
+        if (local and result and result.get("subtype") == "success" and not watch.context_end
+                and not (a.studio / "paintings" / "lua" / "painting.lua").exists()):
+            # a local model that stops before laying any paint (iv-001, 2026-10-22: it read the brief, then asked for
+            # an assignment) has misread its turn, not finished: a fresh sitting, as the first, a few times
+            rec["how"] = "unpainted"
+            self.state["unpainted"] = self.state.get("unpainted", 0) + 1
+            if self.state["unpainted"] > LOCAL_UNPAINTED:  # finish() closes it: no picture, so not hung
+                event(f"work {self.id}: {self.state['unpainted']} sittings ended before any paint was laid")
+                return self.set("finishing")
+            return self.set("between")
         if result and result.get("subtype") == "success" and not result.get("is_error") and not watch.context_end:
             rec["how"] = "voluntary"
             self.state["reply"] = result.get("result", "")
@@ -342,16 +371,23 @@ class Work:
         else:
             rec["how"] = "crash"
             rec["error"] = text.strip()[-2000:]
-            self.state["crashes"] += 1
-            self.state["limit_since"] = None
-            if self.state["crashes"] > len(CRASH_WAITS):
-                return self.set("not-finished", why="crashed too often")
-            return self.set("crash-wait")
+            return self.crashed()
         self.state["limit_since"] = None  # a limit counts from the last unbroken run of limits (QA Q10)
+        if local and rec["how"] == "context":  # a local sitting's usual end: its ceiling is LOCAL_MAX_SITTINGS
+            return self.set("between")
         self.state["involuntary"] += 1
         if self.state["involuntary"] > MAX_INVOLUNTARY:
             return self.set("not-finished", why="too many involuntary ends")
         self.set("between")
+
+    def crashed(self):
+        self.state["crashes"] += 1
+        self.state["limit_since"] = None
+        # a local model errs now and then (the owner, 2026-10-22: "shouldn't abort the session"): its work goes on, to
+        # its ceiling of sittings; the audit still stops anything that reached the model from outside
+        if self.state["crashes"] > len(CRASH_WAITS) and not a_local(self.artist):
+            return self.set("not-finished", why="crashed too often")
+        return self.set("crash-wait")
 
     # -- finishing ----------------------------------------------------------------------------------------------
     def finish(self):
@@ -529,9 +565,10 @@ class Watcher(threading.Thread):
     """Tails a sitting's transcript: the live white-room audit (NFR-10) and the context threshold (RUN-7).
     It fails closed: a line it can't check, or a transcript that never appears, is a hit (QA Q6)."""
 
-    def __init__(self, proc, transcript: Path, messages: set[str], config: Path, replies: Path, work: str = ""):
+    def __init__(self, proc, transcript: Path, messages: set[str], config: Path, replies: Path, work: str = "",
+                 limit: int = CONTEXT_LIMIT, free: bool = False):
         super().__init__(daemon=True)
-        self.work, self.meter, self.budget_end = work, budget.Meter(), None
+        self.work, self.meter, self.budget_end, self.limit = work, budget.Meter(free), None, limit
         self.proc, self.path, self.messages, self.config = proc, transcript, messages, config
         self.replies = audit.Replies(replies)
         self.hits: list[str] = []
@@ -592,7 +629,7 @@ class Watcher(threading.Thread):
             usage = (d.get("message") or {}).get("usage") if d.get("type") == "assistant" else None
             if usage:
                 ctx = sum(usage.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
-                self._over = self._over or ctx > CONTEXT_LIMIT
+                self._over = self._over or ctx > self.limit
             if (self._over or self.budget_end) and d.get("type") == "user":  # right after a tool result: nothing half done
                 self.context_end = self._over and not self.budget_end
                 stop = True
@@ -650,6 +687,11 @@ def a_model(a: Artist) -> str:
     return json.loads((a.home / "birth.json").read_text())["model"]
 
 
+def a_local(a: Artist) -> dict | None:
+    """The local model's server, for a painter born on one (config.artist_env); None for one on Claude."""
+    return json.loads((a.home / "birth.json").read_text()).get("local")
+
+
 def a_effort(a: Artist) -> str:
     return json.loads((a.home / "birth.json").read_text())["effort"]
 
@@ -665,7 +707,7 @@ def model_seen(sittings: list[dict]) -> list[str]:
                 m = (json.loads(line).get("message") or {}).get("model")
             except (ValueError, AttributeError):
                 continue
-            if m and m.startswith("claude-") and m not in seen:
+            if m and not m.startswith("<") and m not in seen:  # not Claude Code's own "<synthetic>" entries
                 seen.append(m)
     return seen
 
