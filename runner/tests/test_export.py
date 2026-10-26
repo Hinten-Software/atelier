@@ -70,6 +70,13 @@ def main():
         check("no studio path, no image-source note", "/Users/" not in ev and "Image: source" not in ev, ev[:300])
         check("no dot-files published", not any(p.name.startswith(".") for p in site.rglob("*")))
         check("works.json lists the clean work only", [w["id"] for w in json.loads((site / "data/works.json").read_text())["works"]] == ["i-001"])
+        page = site / "work/i-001/index.html"
+        check("a work has a page of its own, readable without its script", page.exists() and "Pear" in page.read_text()
+              and 'rel="canonical" href="https://notart.fyi/work/i-001/"' in page.read_text())
+        check("no page for a withheld work", not (site / "work/i-002").exists())
+        sitemap = (site / "sitemap.xml").read_text() if (site / "sitemap.xml").exists() else ""
+        check("the sitemap lists the work, not the withheld one", "/work/i-001/" in sitemap and "i-002" not in sitemap, sitemap[:300])
+        check("llms.txt links the work", "(https://notart.fyi/work/i-001/)" in (site / "llms.txt").read_text())
         before = (site / "studio/data/w-i-001/events.json").read_text()
         work("i-003", extra=" Write to someone@example.com.")
         r = export()

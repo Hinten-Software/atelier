@@ -16,4 +16,7 @@ User-agent: Amazonbot
 Disallow: /
 
 User-agent: *
+Content-Signal: search=yes, ai-input=yes, ai-train=no
 Allow: /
+
+Sitemap: https://notart.fyi/sitemap.xml

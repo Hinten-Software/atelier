@@ -29,7 +29,9 @@ FARM = WORK / "run" / "farm"
 ALLOWED = re.compile(r"^(studio/(index\.html|data/sessions\.json|data/w-[a-z]+-\d{3}/(events\.json|"
                      r"(img|t|v)/\d+\.(png|jpg|webp)|file/paintings/lua/painting\.lua|final\.png|final(-t|-f)?\.jpg)|viewer-\d+\.js|data/walls-[a-z]+/\d+\.jpg))$|^data/(works|essays)\.json$"
                      # the atelier's own pages (site/ in the repository)
-                     r"|^(index\.html|robots\.txt|favicon\.(png|ico)|apple-touch-icon\.png|(about|walls|work|notes|essays)/index\.html|assets/atelier\.(css|js))$")
+                     r"|^(index\.html|robots\.txt|favicon\.(png|ico)|apple-touch-icon\.png|(about|walls|work|notes|essays)/index\.html|assets/atelier\.(css|js))$"
+                     # their pages of their own, the site's map and its summary for language models (runner/pages.py)
+                     r"|^((walls/[a-z]+|work/[a-z]+-\d{3}|essays/[a-z0-9]+(-[a-z0-9]+)*)/index\.html|sitemap\.xml|llms\.txt)$")
 NOTES_SETTINGS = DATA / "notes.json"  # {"sitekey": "<the Turnstile widget's public site key>"} (deploy/notes)
 PAGES = REPO / "site"
 # the walls' and the door's copies of a finished painting, and its full size (None) for a close look: a JPEG of the
@@ -188,7 +190,7 @@ def scan(site: Path) -> list[str]:
     for f in site.rglob("*"):
         if hidden(f.relative_to(site)):
             continue
-        if f.is_file() and f.suffix in (".json", ".html", ".css", ".js", ".md", ".txt", ".lua"):
+        if f.is_file() and f.suffix in (".json", ".html", ".css", ".js", ".md", ".txt", ".lua", ".xml"):
             text = f.read_text(errors="replace")
             for h in private_hits(text):
                 hits.append(f"{f.relative_to(site)}: {h}")
@@ -284,11 +286,14 @@ def main() -> int:
                 if re.fullmatch(r"[0-9A-Za-z_-]{10,64}", key):
                     dst.write_text(dst.read_text().replace("TURNSTILE_SITE_KEY", key))
     (STAGE / "data").mkdir(exist_ok=True)
-    (STAGE / "data" / "works.json").write_text(json.dumps(works_json(works), indent=1))
+    published = works_json(works)
+    (STAGE / "data" / "works.json").write_text(json.dumps(published, indent=1))
     # always there (empty until one is published), so no page asks for it in vain
     (STAGE / "data" / "essays.json").write_text(json.dumps({"essays": shown}, indent=1))
     if not shown:  # the stage is reused: a page from an earlier export goes when no essay is published
         shutil.rmtree(STAGE / "essays", ignore_errors=True)
+    import pages
+    pages.build(STAGE, published, shown)  # the pages' text in their HTML, for readers that run no script
     hits = scan(STAGE)
     for f in STAGE.rglob("*"):  # REC-8: nothing outside the allowlist (the exporter's own list file stays behind)
         rel = str(f.relative_to(STAGE))

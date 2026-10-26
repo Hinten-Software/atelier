@@ -33,7 +33,9 @@ const fullImg = (w) => `/studio/data/${w.viewer}/final-f.jpg`;  // the whole pai
 // a zoomed page or a dense screen takes the full-size copy by itself; the plain one serves everyone else
 const srcsetOf = (w) => w.px ? `${finalImg(w)} 1600w, ${fullImg(w)} ${w.px}w` : "";
 const closeUp = (w) => ({ src: finalImg(w), srcset: srcsetOf(w), full: w.px ? fullImg(w) : null, px: w.px, title: w.title || "Untitled", href: workHref(w), measure: measure(w) });
-const workHref = (w) => `/work/?w=${encodeURIComponent(w.id)}`;
+const workHref = (w) => `/work/${encodeURIComponent(w.id)}/`;
+// what a page is about: its own address (/walls/iii/, /work/iii-010/, /essays/<name>/), or the older ?s=, ?w=, ?e=
+const which = (key) => new URLSearchParams(location.search).get(key) || decodeURIComponent(location.pathname.split("/").filter(Boolean)[1] || "");
 
 async function data() {
   const r = await fetch("/data/works.json", { cache: "no-store" });
@@ -179,7 +181,7 @@ async function door() {
     const frame = el("div", { class: "frame" }, img ? el("img", { src: img, alt: "", loading: "lazy" }) : el("span", { textContent: born.has(a) ? "" : "empty" }));
     const card = el(born.has(a) ? "a" : "div", { class: "studio" }, frame, el("h2", { textContent: studioName(a) }),
       el("div", { class: "state" + (live ? " live" : ""), textContent: state }));
-    if (born.has(a)) card.href = `/walls/?s=${a}`;
+    if (born.has(a)) card.href = `/walls/${a}/`;
     cards.push(card);
   }
   box.replaceChildren(...cards);
@@ -187,7 +189,7 @@ async function door() {
 }
 
 async function walls() {
-  const a = new URLSearchParams(location.search).get("s") || "i";
+  const a = which("s") || "i";
   const [d, ls] = await Promise.all([data(), looks()]);
   document.title = `${studioName(a)} · Atelier`;
   crumbs([studioName(a)]);
@@ -262,14 +264,15 @@ async function walls() {
 }
 
 async function work() {
-  const id = new URLSearchParams(location.search).get("w") || "";
+  const id = which("w");
   const d = await data();
   const w = d.works.find((x) => x.id === id && x.finished);
   const box = document.getElementById("work");
+  box.replaceChildren();  // the export's copy of the page, for readers that run no script
   if (!w) { box.append(el("p", { class: "empty", textContent: "Nothing hangs here." })); return; }
   const a = artistOf(w.id);
   document.title = `${w.title || "Untitled"} · Atelier`;
-  crumbs([studioName(a), `/walls/?s=${a}`], [w.title || "Untitled"]);
+  crumbs([studioName(a), `/walls/${a}/`], [w.title || "Untitled"]);
   const img = el("img", { src: finalImg(w), alt: w.title || "Untitled", onclick: () => lightbox([{ ...closeUp(w), href: null }], 0) });
   if (w.px) { img.srcset = srcsetOf(w); img.sizes = "(max-width: 1100px) 100vw, 1068px"; }
   box.append(el("div", { class: "piece" }, img, label(w)));
@@ -296,14 +299,15 @@ async function work() {
 async function essayList() {
   try { const r = await fetch("/data/essays.json"); return r.ok ? (await r.json()).essays : []; } catch { return []; }
 }
-const essayHref = (e) => `/essays/?e=${encodeURIComponent(e.name)}`;
+const essayHref = (e) => `/essays/${encodeURIComponent(e.name)}/`;
 function prose(text) {  // *a few words* in italics; everything else as written
   return text.split(/\*([^*]+)\*/).map((part, k) => (k % 2 ? el("em", { textContent: part }) : part));
 }
 async function essaysPage() {
   const [list, d] = await Promise.all([essayList(), data()]);
   const box = document.getElementById("essays");
-  const name = new URLSearchParams(location.search).get("e");
+  box.replaceChildren();  // the export's copy of the page, for readers that run no script
+  const name = which("e");
   const e = name && list.find((x) => x.name === name);
   if (!e) {
     crumbs(["Essays"]);
