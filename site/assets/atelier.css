@@ -20,6 +20,8 @@ header.top a { text-decoration: none; }
 header.top a:hover { color: var(--fg); }
 header.top .sep { margin: 0 .7em; opacity: .6; }
 h1, h2 { font-weight: normal; letter-spacing: .02em; }
+/* in the page's text for machines that read it, not shown to people or read out by a screen reader */
+.unseen { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .door { min-height: 46vh; display: grid; place-items: center; text-align: center; padding: 8vh 0 4vh; }
 /* with the studios side by side, the door gives way first, so on a short screen they and the footer still fit above the fold */
 @media (min-width: 720px) {

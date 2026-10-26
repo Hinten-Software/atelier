@@ -6,6 +6,12 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["viewer/studio.py", "--sessions", "~/.atelier/claude/projects", "--port", "8765"],
       "port": 8765
+    },
+    {
+      "name": "site",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["runner/atelier.py", "serve", "--host", "127.0.0.1", "--port", "8766"],
+      "port": 8766
     }
   ]
 }
