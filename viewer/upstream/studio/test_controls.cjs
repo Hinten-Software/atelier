@@ -50,6 +50,37 @@ const check = async (name, fn) => {
   };
   const active = page => page.evaluate(() => document.activeElement.id || document.activeElement.tagName);
 
+  await check('enlargement blocks event and code shortcuts until it closes', async () => {
+    const { context, page } = await open(1440, 1000);
+    await page.locator('#strip > *').first().click();
+    await page.locator('#img').click();
+    const before = await page.evaluate(() => [pos, live, codeShown(), $('zimg').src]);
+    for (const key of ['ArrowRight', 'ArrowLeft', '[', ']', 'l', 'c']) {
+      await page.keyboard.press(key);
+      assert.deepEqual(await page.evaluate(() => [pos, live, codeShown(), $('zimg').src]), before, key);
+      assert.equal(await page.locator('#zoom').isVisible(), true);
+    }
+    await page.keyboard.press('Shift+Tab');
+    assert.equal(await active(page), 'zclose');
+    await page.keyboard.press('Space');
+    assert.equal(await page.locator('#zoom').isVisible(), false);
+    assert.equal(await active(page), 'img');
+    await context.close();
+  });
+
+  await check('reduced motion shows a new live thought immediately', async () => {
+    const context = await browser.newContext({ viewport:{ width:1440, height:1000 }, reducedMotion:'reduce' });
+    const page = await context.newPage();
+    const text = 'A recorded thought about the next marks. '.repeat(100);
+    const history = [...events, e('think', { text })];
+    await page.route('**/api/events?*', route => route.fulfill({ json:{ epoch:0, sittings:1, events:history, updates:[], nupdates:0, total:history.length } }));
+    await page.goto(`${origin}/?p=fixture-a`);
+    await page.waitForFunction(() => events.length === 8);
+    assert.equal((await page.locator('#jbody .th').last().textContent()).trim(), text.trim());
+    assert.equal(await page.locator('#jbody .cursor').count(), 0);
+    await context.close();
+  });
+
   await check('the painting opens from the keyboard, and its enlargement keeps focus until it closes', async () => {
     const { context, page } = await open(1440, 1000);
     for (let n = 0; n < 40 && await active(page) !== 'img'; n++) await page.keyboard.press('Tab');
@@ -98,6 +129,39 @@ const check = async (name, fn) => {
       for (const control of controls.slice(1)) assert.equal(overlap(exit.rect, control.rect), false, `${width}x${height}: exit link overlaps ${control.id}`);
       await context.close();
     }
+  });
+
+  await check('the first-visit explanation keeps focus inside and closes on Escape', async () => {
+    const context = await browser.newContext({ viewport:{ width:1440, height:1000 } });
+    const page = await context.newPage();
+    await page.route(origin + '/?*', async route => route.fulfill({ contentType:'text/html',
+      body:fs.readFileSync(path.join(root, 'index.html'), 'utf8').replace('<script src="code-display.js">', '<script>window.STUDIO_STATIC=true;</script><script src="code-display.js">') }));
+    await page.goto(`${origin}/?p=fixture-a`);
+    assert.equal(await page.locator('#intro').isVisible(), true);
+    for (let i = 0; i < 4; i++) {
+      await page.keyboard.press('Tab');
+      assert.equal(await page.evaluate(() => !!document.activeElement.closest('#intro')), true, `Tab ${i + 1} left the explanation`);
+    }
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('#intro').isVisible(), false);
+    assert.equal(await page.evaluate(() => localStorage.getItem('studio.intro')), '1');
+    await context.close();
+  });
+
+  await check('a message over the picture keeps its own background', async () => {
+    const { context, page } = await open(1440, 1000);
+    const colors = await page.evaluate(() => {
+      const note = document.getElementById('nopic');
+      note.textContent = "Can't reach this painter's studio right now."; note.hidden = false;
+      const style = getComputedStyle(note);
+      return [style.color, style.backgroundColor].map(c => c.match(/[\d.]+/g).map(Number));
+    });
+    const [text, back] = colors;
+    assert.equal(back.length === 3 || back[3] === 1, true, 'background is not opaque');
+    const lum = c => { const [r, g, b] = c.slice(0, 3).map(v => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
+    const [hi, lo] = [lum(text), lum(back)].sort((a, b) => b - a);
+    assert.equal((hi + 0.05) / (lo + 0.05) >= 4.5, true, 'text contrast below 4.5');
+    await context.close();
   });
 
   server.close();

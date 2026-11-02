@@ -196,6 +196,7 @@ pub struct Canvas {
     pub(crate) keep: (usize, usize, usize, usize),
     /// Linear RGB reflectance, row major.
     pub(crate) px: Vec<Rgb>,
+    pub(crate) backing: Vec<crate::mixer::Backing>,
     /// Physical surface height, µm: woven linen, ground layers, paint films.
     pub(crate) height: Vec<f32>,
     /// Accumulated paint film in coats (bookkeeping).
@@ -240,6 +241,11 @@ pub struct Canvas {
     pub(crate) hand_slice: Option<f32>,
     /// The engine version it is painted with (`crate::ENGINE`).
     pub(crate) engine: u32,
+    /// Engine 9's material revision (`crate::skin::MATERIAL`): 1 keeps its
+    /// baked films curing from the top down in `skin`; 0 is the single-cure
+    /// film engine 9 was released with.
+    pub(crate) material: u32,
+    pub(crate) skin: crate::skin::Film,
     pub(crate) quarter_tiles: bool,
     pub(crate) adaptive_sweep: bool,
     pub(crate) liquid_film_levels: bool,
@@ -305,6 +311,7 @@ impl Canvas {
             f,
             keep,
             px: vec![ground; n],
+            backing: Vec::new(),
             height: vec![0.0; n],
             film: vec![0.0; n],
             gloss: vec![OIL_GROUND_GLOSS; n],
@@ -323,6 +330,8 @@ impl Canvas {
             tally: crate::tally::Tally::default(),
             hand_slice: None,
             engine: crate::ENGINE,
+            material: 0,
+            skin: Default::default(),
             quarter_tiles: false,
             adaptive_sweep: false,
             liquid_film_levels: false,
@@ -350,9 +359,12 @@ impl Canvas {
         self.liquid_film_levels &= v >= 4;
         self.glaze_film &= crate::engine7::active(v);
         self.rag_lift &= crate::engine7::active(v);
-        self.knife_skim &= matches!(v, crate::engine7::ENGINE | crate::REACH_END);
-        self.blend_feather &= matches!(v, crate::engine7::ENGINE | crate::REACH_END);
-        self.brush_skim &= matches!(v, crate::engine7::ENGINE | crate::REACH_END);
+        self.knife_skim &= matches!(v, crate::engine7::ENGINE | crate::REACH_END | crate::PIGMENT_MIXER);
+        self.blend_feather &= matches!(v, crate::engine7::ENGINE | crate::REACH_END | crate::PIGMENT_MIXER);
+        self.brush_skim &= matches!(v, crate::engine7::ENGINE | crate::REACH_END | crate::PIGMENT_MIXER);
+        if v < crate::PIGMENT_MIXER {
+            self.material = 0;
+        }
         self
     }
     pub fn engine(&self) -> u32 {
@@ -412,6 +424,10 @@ impl Canvas {
         self.glaze_film
     }
 
+    pub(crate) fn spectral_films(&self) -> bool {
+        self.engine >= crate::PIGMENT_MIXER && self.glaze_film
+    }
+
     pub fn with_liquid_film_levels(mut self, enabled: bool) -> Self {
         self.liquid_film_levels = enabled && self.engine >= 4;
         self
@@ -451,7 +467,7 @@ impl Canvas {
     }
 
     pub fn with_knife_skim(mut self, enabled: bool) -> Self {
-        self.knife_skim = enabled && matches!(self.engine, crate::engine7::ENGINE | crate::REACH_END);
+        self.knife_skim = enabled && matches!(self.engine, crate::engine7::ENGINE | crate::REACH_END | crate::PIGMENT_MIXER);
         self
     }
 
@@ -460,7 +476,7 @@ impl Canvas {
     }
 
     pub fn with_blend_feather(mut self, enabled: bool) -> Self {
-        self.blend_feather = enabled && matches!(self.engine, crate::engine7::ENGINE | crate::REACH_END);
+        self.blend_feather = enabled && matches!(self.engine, crate::engine7::ENGINE | crate::REACH_END | crate::PIGMENT_MIXER);
         self
     }
 
@@ -469,7 +485,7 @@ impl Canvas {
     }
 
     pub fn with_brush_skim(mut self, enabled: bool) -> Self {
-        self.brush_skim = enabled && matches!(self.engine, crate::engine7::ENGINE | crate::REACH_END);
+        self.brush_skim = enabled && matches!(self.engine, crate::engine7::ENGINE | crate::REACH_END | crate::PIGMENT_MIXER);
         self
     }
 
@@ -550,6 +566,11 @@ impl Canvas {
     /// `stiff` 0..1 is its body (fluid chalk-glue ≈ 0.2, oil lead white ≈ 0.6);
     /// `texture` 0..1 roughens it before it levels (a roller or scraped knife).
     pub fn prime(&mut self, color: Rgb, hiding: f32, um: f32, stiff: f32, texture: f32, seed: u64) {
+        self.prime_paint(&crate::Paint::new(color, hiding, stiff), um, texture, seed);
+    }
+
+    /// Prepare a ground with the paint's retained film optics (engine 9).
+    pub fn prime_paint(&mut self, paint: &crate::Paint, um: f32, texture: f32, seed: u64) {
         self.dry();
         let (w, h) = (self.f.w, self.f.h);
         let (ox, oy) = (self.f.x0, self.f.y0);
@@ -562,10 +583,14 @@ impl Canvas {
                 um * (1.0 + texture * 1.4 * n).max(0.0)
             })
             .collect();
-        let sv = vec![stiff; w * h];
+        let sv = vec![paint.stiff; w * h];
         let t = self.settle((0, 0, w, h), &add, &sv);
-        let pig = Pigment::masstone_hiding(color, hiding);
-        self.px.par_iter_mut().zip(&t).for_each(|(p, &ti)| *p = pig.over(*p, ti / COAT_UM));
+        if self.engine >= crate::PIGMENT_MIXER && paint.spectral_films {
+            self.px.par_iter_mut().zip(&t).for_each(|(p, &ti)| *p = paint.over(*p, ti / COAT_UM));
+        } else {
+            let pig = paint.pigment();
+            self.px.par_iter_mut().zip(&t).for_each(|(p, &ti)| *p = pig.over(*p, ti / COAT_UM));
+        }
         self.film.par_iter_mut().zip(&t).for_each(|(f, &ti)| *f += ti / COAT_UM);
         self.ground_um += um;
     }
@@ -858,8 +883,8 @@ mod tests {
     // Outside the film the two surfaces are the same.
     #[test]
     fn a_liquid_film_levels_the_weave_under_it_from_engine_4() {
-        let mut liquid = crate::Style::oil().prepare(160, 1.0, 3).with_engine(4).with_liquid_film_levels(true);
         let mut raised = crate::Style::oil().prepare(160, 1.0, 3).with_engine(4);
+        let mut liquid = raised.clone().with_liquid_film_levels(true);
         let w = liquid.f.w;
         let band = |i: usize| (40..120).contains(&(i % w));
         liquid.wet.solv = vec![0.0; liquid.height.len()];

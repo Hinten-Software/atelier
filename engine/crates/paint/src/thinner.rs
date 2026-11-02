@@ -470,7 +470,9 @@ impl Canvas {
                     // its pores goes back with the rest)
                     let mut cap = if soaks { absorb[i] } else { 0.0 };
                     if soaks && qin > 0.0 {
+                        let scatter = hide[0];
                         pv = crate::bristle::ground_drain(&mut cap, pv, &mut hide);
+                        if self.engine >= crate::PIGMENT_MIXER && scatter > 0.0 { lat.concentrate(hide[0] / scatter); }
                     }
                     let cure = if pv <= 0.0 { 0.0 } else { cure };
                     // (the drying thickness a bare pixel takes, by amount)
@@ -503,6 +505,7 @@ impl Canvas {
                 if ps > 0.0 && self.wet.solv[i] <= 0.0 { solvent.push(i); }
                 self.wet.solv[i] = ps * COAT_UM;
                 self.wet.lat[i] = lat;
+                self.wet.lat[i].layers = Vec::new();
                 self.wet.hide[i] = hide;
                 if soaks {
                     self.absorb[i] = cap;
@@ -524,7 +527,7 @@ impl Canvas {
                     } else if th_in > 0.0 {
                         p.th = th_in;
                         if pv >= 1e-5 {
-                            (p.seen, p.lev) = (pv, crate::surface::SET_TIME * crate::drying::fluid(cure));
+                            (p.seen, p.lev) = (pv, if self.engine >= 9 { 0.0 } else { crate::surface::SET_TIME * crate::drying::fluid(cure) });
                         }
                     }
                 }

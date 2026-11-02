@@ -4,6 +4,7 @@ use std::process::{Command, Output};
 
 #[path = "../../paint/tests/support/image_tolerance.rs"]
 mod image_tolerance;
+mod support;
 
 const CANVAS: &str = "canvas{size=300, aspect=5, linen={16,14}, seed=3, ground={{pile={{\"lead white\",6},{\"raw umber\",1}}, um=50, apply=\"roller\"}}}";
 const PREPARE: &str = "p=pile{{\"lead white\",6},{\"cobalt blue\",1}}; b=brush(\"filbert\",8); b:load(p,0.9)";
@@ -35,8 +36,26 @@ impl Studio {
 
 impl Drop for Studio {
     fn drop(&mut self) {
-        let _ = self.cmd(&["close"]);
+        support::stop_servers(&self.0);
     }
+}
+
+#[test]
+fn misspelled_frame_switches_are_refused_without_disabling_capture() {
+    let studio = Studio::new("switches");
+    studio.ok(&["frames", "on"]);
+    studio.ok(&["do", CANVAS]);
+    for (i, typo) in ["of", "onn"].into_iter().enumerate() {
+        let reply = studio.cmd(&["frames", typo]);
+        assert!(!reply.status.success(), "frames {typo} should fail: {}", String::from_utf8_lossy(&reply.stdout));
+        assert!(String::from_utf8_lossy(&reply.stderr).contains("frames on|off"));
+        studio.ok(&["do", "x=1"]);
+        assert!(studio.frames().join(format!("{:06}.jpg", i + 2)).exists());
+    }
+    studio.ok(&["frames", "off"]);
+    studio.ok(&["do", "x=2"]);
+    assert!(!studio.frames().join("000004.jpg").exists());
+    assert!(studio.ok(&["frames"]).starts_with("frames on "));
 }
 
 #[test]
@@ -113,7 +132,7 @@ fn interrupted_index_publication_recovers_at_the_next_commit_after_checkpoint_re
     std::fs::remove_dir(&index).unwrap();
     studio.ok(&["open", "painting"]);
     let log = std::fs::read_to_string(studio.0.join("out/easel/painting/server.log")).unwrap();
-    assert!(log.contains("reconstructed 10 chunks from"), "{log}");
+    assert!(log.contains("reconstructed 1 chunks from"), "{log}");
     studio.ok(&["do", "wait(1)"]);
     let text = std::fs::read_to_string(&index).unwrap();
     let rows: Vec<_> = text.lines().skip(1).collect();

@@ -18,11 +18,32 @@
 //!
 //! The reader also accepts version 7 (`PAINTCK7`), the engine-1 layout before
 //! edition numbers: it ends after the hand-time ledger, without an engine word.
-//! New engine-1 writes remain version 8; no historical bytes are rewritten on read.
-//! The format is version 8 (`MAGIC` is `PAINTCK8`) for engines 1 and 2 and
+//! Engine-1 writes retain base layout 8 inside the current envelope.
+//! New writes use version 19 (`PAINTC19`): after the header, three u64 words
+//! identify the pigment mixer, the base layout below and whether tube
+//! parts follow (0 or 1). This identity is independent of the engine number.
+//! Older files containing wet paint are refused because their latent vectors
+//! cannot be decoded by this mixer. Empty older files can still be read.
+//! Versions 7–18 store seven latent floats per pixel, not the current width.
+//! Retained wet layers use version 20. A retained spectral dry backing uses
+//! version 21: a wet-layer presence flag, those layers if present, then
+//! 38 reflectances, three residuals and three cached RGB values per pixel.
+//! A canvas painted with engine 9's material revision 1 or later
+//! (`Canvas::with_material`, `crate::skin`) is version 22 (`PAINTC22`): the
+//! header, the version it would otherwise be (19, 20 or 21, one u64), that
+//! version's bytes after its header, then the skin section, the file's last:
+//! a `SKIN` mark and the section's own version (1, `SKIN_V`), the material
+//! revision, the clock minute of the last tick (f64), and each buffer
+//! pixel's baked films top down (a count, then ten f32 per film:
+//! thickness, front depth, unexpanded skin, membrane force, bulk moved,
+//! birth minute, front rate, stiffness, binder share, measured slope). A
+//! reader that
+//! doesn't know version 22 refuses the file instead of loading the
+//! picture as the old material.
+//!
+//! The base format is version 8 (`MAGIC` is `PAINTCK8`) for engines 1 and 2 and
 //! version 9 (`PAINTCK9`) for engine 3, or version 10 for a raw canvas
-//! (below); files of any other version are refused (re-run to checkpoint
-//! again). Version 9 is version 8's bytes after the magic, then the
+//! (below). Version 9 is version 8's bytes after the magic, then the
 //! thinner's section: the solvent in the open film, one f32 (µm) per buffer
 //! pixel, row major, as the file's last 4 × pixels bytes (`crate::thinner`;
 //! that it comes last is part of version 9; version 10 adds its section
@@ -32,8 +53,8 @@
 //! (`PAINTC11`) is engine 4's and later: version 9 with two more properties
 //! (solvent and oil) to each pixel of wet paint and, after the engine version and before
 //! the solvent (still last), the surface's gloss and the ground's remaining
-//! absorbency, one f32 each per pixel. An older engine's canvas is written
-//! as it always was. Version 12 combines version 11 with the raw canvas's
+//! absorbency, one f32 each per pixel. An older engine retains its base
+//! layout inside the current envelope. Version 12 combines version 11 with the raw canvas's
 //! soak section after the solvent. After the header the
 //! writer stores, in order: the frame and crop window, the scale and mm per
 //! unit, the linen (if any), the surface generation, the stroke counter and
@@ -123,6 +144,11 @@ const MAGIC14: &[u8; 8] = b"PAINTC14";
 const MAGIC16: &[u8; 8] = b"PAINTC16";
 const MAGIC17: &[u8; 8] = b"PAINTC17";
 const MAGIC18: &[u8; 8] = b"PAINTC18";
+const MAGIC19: &[u8; 8] = b"PAINTC19";
+const MAGIC20: &[u8; 8] = b"PAINTC20";
+const MAGIC21: &[u8; 8] = b"PAINTC21";
+const MAGIC22: &[u8; 8] = b"PAINTC22";
+const HISTORICAL_LAT: usize = 7;
 /// Version 11 followed by the paper's section (`crate::paper`).
 const MAGIC13: &[u8; 8] = b"PAINTC13";
 /// Marks the paper's section ("PAPR"), and its version.
@@ -139,6 +165,9 @@ const SOAK_V: u64 = 1;
 /// Marks the drain section ("DRAN"), and its version.
 const DRAIN_MARK: u64 = 0x4e415244;
 const DRAIN_V: u64 = 1;
+/// Marks the skin section ("SKIN"), and its version.
+const SKIN_MARK: u64 = 0x4e494b53;
+const SKIN_V: u64 = 1;
 const QUARTER_TILES: u64 = 1 << 33;
 const ADAPTIVE_SWEEP: u64 = 1 << 34;
 const GLAZE_FILM: u64 = 1 << 36;
@@ -184,10 +213,27 @@ fn put_all(w: &mut impl Write, v: impl Iterator<Item = f32>) -> io::Result<()> {
     w.write_all(&buf)
 }
 
+/// `n` floats, read through a small buffer: the only allocation is the result
+/// (a 2400 px canvas's latents are close to a gigabyte, and a canvas is read
+/// back beside the live one when a chunk is rolled back).
 fn get_all(r: &mut impl Read, n: usize) -> io::Result<Vec<f32>> {
-    let mut bytes = vec![0u8; n * 4];
-    r.read_exact(&mut bytes)?;
-    Ok(bytes.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect())
+    let mut v = Vec::with_capacity(n);
+    get_into(r, n, |x| v.push(x))?;
+    Ok(v)
+}
+
+fn get_into(r: &mut impl Read, n: usize, mut put: impl FnMut(f32)) -> io::Result<()> {
+    let mut buf = [0u8; 1 << 16];
+    let mut left = n * 4;
+    while left > 0 {
+        let take = left.min(buf.len());
+        r.read_exact(&mut buf[..take])?;
+        for b in buf[..take].as_chunks::<4>().0 {
+            put(f32::from_le_bytes(*b));
+        }
+        left -= take;
+    }
+    Ok(())
 }
 
 fn bad(msg: &str) -> io::Error {
@@ -379,6 +425,10 @@ fn read_magic_header(r: &mut impl Read) -> io::Result<(u32, String)> {
         m if m == MAGIC16 => 16,
         m if m == MAGIC17 => 17,
         m if m == MAGIC18 => 18,
+        m if m == MAGIC19 => 19,
+        m if m == MAGIC20 => 20,
+        m if m == MAGIC21 => 21,
+        m if m == MAGIC22 => 22,
         m if m == MAGIC13 => 13,
         m if m == MAGIC15 => 15,
         _ => return Err(bad("not a canvas checkpoint (or an older format)")),
@@ -403,7 +453,9 @@ impl Canvas {
     /// Write the complete canvas state (dries nothing: wet paint stays wet)
     /// after `header`.
     pub fn write_state(&self, w: &mut impl Write, header: &str) -> io::Result<()> {
-        let pigments = self.wet.lat.iter().any(|p| !p.parts.is_empty());
+        let layers = self.wet.lat.iter().any(|p| !p.layers.is_empty());
+        let pigments = layers || self.wet.lat.iter().any(|p| !p.parts.is_empty());
+        let backing = self.spectral_films() && !self.backing.is_empty();
         // (a raw canvas is engine 3's: version 10 holds version 9's bytes)
         if self.soak.is_some() && self.engine < 3 {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "a raw canvas is engine 3's: this one is set to an older engine"));
@@ -432,22 +484,16 @@ impl Canvas {
             (4.., false) => 11,
             _ => 8,
         };
-        let magic = match version {
-            14 => MAGIC14,
-            16 => MAGIC16,
-            17 => MAGIC17,
-            15 => MAGIC15,
-            13 => MAGIC13,
-            12 => MAGIC12,
-            11 => MAGIC11,
-            10 => MAGIC10,
-            9 => MAGIC9,
-            _ => MAGIC,
-        };
-        w.write_all(if pigments { MAGIC18 } else { magic })?;
+        let material = self.material >= 1;
+        w.write_all(if material { MAGIC22 } else if backing { MAGIC21 } else if layers { MAGIC20 } else { MAGIC19 })?;
         put_u64(w, header.len() as u64)?;
         w.write_all(header.as_bytes())?;
-        if pigments { put_u64(w, version)?; }
+        if material {
+            put_u64(w, if backing { 21 } else if layers { 20 } else { 19 })?;
+        }
+        put_u64(w, if self.spectral_films() { crate::mixer::film_identity() } else if self.engine >= crate::PIGMENT_MIXER { crate::mixer::identity9() } else { crate::mixer::identity() })?;
+        put_u64(w, version)?;
+        put_u64(w, u64::from(pigments))?;
         let f = self.f;
         for v in [f.w, f.h, f.x0, f.y0, f.full_w, f.full_h, self.keep.0, self.keep.1, self.keep.2, self.keep.3] {
             put_u64(w, v as u64)?;
@@ -480,7 +526,8 @@ impl Canvas {
         put_all(w, self.height.iter().copied())?;
         put_all(w, self.film.iter().copied())?;
         put_all(w, wt.vol.iter().copied())?;
-        put_all(w, wt.lat.iter().flat_map(|l| l.color))?;
+        let width = if self.engine >= crate::PIGMENT_MIXER { LAT } else { crate::mixer::LEGACY_LATENT_SIZE };
+        put_all(w, wt.lat.iter().flat_map(|l| l.color[..width].iter().copied()))?;
         if version >= 11 {
             // (engine 4's five properties: the pigment's packing, `Prop`'s
             // last five, is the drain section's, version 14; without it, it
@@ -574,16 +621,70 @@ impl Canvas {
                 }
             }
         }
+        if backing {
+            put_u64(w, u64::from(layers))?;
+        }
+        if layers {
+            for pixel in &self.wet.lat {
+                put_u64(w, pixel.layers.len() as u64)?;
+                for layer in &pixel.layers {
+                    put_f32(w, layer.share)?;
+                    put_all(w, layer.lat.color.into_iter())?;
+                    put_all(w, layer.hide.into_iter())?;
+                    put_u64(w, layer.lat.parts.len() as u64)?;
+                    for &(i, amount) in &layer.lat.parts {
+                        put_u64(w, i as u64)?;
+                        put_f32(w, amount)?;
+                    }
+                }
+            }
+        }
+        if backing {
+            put_all(w, self.backing.iter().flat_map(|b| b.reflectance.into_iter().chain(b.residual).chain(b.color)))?;
+        }
+        if material {
+            put_u64(w, SKIN_MARK)?;
+            put_u64(w, SKIN_V)?;
+            put_u64(w, u64::from(self.material))?;
+            w.write_all(&self.skin.ticked.to_le_bytes())?;
+            for i in 0..self.f.w * self.f.h {
+                put_u64(w, self.skin.column(i).count() as u64)?;
+                put_all(w, self.skin.column(i).flat_map(|p| [p.h, p.s, p.x, p.n, p.w, p.born, p.v0, p.stiff, p.binder, p.slope]))?;
+            }
+        }
         Ok(())
     }
 
     /// Read a canvas written by `write_state`; returns it and the header.
     pub fn read_state(r: &mut impl Read) -> io::Result<(Canvas, String)> {
         let (version, header) = read_magic_header(r)?;
-        let pigments = version == 18;
-        let version = if pigments {
+        let material = version == 22;
+        let version = if material {
+            match get_u64(r)? {
+                v @ 19..=21 => v as u32,
+                _ => return Err(bad("checkpoint material base format is invalid")),
+            }
+        } else {
+            version
+        };
+        let mut layers = version == 20;
+        let spectral_backing = version == 21;
+        let own_mixer = version >= 19;
+        let identity = if own_mixer { get_u64(r)? } else { 0 };
+        if own_mixer && identity != crate::mixer::identity() && identity != crate::mixer::identity9() && identity != crate::mixer::film_identity() {
+            return Err(bad("checkpoint uses an obsolete pigment representation; recreate the checkpoint with this build"));
+        }
+        let mut pigments = version == 18;
+        let version = if pigments || own_mixer {
             let version = get_u64(r)?;
             if !(8..=17).contains(&version) { return Err(bad("checkpoint base format is invalid")); }
+            if own_mixer {
+                pigments = match get_u64(r)? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(bad("checkpoint pigment flag is invalid")),
+                };
+            }
             version as u32
         } else { version };
         let mut u = [0usize; 10];
@@ -648,10 +749,29 @@ impl Canvas {
         c.px = px.as_chunks::<3>().0.to_vec();
         c.height = get_all(r, n)?;
         c.film = get_all(r, n)?;
-        let mut wet = crate::wet::Wet::new(n);
+        // every per-pixel field is read below (the floor is not stored), so none is
+        // allocated twice: a 2400 px canvas's latents alone are close to a gigabyte
+        let mut wet = crate::wet::Wet::new(0);
+        wet.floor = vec![0.0; n];
         wet.vol = get_all(r, n)?;
-        let lat = get_all(r, n * LAT)?;
-        wet.lat = lat.as_chunks::<LAT>().0.iter().copied().map(crate::wet::Latent::from_color).collect();
+        let width = if !own_mixer { HISTORICAL_LAT } else if identity == crate::mixer::identity() { crate::mixer::LEGACY_LATENT_SIZE } else { LAT };
+        if own_mixer {
+            // the stored latents go straight into the pixels' (no copy of them all as floats)
+            let mut lat = Vec::with_capacity(n);
+            let (mut color, mut k) = ([0.0; LAT], 0);
+            get_into(r, n * width, |x| {
+                color[k] = x;
+                k += 1;
+                if k == width {
+                    lat.push(crate::wet::Latent::from_color(color));
+                    (color, k) = ([0.0; LAT], 0);
+                }
+            })?;
+            wet.lat = lat;
+        } else {
+            get_into(r, n * width, |_| {})?;
+            wet.lat = vec![crate::wet::Latent::default(); n];
+        }
         // (the pigment's packing is the drain section's, version 14; else
         // paint naming no tubes')
         let (p, f, q) = (crate::wet::PACKED_OIL, crate::wet::DRAINED_FLOOR, crate::wet::OIL_VOLUME);
@@ -726,12 +846,15 @@ impl Canvas {
             c.sealed_drawing_guide = word & SEALED_DRAWING_GUIDE != 0;
             c.drawing_optics = word & DRAWING_OPTICS != 0;
             match u32::try_from(word & !(DRAWING_OPTICS | SEALED_DRAWING_GUIDE | LIQUID_FILM_LEVELS | QUARTER_TILES | ADAPTIVE_SWEEP | GLAZE_FILM | RAG_LIFT | KNIFE_SKIM | BLEND_FEATHER | BRUSH_SKIM)) {
-                Ok(v) if crate::supported_engine(v) && (!c.liquid_film_levels || v >= 4) && (!(c.quarter_tiles || c.adaptive_sweep) || v == 5) && (!(c.glaze_film || c.rag_lift || c.knife_skim || c.blend_feather || c.brush_skim) || matches!(v, crate::engine7::ENGINE | crate::REACH_END)) => v,
+                Ok(v) if crate::supported_engine(v) && (!c.liquid_film_levels || v >= 4) && (!(c.quarter_tiles || c.adaptive_sweep) || v == 5) && (!(c.glaze_film || c.rag_lift || c.knife_skim || c.blend_feather || c.brush_skim) || matches!(v, crate::engine7::ENGINE | crate::REACH_END | crate::PIGMENT_MIXER)) => v,
                 _ => return Err(bad("checkpoint engine version is invalid")),
             }
         };
         if c.drawing.as_ref().is_some_and(|d| (d.layout() == 4) != c.drawing_optics) {
             return Err(bad("checkpoint drawing optics do not match its layout"));
+        }
+        if own_mixer && identity != if c.spectral_films() { crate::mixer::film_identity() } else if c.engine >= crate::PIGMENT_MIXER { crate::mixer::identity9() } else { crate::mixer::identity() } {
+            return Err(bad("checkpoint uses an obsolete pigment representation; recreate the checkpoint with this build"));
         }
         if version >= 11 {
             if c.engine < 4 {
@@ -791,7 +914,7 @@ impl Canvas {
                     h[5..].copy_from_slice(k);
                 }
                 c.drain = true;
-                if !raw && version == 14 && !pigments && r.read(&mut [0u8; 1])? != 0 {
+                if !raw && version == 14 && !pigments && !spectral_backing && !material && r.read(&mut [0u8; 1])? != 0 {
                     return Err(bad("checkpoint has trailing data"));
                 }
                 raw
@@ -804,7 +927,7 @@ impl Canvas {
                 return Err(bad("checkpoint soak is on a crop render"));
             }
             c.soak = Some(Box::new(read_soak(r, n)?));
-            if version != 17 && !pigments && r.read(&mut [0u8; 1])? != 0 {
+            if version != 17 && !pigments && !spectral_backing && !material && r.read(&mut [0u8; 1])? != 0 {
                 return Err(bad("checkpoint has trailing data"));
             }
         }
@@ -813,7 +936,7 @@ impl Canvas {
             let (p, micro) = read_paper(r, n)?;
             c.paper = Some(p);
             c.micro = micro;
-            if !pigments && r.read(&mut [0u8; 1])? != 0 {
+            if !pigments && !spectral_backing && !material && r.read(&mut [0u8; 1])? != 0 {
                 return Err(bad("checkpoint has trailing data"));
             }
         }
@@ -837,11 +960,11 @@ impl Canvas {
                 return Err(bad("checkpoint sheet mark is wrong"));
             }
             c.sheet = Some(read_sheet_body(r, n)?);
-            if !pigments && r.read(&mut [0u8; 1])? != 0 {
+            if !pigments && !spectral_backing && !material && r.read(&mut [0u8; 1])? != 0 {
                 return Err(bad("checkpoint has trailing data"));
             }
         }
-        if version == 7 && !pigments && r.read(&mut [0u8; 1])? != 0 {
+        if version == 7 && !pigments && !material && r.read(&mut [0u8; 1])? != 0 {
             return Err(bad("version-7 checkpoint has trailing data"));
         }
         if pigments {
@@ -856,12 +979,176 @@ impl Canvas {
                     pixel.parts.push((i, amount));
                 }
             }
-            if r.read(&mut [0u8; 1])? != 0 {
+            if !layers && !spectral_backing && !material && r.read(&mut [0u8; 1])? != 0 {
                 return Err(bad("checkpoint has trailing data"));
             }
         }
+        if spectral_backing {
+            layers = match get_u64(r)? {
+                0 => false,
+                1 => true,
+                _ => return Err(bad("checkpoint spectral backing layer flag is invalid")),
+            };
+        }
+        if layers {
+            if c.engine < crate::PIGMENT_MIXER || !pigments { return Err(bad("checkpoint layers need engine 9 pigment storage")); }
+            for pixel in &mut c.wet.lat {
+                let count = get_u64(r)?;
+                if count > 1 << 20 { return Err(bad("checkpoint layer count is invalid")); }
+                for _ in 0..count {
+                    let share = get_f32(r)?;
+                    let color: [f32; LAT] = get_all(r, LAT)?.try_into().unwrap();
+                    let hide: crate::wet::Prop = get_all(r, 10)?.try_into().unwrap();
+                    if !share.is_finite() || share <= 0.0 || !color.iter().chain(&hide).all(|x| x.is_finite()) { return Err(bad("checkpoint layer is invalid")); }
+                    let mut lat = crate::wet::Latent::from_color(color);
+                    let parts = get_u64(r)?;
+                    if parts > 1 << 20 { return Err(bad("checkpoint layer pigment count is invalid")); }
+                    for _ in 0..parts {
+                        let i = usize::try_from(get_u64(r)?).map_err(|_| bad("checkpoint layer pigment is invalid"))?;
+                        let amount = get_f32(r)?;
+                        if !amount.is_finite() || amount < 0.0 || lat.parts.iter().any(|p| p.0 == i) { return Err(bad("checkpoint layer pigment list is invalid")); }
+                        lat.parts.push((i, amount));
+                    }
+                    pixel.layers.push(crate::wet::Layer { share, lat, hide });
+                }
+                let sum: f32 = pixel.layers.iter().map(|l| l.share).sum();
+                if count > 0 && (sum - 1.0).abs() > 1e-4 { return Err(bad("checkpoint layer shares are invalid")); }
+            }
+            if !spectral_backing && !material && r.read(&mut [0u8; 1])? != 0 { return Err(bad("checkpoint has trailing data")); }
+        }
+        if spectral_backing {
+            if !c.spectral_films() {
+                return Err(bad("checkpoint spectral backing requires spectral film optics"));
+            }
+            c.backing.reserve_exact(n);
+            let mut bytes = [0; (crate::spectral::N + 6) * 4];
+            for _ in 0..n {
+                r.read_exact(&mut bytes)?;
+                let mut b = crate::mixer::Backing::default();
+                for (v, bytes) in b.reflectance.iter_mut().chain(&mut b.residual).chain(&mut b.color).zip(bytes.chunks_exact(4)) {
+                    *v = f32::from_le_bytes(bytes.try_into().unwrap());
+                    if !v.is_finite() {
+                        return Err(bad("checkpoint spectral backing is invalid"));
+                    }
+                }
+                c.backing.push(b);
+            }
+            if !material && r.read(&mut [0u8; 1])? != 0 { return Err(bad("checkpoint has trailing data")); }
+        }
+        if material {
+            if get_u64(r)? != SKIN_MARK || get_u64(r)? != SKIN_V {
+                return Err(bad("checkpoint skin section is invalid"));
+            }
+            let rev = u32::try_from(get_u64(r)?).map_err(|_| bad("checkpoint material revision is invalid"))?;
+            if rev < 1 || rev > crate::skin::MATERIAL || c.engine < crate::PIGMENT_MIXER {
+                return Err(bad("checkpoint material revision is not one this build paints with"));
+            }
+            c.material = rev;
+            let mut b = [0u8; 8];
+            r.read_exact(&mut b)?;
+            let ticked = f64::from_le_bytes(b);
+            if !ticked.is_finite() {
+                return Err(bad("checkpoint skin clock is invalid"));
+            }
+            let mut columns = Vec::with_capacity(n);
+            for _ in 0..n {
+                let count = usize::try_from(get_u64(r)?).map_err(|_| bad("checkpoint skin count is invalid"))?;
+                if count > 1 << 16 {
+                    return Err(bad("checkpoint skin count is invalid"));
+                }
+                let v = get_all(r, count * 10)?;
+                if !v.iter().all(|x| x.is_finite()) {
+                    return Err(bad("checkpoint skin film is invalid"));
+                }
+                columns.push(v.as_chunks::<10>().0.iter().map(|&[h, s, x, n, w, born, v0, stiff, binder, slope]| crate::skin::Packet { h, s, x, n, w, born, v0, stiff, binder, slope, below: u32::MAX }).collect());
+            }
+            c.skin = crate::skin::Film::from_columns(columns, ticked);
+            if r.read(&mut [0u8; 1])? != 0 { return Err(bad("checkpoint has trailing data")); }
+        }
+        if !own_mixer {
+            if c.wet.vol.iter().any(|&v| v > 0.0) {
+                return Err(bad("checkpoint contains wet paint in an obsolete pigment representation; reopen it with the original engine build and export the painting, or replay its log with this build"));
+            }
+            c.wet.lat.fill(crate::wet::Latent::default());
+        }
         Ok((c, header))
     }
+
+    /// Write the canvas state to `w` (`write_state`) and keep aside what it
+    /// leaves out: `unpack` of the two gives this canvas back bit for bit,
+    /// as a copy would, in far less memory. A copy of a painted canvas is
+    /// the pixels' latents, pigment lists and skim layers over again; the
+    /// written state is dense, mostly zero lanes, and compresses well.
+    pub fn pack(&self, w: &mut impl Write) -> io::Result<Aside> {
+        self.write_state(w, "")?;
+        let wet = &self.wet;
+        Ok(Aside {
+            absorb_any: self.absorb_any,
+            ground_um: self.ground_um,
+            hand_slice: self.hand_slice,
+            film_pass: self.film_pass,
+            receptive: self.receptive.clone(),
+            floor: wet.floor.clone(),
+            solv: wet.solv.clone(),
+            laid: wet.laid.clone(),
+            laid_id: wet.laid_id.clone(),
+            hide: (!self.drain).then(|| wet.hide.clone()),
+            drawing: self.drawing.clone(),
+            soak: self.soak.clone(),
+            paper: self.paper,
+            micro: self.micro.clone(),
+            sheet: self.sheet.clone(),
+        })
+    }
+
+    /// The canvas `pack` wrote to `r` and kept `aside`, bit for bit. The
+    /// brushes' contact level is not kept: it is rebuilt from the relief
+    /// to the same bits (`engine7::contact_cache`).
+    pub fn unpack(r: &mut impl Read, aside: Aside) -> io::Result<Canvas> {
+        let (mut c, _) = Canvas::read_state(r)?;
+        c.absorb_any = aside.absorb_any;
+        c.ground_um = aside.ground_um;
+        c.hand_slice = aside.hand_slice;
+        c.film_pass = aside.film_pass;
+        c.receptive = aside.receptive;
+        c.wet.floor = aside.floor;
+        c.wet.solv = aside.solv;
+        c.wet.laid = aside.laid;
+        c.wet.laid_id = aside.laid_id;
+        if let Some(hide) = aside.hide {
+            c.wet.hide = hide;
+        }
+        c.drawing = aside.drawing;
+        c.soak = aside.soak;
+        c.paper = aside.paper;
+        c.micro = aside.micro;
+        c.sheet = aside.sheet;
+        Ok(c)
+    }
+}
+
+/// What `write_state` leaves out of a canvas, or reads back sanitized,
+/// kept beside the written state by `Canvas::pack`: the film floors and
+/// ceilings only the stroke that set them reads, the solvent buffers as
+/// allocated, the five packing lanes of the paint's properties that only
+/// the drain section writes, the values `read_state` clamps, a pass under
+/// way, and the drawing, cloth, paper and sheet, which are cheap to copy.
+pub struct Aside {
+    absorb_any: bool,
+    ground_um: f32,
+    hand_slice: Option<f32>,
+    film_pass: Option<(f32, u32)>,
+    receptive: Option<Vec<f32>>,
+    floor: Vec<f32>,
+    solv: Vec<f32>,
+    laid: Vec<f32>,
+    laid_id: Vec<u32>,
+    hide: Option<Vec<crate::wet::Prop>>,
+    drawing: Option<Box<crate::graphite::Drawing>>,
+    soak: Option<Box<crate::soak::Soak>>,
+    paper: Option<crate::paper::Paper>,
+    micro: Vec<f32>,
+    sheet: Option<crate::sheet::Sheet>,
 }
 
 #[cfg(test)]
@@ -875,6 +1162,82 @@ mod tests {
 
     fn load(b: Vec<u8>) -> io::Result<Canvas> {
         Canvas::read_state(&mut Cursor::new(b)).map(|(c, _)| c)
+    }
+
+    fn base_format(b: &[u8]) -> u64 {
+        assert_eq!(&b[..8], MAGIC19);
+        let header = u64::from_le_bytes(b[8..16].try_into().unwrap()) as usize;
+        assert_eq!(u64::from_le_bytes(b[16 + header..24 + header].try_into().unwrap()), crate::mixer::identity());
+        u64::from_le_bytes(b[24 + header..32 + header].try_into().unwrap())
+    }
+
+    fn set_base_format(b: &mut [u8], version: u64) {
+        base_format(b);
+        let header = u64::from_le_bytes(b[8..16].try_into().unwrap()) as usize;
+        set(b, 24 + header, version);
+    }
+
+    #[test]
+    fn a_different_mixer_identity_is_refused_before_reading_latents() {
+        let c = Canvas::new_window(2, 1.0, [0.1; 3], None);
+        let mut bytes = Vec::new();
+        c.write_state(&mut bytes, "").unwrap();
+        assert!(load(bytes.clone()).is_ok());
+        for identity in [1, crate::mixer::identity() ^ 1] {
+            set(&mut bytes, 16, identity);
+            let error = load(bytes.clone()).err().unwrap();
+            assert!(error.to_string().contains("obsolete pigment representation"));
+        }
+    }
+
+    #[test]
+    fn legacy_checkpoints_and_dumps_keep_twenty_one_lanes() {
+        for engine in (1..=8).filter(|&engine| crate::supported_engine(engine)) {
+            let mut canvas = Canvas::new_window(2, 1.0, [0.1; 3], None).with_engine(engine);
+            let color = crate::mixer::encode(&[0.2, 0.4, 0.6]);
+            canvas.wet.vol[0] = 1.0;
+            canvas.wet.lat[0] = crate::wet::Latent::from_color(color);
+            let mut bytes = Vec::new();
+            canvas.write_state(&mut bytes, "").unwrap();
+            canvas.wet.lat[0].color[crate::mixer::LEGACY_LATENT_SIZE..].fill(1.0);
+            let mut with_extra = Vec::new();
+            canvas.write_state(&mut with_extra, "").unwrap();
+            assert_eq!(with_extra, bytes);
+            let restored = load(bytes.clone()).unwrap();
+            assert_eq!(restored.wet.lat[0].color, color);
+            let mut again = Vec::new();
+            restored.write_state(&mut again, "").unwrap();
+            assert_eq!(again, bytes);
+            let fields = restored.state_fields();
+            let lat = fields.iter().find(|f| f.name == "wet.lat").unwrap();
+            assert_eq!(lat.shape, [2, 2, crate::mixer::LEGACY_LATENT_SIZE]);
+            assert_eq!(lat.values.le_bytes().len(), 4 * 4 * crate::mixer::LEGACY_LATENT_SIZE);
+        }
+    }
+
+    #[test]
+    fn old_engine_nine_identity_is_rejected_without_a_payload() {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        hash.update(crate::mixer::identity().to_le_bytes());
+        hash.update(b"extensive-pigment-and-residual/volume-strength/v1");
+        hash.update(b"opacity-constrained-rgb-tube-proxies/v2");
+        hash.update(b"physical-volume-ks/dark-calibration/v1");
+        hash.update(include_bytes!("mixer/calibrated.bin"));
+        hash.update(include_bytes!("mixer/calibrated-densities.bin"));
+        let old: u64 = u64::from_le_bytes(hash.finalize()[..8].try_into().unwrap());
+        let mut film = Sha256::new();
+        film.update(old.to_le_bytes());
+        film.update(b"film25um/spectral-dry/transmitted-residual/v1");
+        let old_film = u64::from_le_bytes(film.finalize()[..8].try_into().unwrap());
+        for identity in [old, old_film] {
+            let mut bytes = MAGIC19.to_vec();
+            put_u64(&mut bytes, 0).unwrap();
+            put_u64(&mut bytes, identity).unwrap();
+            let error = load(bytes).err().unwrap();
+            assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+            assert!(error.to_string().contains("obsolete pigment representation"));
+        }
     }
 
     /// A canvas with the drain switch is written as version 14: version 11's
@@ -896,8 +1259,8 @@ mod tests {
             b
         };
         let (off, on) = (canvas(false), canvas(true));
-        assert_eq!((&off[..8], &on[..8]), (&b"PAINTC11"[..], &b"PAINTC14"[..]));
-        assert!(on[8..off.len()] == off[8..], "version 11's bytes, then the drain section");
+        assert_eq!((base_format(&off), base_format(&on)), (11, 14));
+        assert!(on[40..off.len()] == off[40..], "version 11's payload, then the drain section");
         let n = 4;
         assert_eq!(on.len(), off.len() + 24 + n * 5 * 4);
         let d = load(on.clone()).unwrap();
@@ -931,7 +1294,7 @@ mod tests {
         c.wet.hide[0] = [0.7, 0.6, 1.2, 0.4, 0.5, 0.45, 0.3, 0.25, 0.6, 0.2];
         let mut bytes = Vec::new();
         c.write_state(&mut bytes, "").unwrap();
-        assert_eq!(&bytes[..8], b"PAINTC16");
+        assert_eq!(base_format(&bytes), 16);
         let d = load(bytes.clone()).unwrap();
         assert!(d.drain && d.paper == c.paper && d.micro == c.micro && d.wet.hide == c.wet.hide);
         let mut again = Vec::new();
@@ -957,7 +1320,7 @@ mod tests {
                 c.sheet_catch(&[(0, 2.0)], [0.7, 0.2, 0.1]);
                 let mut bytes = Vec::new();
                 c.write_state(&mut bytes, "").unwrap();
-                assert_eq!(&bytes[..8], if drain { MAGIC17 } else { MAGIC15 });
+                assert_eq!(base_format(&bytes), if drain { 17 } else { 15 });
                 let r = load(bytes.clone()).unwrap();
                 assert_eq!(r.drain, drain);
                 assert_eq!(r.is_raw(), c.is_raw());
@@ -998,7 +1361,7 @@ mod tests {
         let mut c = Canvas::new_window(240, 1.5, [0.5; 3], None).with_size_mm(120.0).with_paper(p);
         let mut b = Vec::new();
         c.write_state(&mut b, "").unwrap();
-        assert_eq!(&b[..8], b"PAINTC13");
+        assert_eq!(base_format(&b), 13);
         let mut d = load(b.clone()).unwrap();
         assert!(d.paper == c.paper && d.micro == c.micro && d.height == c.height && d.absorb == c.absorb && d.gloss == c.gloss && d.absorb_any);
         let mut again = Vec::new();
@@ -1011,7 +1374,7 @@ mod tests {
         assert!(d.pixels() == c.pixels() && d.height == c.height && d.absorb == c.absorb);
         let mut linen = Vec::new();
         c.clone().with_linen(Linen::fine(1)).write_state(&mut linen, "").unwrap();
-        assert_eq!(&linen[..8], b"PAINTC11");
+        assert_eq!(base_format(&linen), 11);
         let mut cut = b.clone();
         cut.pop();
         assert_eq!(load(cut).err().unwrap().kind(), io::ErrorKind::UnexpectedEof);
@@ -1029,9 +1392,9 @@ mod tests {
         nan[last..].copy_from_slice(&f32::NAN.to_le_bytes());
         rejected(nan, "a NaN pore");
         let mut no_section = b[..section].to_vec();
-        no_section[..8].copy_from_slice(b"PAINTC11");
+        set_base_format(&mut no_section, 11);
         assert!(load(no_section.clone()).is_ok());
-        no_section[..8].copy_from_slice(b"PAINTC13");
+        set_base_format(&mut no_section, 13);
         assert_eq!(load(no_section).err().unwrap().kind(), io::ErrorKind::UnexpectedEof);
         let e = c.clone().with_engine(3).write_state(&mut Vec::new(), "").unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
@@ -1071,6 +1434,36 @@ mod tests {
         assert_eq!(Canvas::read_state(&mut Cursor::new(bad)).err().unwrap().kind(), io::ErrorKind::InvalidData);
     }
 
+    /// Pastel dusted off a fixed layer, on a drawing without separate
+    /// optics (a log from before `--@ drawing-optics`), can keep a rounding
+    /// residue of loose pastel just below zero; the checkpoint reads back as
+    /// it was written and goes on as the painting would have.
+    #[test]
+    fn dusted_pastel_survives_a_checkpoint() {
+        use crate::pastel::{Pose, Stick, StrokePoint};
+        let mut c = crate::tests::drawing_paper(160);
+        let mut st = Stick::round([0.85, 0.55, 0.6], 0.8, 12.0);
+        let pose = Pose { force: 2.5, alt: 1.0, az: 0.8, roll: 0.0 };
+        let line = |y: f32| [StrokePoint { x: 100.0, y, pose, speed: 60.0 }, StrokePoint { x: 900.0, y, pose, speed: 60.0 }];
+        c.stick_stroke(&mut st, &line(300.0));
+        c.fix_pastel(None, 0.15);
+        c.stick_stroke(&mut st, &line(320.0));
+        c.dust_pastel(20.0, 10.0, &[(100.0, 310.0), (900.0, 310.0)], &mut 0.0, 5.0);
+        assert!(c.drawing.as_ref().unwrap().cells.iter().any(|c| c.loose < 0.0), "the brush left a residue below zero");
+        let bytes = |c: &Canvas| {
+            let mut b = Vec::new();
+            c.write_state(&mut b, "").unwrap();
+            b
+        };
+        let b = bytes(&c);
+        let (mut r, _) = Canvas::read_state(&mut Cursor::new(b.clone())).unwrap();
+        assert!(bytes(&r) == b, "rewritten as it was read");
+        let mut st2 = st.clone();
+        c.stick_stroke(&mut st, &line(340.0));
+        r.stick_stroke(&mut st2, &line(340.0));
+        assert!(bytes(&r) == bytes(&c) && st == st2);
+    }
+
     /// A sheet of paper (version 13), and one with a sheet laid on it
     /// (version 15), carry the recorded quarter tiles and adaptive sweep in
     /// their engine word, as every other version does.
@@ -1079,7 +1472,7 @@ mod tests {
         let c = Canvas::new_window(60, 1.5, [0.5; 3], None).with_engine(5).with_size_mm(120.0).with_paper(crate::paper::Paper::drawing(2)).with_quarter_tiles(true).with_adaptive_sweep(true);
         let mut b = Vec::new();
         c.write_state(&mut b, "").unwrap();
-        assert_eq!(&b[..8], MAGIC13);
+        assert_eq!(base_format(&b), 13);
         let r = load(b.clone()).unwrap();
         assert!(r.quarter_tiles() && r.adaptive_sweep() && r.paper == c.paper);
         let mut again = Vec::new();
@@ -1091,7 +1484,7 @@ mod tests {
         c.lay_sheet(&m, 100.0, 5.0, [0.8, 0.78, 0.7]).unwrap();
         let mut b = Vec::new();
         c.write_state(&mut b, "").unwrap();
-        assert_eq!(&b[..8], MAGIC15);
+        assert_eq!(base_format(&b), 15);
         let r = load(b.clone()).unwrap();
         assert!(r.quarter_tiles() && r.adaptive_sweep() && r.sheet == c.sheet);
         let mut again = Vec::new();
@@ -1113,7 +1506,7 @@ mod tests {
             b
         };
         let bare = bytes(&c);
-        assert_eq!(&bare[..8], b"PAINTC13");
+        assert_eq!(base_format(&bare), 13);
         assert!(load(bare.clone()).unwrap().sheet.is_none());
         let m = crate::mask::Mask::from_fn(c.frame(), |x, _| if x < 500.0 { 1.0 } else { 0.0 });
         c.lay_sheet(&m, 100.0, 5.0, [0.8, 0.78, 0.7]).unwrap();
@@ -1122,7 +1515,7 @@ mod tests {
         c.stick_stroke(&mut st, &[StrokePoint { x: 100.0, y: 300.0, pose, speed: 60.0 }, StrokePoint { x: 900.0, y: 300.0, pose, speed: 60.0 }]);
         assert!(c.sheet.as_ref().unwrap().a.iter().any(|&a| a > 0.0), "the stroke caught on the sheet");
         let b = bytes(&c);
-        assert_eq!(&b[..8], b"PAINTC15");
+        assert_eq!(base_format(&b), 15);
         let r = load(b.clone()).unwrap();
         assert!(r.sheet.is_some() && r.sheet == c.sheet && r.paper == c.paper && r.micro == c.micro && r.pixels() == c.pixels());
         assert!(bytes(&r) == b, "rewritten as it was read");
@@ -1130,7 +1523,7 @@ mod tests {
         let mut linen = Canvas::new_window(240, 1.5, [0.5; 3], None).with_size_mm(120.0);
         linen.lay_sheet(&m, 100.0, 5.0, [0.8, 0.78, 0.7]).unwrap();
         let lb = bytes(&linen);
-        assert_eq!(&lb[..8], b"PAINTC15");
+        assert_eq!(base_format(&lb), 15);
         assert!(load(lb).unwrap().sheet == linen.sheet);
         let n = c.f.w * c.f.h;
         // (the section: mark, version, five numbers, the mask, its coverage and colors)
@@ -1143,6 +1536,6 @@ mod tests {
         half[at..at + 4].copy_from_slice(&0.5f32.to_le_bytes());
         rejected(half, "a mask of 0.5");
         assert!(c.lift_sheet());
-        assert_eq!(&bytes(&c)[..8], b"PAINTC13");
+        assert_eq!(base_format(&bytes(&c)), 13);
     }
 }

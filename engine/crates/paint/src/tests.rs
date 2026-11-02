@@ -17,6 +17,19 @@ use crate::pigment::Pigment;
 use crate::style::Style;
 use crate::wet::Paint;
 
+pub(crate) fn drawing_paper(width: usize) -> Canvas {
+    static SMALL: std::sync::OnceLock<Canvas> = std::sync::OnceLock::new();
+    static LARGE: std::sync::OnceLock<Canvas> = std::sync::OnceLock::new();
+    let prototype = match width {
+        160 => &SMALL,
+        600 => &LARGE,
+        _ => panic!("unsupported test sheet width: {width}"),
+    };
+    prototype.get_or_init(|| {
+        Canvas::new_window(width, 1.0, [0.55; 3], None).with_size_mm(150.0).with_paper(crate::paper::Paper::drawing(4))
+    }).clone()
+}
+
 fn brush_volume(h: &Held) -> f64 {
     h.bristles.iter().map(|b| b.vol as f64).sum()
 }
@@ -243,7 +256,7 @@ fn drained_deposition_keeps_its_pigment_when_wet_and_baked() {
         assert!(c.wet.vol[0] < 1.6);
         c.wet.cover.fill(1.0);
         c.wet.dirty = Some((0, 0, c.f.w, c.f.h));
-        let color = mixbox::latent_to_linear_float_rgb(&lat);
+        let color = crate::mixer::decode(&lat);
         let expected = crate::pigment::Pigment::masstone(color, mass).over([0.8; 3], 1.0);
         let wet = c.look_px(0);
         c.dry();

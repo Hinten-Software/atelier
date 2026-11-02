@@ -15,6 +15,7 @@
 //! executable's (`<studio>/bin/easel`) and holds one painting, `PAINTING`.
 
 mod api;
+mod pass_feedback;
 mod ground_cache;
 mod board;
 mod check;
@@ -49,6 +50,14 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
+
+/// A painted canvas is millions of small pigment lists and skim layers that
+/// come and go as the paint is worked; glibc's malloc leaves their holes in
+/// its arenas (2 GiB of free, unreturnable heap by the 30th chunk of a
+/// 2400 px engine-9 painting). mimalloc keeps such allocations in size
+/// classes and gives freed pages back to the system.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// The width a painting is painted, replayed and delivered at (px) unless it
 /// names another (`session::WIDTH_MARK`, configured when it began: `configured_width`).
@@ -193,6 +202,7 @@ fn main() -> ExitCode {
         "snapshot-companions" => optical::companions(&rest),
         "finish" => finish_cmd(&rest),
         "note" => note(&rest, name),
+        "lock-journal" => lock_journal(),
         "tubes" => tubes(&rest),
         "hash-probe" => {
             println!("{}", session::hash_probe());
@@ -369,28 +379,61 @@ fn note(args: &[String], name: Option<String>) -> Result<(), String> {
     Ok(())
 }
 
+fn journal_lock_path() -> PathBuf {
+    root().join("out/easel/journal.lock")
+}
+
+/// `easel lock-journal`, for a journal revision (harness/painter/journal.ts): stdin is the
+/// journal's lock file, and the lock taken on it stays with that open file after this
+/// exits, until the revision closes it.
+fn lock_journal() -> Result<(), String> {
+    use std::os::{fd::AsFd, unix::fs::MetadataExt};
+    let p = journal_lock_path();
+    let f = std::fs::File::from(std::io::stdin().as_fd().try_clone_to_owned().map_err(|e| e.to_string())?);
+    let (held, want) = (f.metadata().map_err(|e| e.to_string())?, std::fs::metadata(&p).map_err(|e| format!("{}: {e}", p.display()))?);
+    if (held.dev(), held.ino()) != (want.dev(), want.ino()) {
+        return Err(format!("lock-journal: stdin isn't {}", p.display()));
+    }
+    f.lock().map_err(|e| format!("{}: {e}", p.display()))
+}
+
 fn append_note(clock: f64, text: &str) -> Result<String, String> {
     if text.trim().is_empty() {
         return Err("note: empty".into());
     }
     let p = journal_path();
-    std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+    let dir = p.parent().unwrap();
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    // every session notes into the one journal, and a revision (`lock_journal`) replaces it:
+    // its lock is held from the read to the rename, so a note never replaces an entry or a
+    // revision another writer has just made
+    let lock = journal_lock_path();
+    std::fs::create_dir_all(lock.parent().unwrap()).map_err(|e| e.to_string())?;
+    let held = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&lock).map_err(|e| format!("{}: {e}", lock.display()))?;
+    held.lock().map_err(|e| format!("{}: {e}", lock.display()))?;
+    // the whole journal with the entry is written beside it, in this writer's own file, and
+    // renamed over the file it is (through a revision's link): an interrupted note leaves
+    // the journal as it was
+    let real = std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone());
+    let mut journal = match std::fs::read(&real) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(format!("{}: {e}", p.display())),
+    };
     // an entry starts on a line of its own
-    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-    let mut entry = String::new();
-    if len > 0 {
-        let mut last = [0u8; 1];
-        let mut r = std::fs::File::open(&p).map_err(|e| e.to_string())?;
-        use std::io::Seek;
-        r.seek(std::io::SeekFrom::End(-1)).map_err(|e| e.to_string())?;
-        r.read_exact(&mut last).map_err(|e| e.to_string())?;
-        if last[0] != b'\n' {
-            entry.push('\n');
-        }
+    if journal.last().is_some_and(|&b| b != b'\n') {
+        journal.push(b'\n');
     }
-    entry.push_str(&journal_entry(clock, text));
-    f.write_all(entry.as_bytes()).map_err(|e| e.to_string())?;
+    journal.extend_from_slice(journal_entry(clock, text).as_bytes());
+    use std::os::unix::fs::PermissionsExt;
+    let mut pending = tempfile::Builder::new().prefix(".journal.pending-").permissions(std::fs::Permissions::from_mode(0o666)).tempfile_in(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let staged = pending.path().to_path_buf();
+    if let Ok(m) = std::fs::metadata(&real) {
+        pending.as_file().set_permissions(m.permissions()).map_err(|e| format!("{}: {e}", staged.display()))?;
+    }
+    pending.write_all(&journal).and_then(|_| pending.as_file().sync_all()).map_err(|e| format!("{}: {e}", staged.display()))?;
+    pending.persist(&real).map_err(|e| format!("{}: {}", p.display(), e.error))?;
+    std::fs::File::open(real.parent().unwrap_or(dir)).and_then(|d| d.sync_all()).map_err(|e| e.to_string())?;
     Ok(format!("noted in {}\n", p.display()))
 }
 
@@ -609,20 +652,19 @@ fn open(args: &[String]) -> Result<(), String> {
         if show_startup_progress(&log, &mut shown)? {
             last_progress = Instant::now();
         }
-        if let Ok((true, st)) = request(&name, "status", &[], &[])
+        if let Ok((ok, st)) = request(&name, "status", &[], &[])
             && !replaying(&st)
         {
+            if !ok {
+                return Err(st);
+            }
             let log = std::fs::read_to_string(dir.join("server.log")).unwrap_or_default();
             show_startup_progress(&log, &mut shown)?;
             set_current(&name)?;
             print!("easel {name:?} open: {st}");
             return Ok(());
         }
-        if log.contains("easel: fatal") {
-            #[cfg(feature = "state-store")]
-            if !started && std::env::var("EASEL_STATE_SESSION").ok().as_deref() == Some(name.as_str()) {
-                continue;
-            }
+        if started && log.contains("easel: fatal") {
             return Err(log);
         }
         if last_progress.elapsed() > stall {
@@ -681,12 +723,24 @@ fn serve_lock(name: &str) -> Result<std::fs::File, String> {
         f
     } else {
         std::fs::create_dir_all(session_dir(name)).map_err(|e| e.to_string())?;
-        match try_lock(name)? {
-            Some(f) => f,
-            None => {
+        loop {
+            if let Some(f) = try_lock(name)? {
+                break f;
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            let owner = name.to_string();
+            std::thread::spawn(move || {
+                let _ = tx.send(request(&owner, "status", &[], &[]));
+            });
+            let response = rx.recv_timeout(Duration::from_millis(250));
+            if let Some(f) = try_lock(name)? {
+                break f;
+            }
+            if !matches!(response, Ok(Err(_))) {
                 let pid = std::fs::read_to_string(lock_path(name)).unwrap_or_default();
                 return Err(format!("another easel serves session {name:?} (pid {}); nothing ran", pid.trim()));
             }
+            std::thread::sleep(Duration::from_millis(100));
         }
     };
     // who holds it, for anyone looking
@@ -817,50 +871,50 @@ fn serve(args: &[String]) -> Result<(), String> {
                     eprintln!("check 0.00s err");
                 }
             }
-            continue;
-        }
-        let t0 = Instant::now();
-        let r = if cmd == "do" {
-            // while the chunk runs, `status` answers how far it has got; other requests wait
-            session::PROGRESS.clear();
-            let (name, written) = (srv.name.clone(), srv.written.clone().unwrap_or_default());
-            // once the chunk is kept, the log on disk has grown past `written`: `report` says so
-            let status = || {
-                if session::PROGRESS.kept() == 0 {
-                    validate_log(&name, &written)?;
-                }
-                Ok(session::PROGRESS.report(t0.elapsed()))
-            };
-            match serving_status(&l, status, None, || srv.handle(&cmd, &args, payload)) {
-                Ok((r, waiting)) => {
-                    pending.extend(waiting);
-                    r
-                }
-                Err(e) => Err(e),
-            }
         } else {
-            srv.handle(&cmd, &args, payload)
-        };
-        let reply = match &r {
-            Ok(b) => format!("ok\n{b}"),
-            Err(e) => format!("err\n{e}\n"),
-        };
-        let _ = conn.write_all(reply.as_bytes());
-        eprintln!("{cmd} {:.2}s {}", t0.elapsed().as_secs_f64(), if r.is_ok() { "ok" } else { "err" });
-        #[cfg(feature = "state-store")]
-        if srv.state_failed {
-            let _ = std::fs::remove_file(&sock);
-            return Err("easel: fatal: state publication or journal export failed; reopen and inspect the accepted chunk count before retrying".into());
-        }
-        if cmd == "close" && r.is_ok() {
-            if let Some(j) = checking.take() {
-                j.stop();
+            let t0 = Instant::now();
+            let r = if cmd == "do" {
+                // while the chunk runs, `status` answers how far it has got; other requests wait
+                session::PROGRESS.clear();
+                let (name, written) = (srv.name.clone(), srv.written.clone().unwrap_or_default());
+                // once the chunk is kept, the log on disk has grown past `written`: `report` says so
+                let status = || {
+                    if session::PROGRESS.kept() == 0 {
+                        validate_log(&name, &written)?;
+                    }
+                    Ok(session::PROGRESS.report(t0.elapsed()))
+                };
+                match serving_status(&l, status, None, || srv.handle(&cmd, &args, payload)) {
+                    Ok((r, waiting)) => {
+                        pending.extend(waiting);
+                        r
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                srv.handle(&cmd, &args, payload)
+            };
+            let reply = match &r {
+                Ok(b) => format!("ok\n{b}"),
+                Err(e) => format!("err\n{e}\n"),
+            };
+            let _ = conn.write_all(reply.as_bytes());
+            eprintln!("{cmd} {:.2}s {}", t0.elapsed().as_secs_f64(), if r.is_ok() { "ok" } else { "err" });
+            #[cfg(feature = "state-store")]
+            if srv.state_failed {
+                let _ = std::fs::remove_file(&sock);
+                return Err("easel: fatal: state publication or journal export failed; reopen and inspect the accepted chunk count before retrying".into());
             }
-            for (mut conn, _) in pending.drain(..) {
-                let _ = conn.write_all(b"err\nthe easel closed before this request ran\n");
+            if cmd == "close" && r.is_ok() {
+                if let Some(j) = checking.take() {
+                    j.stop();
+                }
+                for (mut conn, _) in pending.drain(..) {
+                    let _ = conn.write_all(b"err\nthe easel closed before this request ran\n");
+                }
+                let _ = std::fs::remove_file(&sock);
+                break;
             }
-            let _ = std::fs::remove_file(&sock);
-            break;
         }
         // the same for the scratch canvas, at once (its log is short)
         if let Some(sc) = srv.scratch.as_mut()
@@ -871,8 +925,9 @@ fn serve(args: &[String]) -> Result<(), String> {
                 srv.scratch = None;
             }
         }
-        // a failed chunk left the state inexact (session.rs `stale`): rebuild it from the log
-        // after the reply; status stays available and other requests are refused until done
+        // a failed chunk left the state inexact, or a resting canvas couldn't be brought back
+        // (session.rs `stale`): rebuild it from the log after the reply, whatever the request
+        // was; status stays available and other requests are refused until done
         if srv.s.stale {
             drop(conn);
             let t0 = Instant::now();
@@ -1013,11 +1068,12 @@ fn export_journal(path: &Path, source: &str) -> Result<(), String> {
 }
 
 /// Put a session's log aside as `<name>-N.lua` (the first N free) and drop its committed
-/// record, so a fresh session of that name starts empty. The path it went to, if any.
+/// record, so a fresh session of that name starts empty. The path it went to, if any. The
+/// record goes only once the log is aside: a log that can't be moved keeps it.
 fn put_aside(name: &str) -> Result<Option<PathBuf>, String> {
     let lp = log_path(name);
-    let _ = std::fs::remove_file(witness_path(name));
     if !lp.exists() {
+        let _ = std::fs::remove_file(witness_path(name));
         return Ok(None);
     }
     let mut n = 1;
@@ -1029,7 +1085,44 @@ fn put_aside(name: &str) -> Result<Option<PathBuf>, String> {
         n += 1;
     };
     std::fs::rename(&lp, &to).map_err(|e| format!("{}: {e}", lp.display()))?;
+    let _ = std::fs::remove_file(witness_path(name));
     Ok(Some(to))
+}
+
+/// A publication `save_log` didn't finish (the easel stopped, or couldn't undo it): its
+/// pending record names the revision it was publishing, and the log holds that revision
+/// or part of it. The pair goes on from an accepted revision: the pending one when the log
+/// holds all of it (only the record's rename was left), else the committed one, the part
+/// appended taken back out. Without a pending record a log that differs from its record
+/// was changed outside the easel and is refused (`validate_log`). What happened, for the
+/// reopen to say.
+fn recover_publication(name: &str) -> Result<Option<String>, String> {
+    let (lp, wp) = (log_path(name), witness_path(name));
+    let pending = wp.with_extension("pending");
+    let (Ok(log), Ok(next)) = (std::fs::read(&lp), std::fs::read(&pending)) else { return Ok(None) };
+    let witness = std::fs::read(&wp).ok();
+    if witness.as_deref() == Some(log.as_slice()) {
+        return Ok(None);
+    }
+    let sync_dir = |p: &Path| std::fs::File::open(p.parent().unwrap()).and_then(|d| d.sync_all()).map_err(|e| format!("{}: {e}", p.display()));
+    if next == log {
+        std::fs::rename(&pending, &wp).map_err(|e| format!("{}: {e}", wp.display()))?;
+        sync_dir(&wp)?;
+        return Ok(Some("warning: saving the last chunk was interrupted after the log held all of it; the chunk is kept".into()));
+    }
+    if !next.starts_with(&log) || witness.as_ref().is_some_and(|w| !log.starts_with(w)) {
+        return Ok(None);
+    }
+    match &witness {
+        Some(w) => {
+            let f = std::fs::OpenOptions::new().write(true).open(&lp).map_err(|e| format!("{}: {e}", lp.display()))?;
+            f.set_len(w.len() as u64).and_then(|_| f.sync_all()).map_err(|e| format!("{}: {e}", lp.display()))?;
+        }
+        None => std::fs::remove_file(&lp).map_err(|e| format!("{}: {e}", lp.display()))?,
+    }
+    std::fs::remove_file(&pending).map_err(|e| format!("{}: {e}", pending.display()))?;
+    sync_dir(&lp)?;
+    Ok(Some("warning: saving the last chunk was interrupted before the log held all of it; the painting goes on from the chunk before it".into()))
 }
 
 /// The log and the committed record on disk both hold `expected`.
@@ -1048,6 +1141,14 @@ fn validate_log(name: &str, expected: &str) -> Result<(), String> {
 fn palette_look(s: &Session) -> Result<(usize, usize, Vec<u8>), String> {
     let ground = s.ground_color().ok_or("no canvas yet: the first chunk is canvas{...}")?;
     look::palette(&s.piles(), ground)
+}
+
+/// A point given to an observation of the canvas (`probe`, `look --hold`): on it, or past its far
+/// edges by up to half a pixel (a canvas's height in units is its pixels', which needn't be
+/// round), as the point at the edge.
+fn canvas_point(c: &Canvas, (x, y): (f32, f32)) -> Option<(f32, f32)> {
+    let (w, h, half) = (c.width(), c.height(), 0.5 / c.window().scale);
+    (x.is_finite() && y.is_finite() && x >= 0.0 && y >= 0.0 && x <= w + half && y <= h + half).then(|| (x.min(w), y.min(h)))
 }
 
 /// Half the side (units) of the passage a held knife is seen against, when no crop is given.
@@ -1072,9 +1173,7 @@ fn hold_look(s: &Session, name: &str, at: (f32, f32), v: &look::View) -> Result<
     let (paint, blade, full) = s.held(name)?;
     let c = s.canvas().ok_or("no canvas yet: the first chunk is canvas{...}")?;
     let (wu, hu) = (c.width(), c.height());
-    if !(at.0.is_finite() && at.1.is_finite() && (0.0..=wu).contains(&at.0) && (0.0..=hu).contains(&at.1)) {
-        return Err(format!("look --hold: --at {},{} is not on the canvas ({wu} x {hu} units)", at.0, at.1));
-    }
+    let at = canvas_point(&c, at).ok_or_else(|| format!("look --hold: --at {},{} is not on the canvas ({wu} x {hu} units)", at.0, at.1))?;
     let crop = v.crop.unwrap_or([(at.0 - HOLD_HALF).max(0.0), (at.1 - HOLD_HALF).max(0.0), (at.0 + HOLD_HALF).min(wu), (at.1 + HOLD_HALF).min(hu)]);
     if !(crop[0] <= at.0 && at.0 <= crop[2] && crop[1] <= at.1 && at.1 <= crop[3]) {
         return Err(format!("look --hold: --at {},{} lies outside the --crop", at.0, at.1));
@@ -1089,8 +1188,8 @@ fn hold_look(s: &Session, name: &str, at: (f32, f32), v: &look::View) -> Result<
     let f = c.frame();
     let (len, wide) = (2.0 * blade, blade + 12.0);
     let board_h = wide + 20.0;
-    let mut board = Canvas::new(f.full_w.max(16), 1000.0 / board_h, paint::hex("#9aa0a6")).with_size_mm(1000.0 * c.mm_per_unit()).with_engine(c.engine()).with_drain(c.drain());
-    let mut knife = paint::Knife::new(blade);
+    let mut board = Canvas::new(f.full_w.max(16), 1000.0 / board_h, paint::hex("#9aa0a6")).with_size_mm(1000.0 * c.mm_per_unit()).with_engine(c.engine()).with_drain(c.drain()).with_glaze_film(c.engine() >= paint::PIGMENT_MIXER && c.glaze_film());
+    let mut knife = paint::Knife::new(blade).with_engine(c.engine());
     knife.load(paint, full);
     let cy = board_h / 2.0;
     // (the pull starts before the part shown, so the paint comes to the blade's very end)
@@ -1131,15 +1230,13 @@ fn hold_look(s: &Session, name: &str, at: (f32, f32), v: &look::View) -> Result<
 /// nothing in the log, the canvas and its wear untouched.
 fn stick_hold_look(s: &Session, name: &str, at: (f32, f32), pose: [f32; 4], v: &look::View) -> Result<(usize, usize, Vec<u8>, String), String> {
     use image::ImageEncoder;
-    if v.size.is_some() || v.grid.is_some() || v.mirror || v.palette {
+    if v.size.is_some() || v.grid.is_some() || v.mirror || v.edges || v.palette {
         return Err("look --hold takes --at, --pose or --side, --crop, --mask, --mode value, squint, relief or gallery and --light, nothing else".into());
     }
     let (stick, turned) = s.held_stick(name)?;
     let c = s.canvas().ok_or("no canvas yet: the first chunk is canvas{...}")?;
     let (wu, hu) = (c.width(), c.height());
-    if !(at.0.is_finite() && at.1.is_finite() && (0.0..=wu).contains(&at.0) && (0.0..=hu).contains(&at.1)) {
-        return Err(format!("look --hold: --at {},{} is not on the canvas ({wu} x {hu} units)", at.0, at.1));
-    }
+    let at = canvas_point(&c, at).ok_or_else(|| format!("look --hold: --at {},{} is not on the canvas ({wu} x {hu} units)", at.0, at.1))?;
     let half = 60.0f32;
     let crop = v.crop.unwrap_or([(at.0 - half).max(0.0), (at.1 - half).max(0.0), (at.0 + half).min(wu), (at.1 + half).min(hu)]);
     // (as `hold_look`: the point in the passage shown)
@@ -1271,6 +1368,9 @@ impl Server {
                 export_journal(path, &source)?;
             }
         }
+        if let Some(note) = recover_publication(&name)? {
+            eprintln!("{note}");
+        }
         let text = if lp.exists() || witness_path(&name).exists() { Some(std::fs::read_to_string(&lp).map_err(|e| format!("session integrity: {e}"))?) } else { None };
         if let Some(t) = &text {
             validate_log(&name, t)?;
@@ -1330,21 +1430,13 @@ impl Server {
         progress(0, chunks.len());
         self.s.set_replaying(true);
         let checkpoint = session_dir(&self.name).join("replay.ckpt");
-        let resumed = self.replay.resume(&checkpoint, text, width, &mut self.s, &chunks, &self.name, progress)
-            .and_then(|done| { self.start_hand_frames(Some(done))?; Ok(done) });
-        let done = match resumed {
-            Ok(done) => done,
-            Err(e) => {
-                eprintln!("warning: replay checkpoint: {e}; replaying the full log");
-                let limit = self.s.chunk_limit;
-                self.s = Session::with_box(width, self.s.tube_box()).and_then(|s| s.with_paper(session::logged_paper(text))).map_err(|e| e.to_string())?;
-                self.s.chunk_limit = limit;
-                self.s.set_replaying(true);
-                self.replay = replay_checkpoint::Live::new();
-                self.start_hand_frames(None)?;
-                progress(0, chunks.len());
-                0
-            }
+        let done = if chunks.is_empty() {
+            self.start_hand_frames(None)?;
+            0
+        } else {
+            let done = self.replay.resume(&checkpoint, text, width, &mut self.s, &chunks, &self.name, progress)?;
+            self.start_hand_frames(Some(done))?;
+            done
         };
         for (i, chunk) in chunks.iter().enumerate().skip(done) {
             let t0 = Instant::now();
@@ -1359,6 +1451,7 @@ impl Server {
         if self.s.program(&self.name) != text {
             return Err("session integrity: noncanonical or incomplete log; refusing replay".into());
         }
+        if let Err(e) = self.save_painting_effects() { eprintln!("warning: painting effects: {e}"); }
         println!("resumed {} chunks from {}", self.s.log.len(), log_path(&self.name).display());
         Ok(())
     }
@@ -1387,6 +1480,7 @@ impl Server {
                 self.record_frame();
                 if let Err(e) = self.record_replay() { eprintln!("warning: chunk committed, replay checkpoint/frames not saved: {e}"); }
             }
+            if let Err(e) = self.save_painting_effects() { eprintln!("warning: painting effects: {e}"); }
             return Ok(String::new());
         }
         let previous = self.written.as_deref().unwrap_or("");
@@ -1401,18 +1495,55 @@ impl Server {
         if self.written.is_none() {
             opts.create_new(true);
         }
-        let mut f = opts.open(&p).map_err(|e| format!("session integrity: {e}"))?;
-        f.write_all(suffix.as_bytes()).and_then(|_| f.sync_all()).map_err(|e| format!("session integrity: {e}"))?;
+        // the pending record first: a reopen after a stop anywhere below goes on from an
+        // accepted revision (`recover_publication`)
         let pending = self.witness().with_extension("pending");
-        let mut f = std::fs::File::create(&pending).map_err(|e| e.to_string())?;
-        f.write_all(text.as_bytes()).and_then(|_| f.sync_all()).map_err(|e| e.to_string())?;
-        std::fs::rename(pending, self.witness()).map_err(|e| e.to_string())?;
+        let mut appended = None;
+        let published = std::fs::File::create(&pending).and_then(|mut w| w.write_all(text.as_bytes()).and_then(|_| w.sync_all())).and_then(|_| {
+            let f = appended.insert(opts.open(&p)?);
+            f.write_all(suffix.as_bytes()).and_then(|_| f.sync_all())?;
+            std::fs::rename(&pending, self.witness())
+        });
+        if let Err(e) = published {
+            // the log back to the revision before, and the state with it
+            let undone = match appended {
+                None => Ok(()),
+                Some(_) if self.written.is_none() => std::fs::remove_file(&p),
+                Some(f) => f.set_len(previous.len() as u64).and_then(|_| f.sync_all()),
+            };
+            if undone.is_ok() && std::fs::metadata(&pending).is_ok_and(|m| m.is_file()) {
+                let _ = std::fs::remove_file(&pending);
+            }
+            if !changed {
+                return Err(format!("session integrity: {e}"));
+            }
+            self.s.log.pop();
+            self.s.stale = true;
+            return Err(match undone {
+                Ok(()) => format!("the chunk ran, but the easel couldn't write it to the log ({e}), so it isn't kept: the painting goes on from the chunk before it; the easel rebuilds the painting from its log now; status reports the rebuild's progress and other commands must retry after it"),
+                Err(u) => format!("the chunk ran, but the easel couldn't write it to the log ({e}) or take it back out ({u}): reopen the painting, which goes on from the last chunk the log holds whole"),
+            });
+        }
         self.written = Some(text);
         if changed {
             self.record_frame();
             if let Err(e) = self.record_replay() { eprintln!("warning: chunk committed, replay checkpoint/frames not saved: {e}"); }
         }
+        if let Err(e) = self.save_painting_effects() { eprintln!("warning: painting effects: {e}"); }
         Ok(String::new())
+    }
+
+    fn save_painting_effects(&self) -> Result<(), String> {
+        use sha2::{Digest, Sha256};
+        let source = self.written.as_deref().ok_or("session integrity: uninitialized log")?;
+        let evidence = serde_json::json!({
+            "source_sha256": format!("{:x}", Sha256::digest(source.as_bytes())),
+            "mark_effects": self.s.log.iter().map(|c| c.mark_effects).collect::<Vec<_>>(),
+        });
+        let bytes = serde_json::to_vec(&evidence).map_err(|e| e.to_string())?;
+        replay_checkpoint::atomic(&session_dir(&self.name).join("painting-effects.json"), |f| {
+            f.write_all(&bytes).map_err(|e| e.to_string())
+        })
     }
 
     fn start_hand_frames(&mut self, done: Option<usize>) -> Result<(), String> {
@@ -1467,10 +1598,9 @@ impl Server {
         };
         deliver(&c, &png)?;
         drop(c);
-        // a save that can't be written leaves none (finish_painting then replays the log)
         if let Err(e) = save::write(&self.s, &self.s.program(&self.name), &ckpt) {
             let _ = std::fs::remove_file(&ckpt);
-            eprintln!("the save file couldn't be written: {e}");
+            return Err(format!("the save file couldn't be written: {e}"));
         }
         std::fs::write(&txt, format!("chunks {}\nreplayed {}\nbuild {:016x}\nplatform {}-{}\n", self.s.log.len(), self.replayed, self.build, std::env::consts::OS, std::env::consts::ARCH)).map_err(|e| format!("{}: {e}", txt.display()))?;
         Ok(format!("the live canvas is in {}\n", png.display()))
@@ -1727,9 +1857,8 @@ impl Server {
         };
         let c = self.s.canvas().ok_or("no canvas yet: the first chunk is canvas{...}")?;
         let f = c.window();
-        // (to half a pixel: a canvas's height in units is its pixels', which needn't be round)
         let (w, h) = (c.width(), c.height());
-        if x0 < 0.0 || y0 < 0.0 || x1 > w + 0.5 / f.scale || y1 > h + 0.5 / f.scale {
+        if canvas_point(&c, (x0, y0)).is_none() || canvas_point(&c, (x1, y1)).is_none() {
             let round = |v: f32| (v * 100.0).round() / 100.0;
             return Err(format!("probe: {place} is outside the canvas (0,0 to {},{})", round(w), round(h)));
         }
@@ -1885,8 +2014,9 @@ impl Server {
     }
 
     /// What `check` replays and compares with (check.rs runs it on its own thread).
-    fn check_input(&self) -> Result<check::Input, String> {
+    fn check_input(&mut self) -> Result<check::Input, String> {
         self.ready()?;
+        self.s.wake().map_err(|e| format!("the painting couldn't be brought back: {e}"))?;
         Ok(check::Input {
             width: self.s.st.borrow().width,
             paper: self.s.st.borrow().paper,
@@ -1906,12 +2036,19 @@ impl Server {
             return Err("--new starts a fresh scratch canvas: do --scratch --new".into());
         }
         if !scratch {
+            // one canvas at a time is in memory: the scratch canvas rests while the
+            // painting is used, and the painting while the scratch canvas is
+            if let Some(sc) = self.scratch.as_mut() {
+                sc.s.rest().map_err(|e| format!("the scratch canvas couldn't be put aside: {e}"))?;
+            }
+            self.s.wake().map_err(|e| format!("the painting couldn't be brought back: {e}"))?;
             return self.serve_cmd(cmd, &args, payload);
         }
         if !matches!(cmd, "do" | "look" | "probe" | "status" | "log" | "globals" | "save") {
             return Err(format!("{cmd} is the painting's: it takes no --scratch"));
         }
         self.ready()?;
+        self.s.rest().map_err(|e| format!("the painting couldn't be put aside: {e}"))?;
         let mut out = String::new();
         // reopened when first asked for, so it never holds up the painting's reopen
         if self.scratch.is_none() && !new {
@@ -1921,11 +2058,12 @@ impl Server {
             let fresh = self.new_scratch().map_err(|e| format!("{out}{e}"))?;
             out += &fresh;
         }
-        let sc = self.scratch.as_mut().ok_or("there is no scratch canvas yet: the first chunk painted on it sets it up beside the painting")?;
+        let sc = self.scratch.as_mut().ok_or_else(|| format!("{out}there is no scratch canvas yet: the first chunk painted on it sets it up beside the painting"))?;
         if let Err(e) = sc.ready() {
             self.scratch = None;
             return Err(format!("{out}{e}\n(the scratch canvas is put away; the next chunk painted on it starts a fresh one)"));
         }
+        sc.s.wake().map_err(|e| format!("{out}the scratch canvas couldn't be brought back: {e}"))?;
         let reply = sc.serve_cmd(cmd, &args, payload).map_err(|e| format!("{out}{e}"))?;
         out += &reply;
         Ok(out)
@@ -2049,19 +2187,30 @@ impl Server {
                 Ok(format!("{}\n", p.display()))
             }
             "frames" => {
-                self.frames = matches!(args.first().map(|s| s.as_str()), Some("on") | None);
+                self.frames = match args.first().map(|s| s.as_str()) {
+                    Some("on") | None => true,
+                    Some("off") => false,
+                    _ => return Err("frames on|off".into()),
+                };
                 Ok(format!("frames {} ({})\n", if self.frames { "on" } else { "off" }, session_dir(&self.name).join("frames").display()))
             }
             "close" => {
                 let note = self.save_log()?;
+                let live = self.save_live()?;
+                if let Some(pool) = &self.display { pool.flush()?; }
+                if self.hand_frames.as_ref().is_some_and(|r| r.err.is_some()) {
+                    frames::retry(&mut self.hand_frames)?;
+                    if self.hand_frames.as_ref().is_some_and(|r| r.chunk != self.s.log.len()) {
+                        let identity = self.replay.identity(&self.s.program(&self.name), self.s.st.borrow().width)?;
+                        frames::with(&mut self.hand_frames, || frames::chunk_end(self.s.canvas().as_deref(), self.s.log.len(), &identity))?;
+                    }
+                }
                 frames::with(&mut self.hand_frames, || {
                     if let Some(c) = self.s.canvas() { frames::finish(&c); }
                 });
                 if let Some(e) = self.hand_frames.as_ref().and_then(|r| r.err.as_ref()) {
-                    eprintln!("warning: final hand-time frame not saved: {e}");
+                    return Err(format!("final hand-time frame not saved: {e}"));
                 }
-                let live = self.save_live().unwrap_or_else(|e| format!("the live canvas couldn't be saved: {e}\n"));
-                if let Some(pool) = &self.display { pool.flush()?; }
                 Ok(format!("{note}{live}closed; the session is in {}\n", log_path(&self.name).display()))
             }
             o => Err(format!("unknown command {o:?}")),
@@ -2179,7 +2328,7 @@ fn deliver_lit(c: &Canvas, out: &Path, light: Option<(f32, f32)>) -> Result<(), 
     image::save_buffer(out, &buf, f.w as u32, f.h as u32, image::ColorType::Rgb8).map_err(|e| format!("{}: {e}", out.display()))
 }
 
-const RUN_USAGE: &str = "run <file.lua> [--out path.png] [--light az,el | --gallery] [--look] [--checkpoint-out path.ckpt] [--state-digest digests.txt] [--replay-checkpoint replay.ckpt [--until-chunk N] [--for-minutes M]] [--frames-every <s> --frames-dir <dir> [--frame-width 1000]] [--width <px>] (replays at the width it was painted at, 2400px or the width its head names, a sketch 600px, unless --width: a smaller preview for development, not the painting)";
+const RUN_USAGE: &str = "run <file.lua> [--out path.png] [--light az,el | --gallery] [--look] [--checkpoint-out path.ckpt] [--state-digest digests.txt] [--replay-checkpoint replay.ckpt [--require-replay-checkpoint] [--checkpoint-at N,M,...] [--until-chunk N] [--for-minutes M]] [--frames-every <s> --frames-dir <dir> [--frame-width 1000]] [--width <px>] (replays at the width it was painted at, 2400px or the width its head names, a sketch 600px, unless --width: a smaller preview for development, not the painting)";
 
 fn normalized_path(path: &Path) -> std::io::Result<PathBuf> {
     let absolute = std::path::absolute(path)?;
@@ -2224,6 +2373,9 @@ fn same_file(a: &Path, b: &Path) -> Result<bool, String> {
 fn preflight_run(args: &[String], file: &Path, out: &Path, chunks: usize) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
     let checkpoint = flag(args, "--replay-checkpoint").map(PathBuf::from);
+    if args.iter().any(|a| a == "--require-replay-checkpoint") && checkpoint.is_none() {
+        return Err("--require-replay-checkpoint requires --replay-checkpoint".into());
+    }
     let progress = checkpoint.as_deref().unwrap_or(out).with_extension("replay-progress.json");
     let mut outputs = vec![("source", file.to_path_buf()), ("--out", out.to_path_buf()), ("replay progress", progress)];
     if args.iter().any(|a| a == "--look") { outputs.push(("--look", out.with_extension("look.png"))); }
@@ -2299,8 +2451,8 @@ fn run(args: &[String]) -> Result<(), String> {
         match args[i].as_str() {
             #[cfg(feature = "state-store")]
             "--state-store" | "--state-budget-mib" if i + 1 < args.len() => i += 2,
-            "--out" | "--dump-surface" | "--dump-state" | "--checkpoint-out" | "--frames-every" | "--frames-dir" | "--frame-width" | "--state-digest" | "--width" | "--light" | "--replay-checkpoint" | "--until-chunk" | "--for-minutes" if i + 1 < args.len() => i += 2,
-            "--look" | "--gallery" => i += 1,
+            "--out" | "--dump-surface" | "--dump-state" | "--checkpoint-out" | "--frames-every" | "--frames-dir" | "--frame-width" | "--state-digest" | "--width" | "--light" | "--replay-checkpoint" | "--checkpoint-at" | "--until-chunk" | "--for-minutes" if i + 1 < args.len() => i += 2,
+            "--look" | "--gallery" | "--require-replay-checkpoint" => i += 1,
             o => return Err(format!("run: unknown argument {o:?} ({RUN_USAGE})")),
         }
     }
@@ -2464,6 +2616,10 @@ fn run(args: &[String]) -> Result<(), String> {
 const RENDER_CHECKPOINT_USAGE: &str = "render-checkpoint <save.ckpt[.zst]> <out.png> [--mode color|gallery|relief] [--look] [--log painting.lua]";
 
 fn render_checkpoint(args: &[String]) -> Result<(), String> {
+    render_checkpoint_from(args, |path| save::read(path))
+}
+
+fn render_checkpoint_from(args: &[String], read: impl FnOnce(&Path) -> Result<save::Restored, String>) -> Result<(), String> {
     let (mut files, mut mode, mut log, mut bounded) = (Vec::new(), "gallery".to_string(), None::<String>, false);
     let mut i = 0;
     while i < args.len() {
@@ -2496,7 +2652,7 @@ fn render_checkpoint(args: &[String]) -> Result<(), String> {
         o => return Err(format!("--mode {o}: color, gallery, relief")),
     };
     let t0 = Instant::now();
-    let r = save::read(Path::new(checkpoint))?;
+    let r = read(Path::new(checkpoint))?;
     if let Some(l) = log {
         let text = std::fs::read_to_string(&l).map_err(|e| format!("{l}: {e}"))?;
         if save::fnv1a(text.as_bytes()) != r.log_fnv || parse_program(&text).len() != r.chunks {
@@ -2526,12 +2682,11 @@ fn render_state(args: &[String]) -> Result<(), String> {
             return Err("render-state output must differ from the source log".into());
         }
     }
-    let checkpoint = revision.checkpoint().map_err(|e| e.to_string())?;
-    let mut render = vec![checkpoint.to_string_lossy().into_owned()];
+    let mut render = vec![dir.clone()];
     render.extend_from_slice(&args[1..]);
     painting_store::atomic_output(Path::new(out), |part| {
         render[1] = part.to_string_lossy().into_owned();
-        render_checkpoint(&render)
+        render_checkpoint_from(&render, |path| save::read_from(revision.checkpoint().map_err(|e| e.to_string())?, path))
     })?;
     eprintln!("committed revision {} ({} source bytes)", revision.id, revision.source.len());
     Ok(())
@@ -2644,9 +2799,9 @@ fn state_digest_line(s: &Session, n: usize, secs: f64) -> String {
     let mut st = s.st.borrow_mut();
     let canvas = match st.canvas.as_ref() {
         Some(c) => {
-            let mut buf = Vec::new();
-            c.write_state(&mut buf, "").expect("checkpoint to memory");
-            fnv1a(&buf)
+            let mut hash = save::Fnv1a::new();
+            c.write_state(&mut hash, "").expect("checkpoint hashing");
+            hash.finish()
         }
         None => 0,
     };
@@ -2675,6 +2830,63 @@ mod tests {
         assert_eq!(back.dimensions(), (16, 12));
     }
     use super::*;
+
+    #[test]
+    fn palette_and_held_knife_previews_keep_the_paintings_film_optics() {
+        for (engine, film) in [(8, false), (8, true), (9, false), (9, true)] {
+            let mut tubes = paint::Palette::new("preview study", paint::palette::catalog());
+            tubes.engine = engine;
+            tubes.glaze_film = film;
+            tubes.drain = true;
+            let blue = tubes.tubes.iter().position(|t| t.name == "Prussian blue").unwrap();
+            let paint = tubes.pile(vec![(blue, 1.0)]).laid(0.8);
+            let mut s = Session::replay_with(1000, tubes).unwrap();
+            s.run(r#"canvas{size=440, aspect=1, linen=15, seed=7, ground={{pile={{"lead white",1}},um=120,apply="knife"}}}; p=pile{{"Prussian blue",1},medium=0.8}; k=knife{width=30}; k:load(p,0.55)"#).unwrap();
+            let before = (state_digest_line(&s, 1, 0.0), s.program("t"), s.st.borrow().clock);
+            let held = s.held("k").unwrap().0;
+            assert_eq!(held.spectral_films, engine >= paint::PIGMENT_MIXER && film);
+            for (a, b) in held.over([1.0; 3], 0.05).into_iter().zip(paint.over([1.0; 3], 0.05)) {
+                assert!((a - b).abs() < 2e-6, "engine {engine}, film {film}: the knife changed thin Prussian");
+            }
+            let spectral = engine >= paint::PIGMENT_MIXER && film;
+            let mut board = Canvas::new(1600, 1000.0 / 230.0, paint::hex("#d6d1c7"))
+                .with_size_mm(420.0).with_engine(engine).with_drain(true).with_glaze_film(spectral);
+            for _ in 0..3 {
+                let mut knife = paint::Knife::new(34.0).with_engine(engine);
+                knife.load(paint::Paint::body(paint::hex("#0d0c0c")), 1.0);
+                board.knife(&mut knife, &[(100.0, 140.0), (240.0, 140.0)], (0.3, 0.3), Some(std::f32::consts::FRAC_PI_2), true, 0.0);
+            }
+            board.dry();
+            let mut knife = paint::Knife::new(46.0);
+            knife.load(paint.clone(), 1.0);
+            board.knife(&mut knife, &[(40.0, 70.0), (70.0, 76.0)], (0.12, 0.08), None, true, 0.25);
+            let mut smear = paint::Knife::new(30.0);
+            smear.load(paint.clone(), 0.55);
+            board.knife(&mut smear, &[(120.0, 60.0), (165.0, 130.0), (215.0, 205.0)], (0.35, 1.0), None, true, 0.05);
+            let gallery = look::View { light: Some(GALLERY_LIGHT), ..Default::default() };
+            let expected = image::load_from_memory(&look::render(&board, &gallery).unwrap().2).unwrap().to_rgb8();
+            let actual = {
+                let st = s.st.borrow();
+                palette_look::render(&st.board, &st.tubes).unwrap().2
+            };
+            let actual = image::load_from_memory(&actual).unwrap().to_rgb8();
+            assert!(image::imageops::crop_imm(&actual, 100, 40, 140, 160).to_image() == image::imageops::crop_imm(&expected, 100, 40, 140, 160).to_image(), "engine {engine}, film {film}: palette smear");
+            assert!(image::imageops::crop_imm(&actual, 340, 216, 32, 20).to_image() == image::imageops::crop_imm(&expected, 340, 216, 32, 20).to_image(), "engine {engine}, film {film}: palette backing stripe");
+            let c = s.canvas().unwrap();
+            let mut blade = Canvas::new(1000, 1000.0 / 62.0, paint::hex("#9aa0a6"))
+                .with_size_mm(1000.0 * c.mm_per_unit()).with_engine(engine).with_drain(true).with_glaze_film(spectral);
+            drop(c);
+            let mut knife = paint::Knife::new(30.0);
+            knife.load(paint, 0.55);
+            blade.knife(&mut knife, &[(10.0, 31.0), (110.0, 31.0)], (0.15, 0.1), None, true, 0.25);
+            let expected = look::render(&blade, &look::View { crop: Some([30.0, 10.0, 90.0, 52.0]), ..Default::default() }).unwrap();
+            let expected = image::load_from_memory(&expected.2).unwrap().to_rgb8();
+            let actual = hold_look(&s, "k", (500.0, 500.0), &look::View::default()).unwrap();
+            let actual = image::load_from_memory(&actual.2).unwrap().to_rgb8();
+            assert!(image::imageops::crop_imm(&actual, 120, 99, 60, 42).to_image() == expected, "engine {engine}, film {film}: held knife");
+            assert_eq!(before, (state_digest_line(&s, 1, 0.0), s.program("t"), s.st.borrow().clock));
+        }
+    }
 
     /// A pastel stick held up (with the paper-and-pastel switch) only reads, as the held
     /// knife: the state digest, the log and the clock are as they were, and the stick's
@@ -2709,6 +2921,25 @@ mod tests {
         assert!(s.held_stick("nope").unwrap_err().contains("holds no pastel stick"));
         assert!(stick_hold_look(&s, "P.glow", (1400.0, 400.0), [1.5, 60.0, 45.0, 0.0], &plain).unwrap_err().contains("not on the canvas"));
         assert!(stick_hold_look(&s, "P.glow", at, [1.5, 60.0, 45.0, 0.0], &look::View { mirror: true, ..look::View::default() }).is_err());
+    }
+
+    /// A held stick refuses the edges mode, as a held knife does, and both take the points
+    /// probe takes: the canvas's far edges to half a pixel (H is 199.99998 units here).
+    #[test]
+    fn a_held_stick_or_knife_takes_probes_points_and_no_edges() {
+        let mut s = Session::new(2400).unwrap().with_paper(true).unwrap();
+        s.run(r#"canvas{size=300, aspect=5, paper={}, seed=9}"#).unwrap();
+        s.run(r#"P = {glow = pastel(pile{{"vermilion", 1}}, {kind="soft"})}; q = pile{{"lead white", 1}}"#).unwrap();
+        let pose = [1.5, 60.0, 45.0, 0.0];
+        let edges = look::View::parse(&["--mode".to_string(), "edges".to_string()]).unwrap();
+        assert!(stick_hold_look(&s, "P.glow", (500.0, 100.0), pose, &edges).is_err());
+        assert!(hold_look(&s, "q", (500.0, 100.0), &edges).is_err());
+        let plain = look::View::default();
+        assert!(s.canvas().unwrap().height() < 200.0);
+        stick_hold_look(&s, "P.glow", (500.0, 200.0), pose, &plain).unwrap();
+        hold_look(&s, "q", (500.0, 200.0), &plain).unwrap();
+        assert!(stick_hold_look(&s, "P.glow", (500.0, 201.0), pose, &plain).unwrap_err().contains("not on the canvas"));
+        assert!(hold_look(&s, "q", (1001.0, 100.0), &plain).unwrap_err().contains("not on the canvas"));
     }
 
     #[test]

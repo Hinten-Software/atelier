@@ -196,20 +196,29 @@ impl Board {
     }
 
     pub fn visit_with(&mut self, id: u64, carry: f32, parts: &[(usize, f32)]) -> Result<(), Full> {
+        self.visit_parts(id, carry, parts, false)
+    }
+
+    pub fn visit_with9(&mut self, id: u64, carry: f32, parts: &[(usize, f32)]) -> Result<(), Full> {
+        self.visit_parts(id, carry, parts, true)
+    }
+
+    fn visit_parts(&mut self, id: u64, carry: f32, parts: &[(usize, f32)], extensive: bool) -> Result<(), Full> {
         self.reknife(id)?;
         if self.dirty <= 0.0 {
             return Ok(());
         }
         let dirty = self.dirty;
         let Some(h) = self.heap_mut(id) else { return Ok(()) };
-        if !parts.is_empty() {
+        let concentration = if extensive { parts.iter().map(|p| p.1).sum() } else { 1.0 };
+        if !parts.is_empty() && concentration > 0.0 {
             let lp = parts;
             let own = h.fractions();
             // what differs from the heap is what dirties it
-            let differs: f32 = lp.iter().map(|&(i, f)| (f - own.iter().find(|p| p.0 == i).map(|p| p.1).unwrap_or(0.0)).max(0.0)).sum();
+            let differs: f32 = lp.iter().map(|&(i, f)| (f / concentration - own.iter().find(|p| p.0 == i).map(|p| p.1).unwrap_or(0.0)).max(0.0)).sum();
             if differs > 0.01 {
                 let room = (DIRT_CAP * h.volume() - h.dirt_volume()).max(0.0);
-                let v = (VISIT * dirty * carry.clamp(0.0, 1.0) * h.volume()).min(room);
+                let v = (VISIT * dirty * carry.clamp(0.0, 1.0) * h.volume()).min(room / concentration);
                 if v > 0.0 {
                     for &(i, f) in lp {
                         match h.dirt.iter_mut().find(|p| p.0 == i) {
@@ -238,22 +247,32 @@ impl Board {
         // An add re-knifes a scraped heap fresh, at the newest position.
         self.reknife(id).map_err(|Full| self.full(tubes, "p:add: that pile was scraped off, and knifing it again needs room"))?;
         let h = self.heap_mut(id).ok_or("p:add: that pile is no longer on the palette")?;
+        let conserved = tubes.engine >= paint::PIGMENT_MIXER;
         let k = 1.0 / h.given_sum.max(1e-9);
         let before = h.volume();
         let before_medium = tubes.pile(h.fractions()).effective_medium(h.medium);
         // (amounts that overflow the heap, together or with it, would leave its proportions NaN)
-        let more: f32 = add.iter().map(|&(_, v)| v * k).sum();
+        let more: f32 = add.iter().map(|&(_, v)| if conserved { v / h.given_sum } else { v * k }).sum();
         if !(more.is_finite() && (before + more).is_finite()) {
             return Err("p:add: more paint than the heap can count".into());
         }
+        if conserved {
+            let concentration = (1.0 - before_medium).clamp(0.0, 1.5).max(1e-3);
+            for p in h.parts.iter_mut().chain(&mut h.dirt) { p.1 *= concentration; }
+        }
         let mut added = 0.0;
         for &(i, v) in add {
-            let v = v * k;
+            let v = if conserved { v / h.given_sum } else { v * k };
             added += v;
+            let v = v * if conserved { (1.0 - medium).clamp(0.0, 1.5).max(1e-3) } else { 1.0 };
             match h.parts.iter_mut().find(|p| p.0 == i) {
                 Some(p) => p.1 += v,
                 None => h.parts.push((i, v)),
             }
+        }
+        if conserved {
+            let scale = (before + added) / h.volume();
+            for p in h.parts.iter_mut().chain(&mut h.dirt) { p.1 *= scale; }
         }
         h.medium = tubes.pile(h.fractions()).effective_medium((before_medium * before + medium * added) / (before + added).max(1e-9));
         let retained = before / (before + added).max(1e-9);
@@ -300,7 +319,7 @@ impl Board {
             s += &format!(
                 "  {}. {}{}: {}{}\n",
                 n + 1,
-                h.name.clone().unwrap_or_else(|| format!("pile {}", h.id)),
+                label(h),
                 if h.medium > 0.0 { format!(" (medium {:.2})", h.medium) } else if h.medium < 0.0 { format!(" (blotted {:.2})", -h.medium) } else { String::new() },
                 recipe,
                 if h.dirt_share() > 0.005 { format!("  [{:.0}% dirt]", 100.0 * h.dirt_share()) } else { String::new() }
@@ -312,15 +331,19 @@ impl Board {
     /// Why a full board refuses a heap (`what`: the verb, and why it needed one): the heaps
     /// on it, oldest first, and how one is scraped off.
     pub fn full(&self, tubes: &Palette, what: &str) -> String {
-        let heaps: Vec<String> = self.live().iter().map(|h| match &h.name {
-            Some(n) => format!("{n:?} ({})", recipe(h, tubes)),
-            None => recipe(h, tubes),
-        }).collect();
+        let heaps: Vec<String> = self.live().iter().map(|h| format!("{:?} ({})", label(h), recipe(h, tubes))).collect();
+        let oldest = format!("{:?}", self.live().first().map_or("pile 1".to_string(), |h| label(h)));
         format!(
-            "{what}: the palette is full. It holds {LIVE} piles and takes no more until one is scraped off. On it now, oldest first: {}. palette{{scrape={{p1, p2}}}} scrapes off the piles p1 and p2.",
+            "{what}: the palette is full. It holds {LIVE} piles and takes no more until one is scraped off. On it now, oldest first: {}. palette{{scrape={{p1, {oldest}}}}} scrapes off the pile p1 and the one listed as {oldest}.",
             heaps.join("; ")
         )
     }
+}
+
+/// The name a heap is listed under (`palette()`, a full board's refusal), which
+/// `palette{scrape=}` takes: the name it was knifed with, else `pile <id>`.
+pub fn label(h: &Heap) -> String {
+    h.name.clone().unwrap_or_else(|| format!("pile {}", h.id))
 }
 
 /// A heap's recipe now: its tubes' shares, its dirt included.

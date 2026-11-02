@@ -1,7 +1,7 @@
 //! Transport/lifecycle contracts without allocating a live canvas.
 // The replay build: EASEL_ROOT, named sessions and `easel run`.
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Output},
 };
 mod support;
@@ -10,16 +10,37 @@ use support::sock_of;
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("il-{}", std::process::id()))
 }
+/// Stops the session's server however the test ends.
+fn closing(name: &str) -> support::Closing {
+    support::Closing(root().join("out/easel").join(name))
+}
 fn cmd(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_easel")).args(args).env_remove("EASEL_WIDTH").env("EASEL_ROOT", root()).env("EASEL_SESSION", "s").output().unwrap()
+    cmd_in(&root(), args)
 }
 fn ok(args: &[&str]) -> String {
-    let o = cmd(args);
+    ok_in(&root(), args)
+}
+fn cmd_in(studio: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_easel")).args(args).env_remove("EASEL_WIDTH").env("EASEL_ROOT", studio).env("EASEL_SESSION", "s").output().unwrap()
+}
+fn ok_in(studio: &Path, args: &[&str]) -> String {
+    let o = cmd_in(studio, args);
     assert!(o.status.success(), "{args:?}: {}", String::from_utf8_lossy(&o.stderr));
     String::from_utf8(o.stdout).unwrap()
 }
+fn status_with_timeout(name: &str) -> std::io::Result<String> {
+    use std::{io::{Read, Write}, os::unix::net::UnixStream, time::Duration};
+    let mut conn = UnixStream::connect(sock_of(&root().join("out/easel").join(name)))?;
+    conn.set_read_timeout(Some(Duration::from_secs(1)))?;
+    conn.set_write_timeout(Some(Duration::from_secs(1)))?;
+    conn.write_all(b"7\nstatus\n")?;
+    let mut reply = String::new();
+    conn.read_to_string(&mut reply)?;
+    Ok(reply)
+}
 #[test]
 fn live_resolution_is_fixed() {
+    let _closing = closing("s");
     let o = cmd(&["open", "s", "--width", "80"]);
     assert!(!o.status.success(), "live width override accepted");
     assert!(ok(&["open", "s"]).contains("2400px"));
@@ -28,6 +49,7 @@ fn live_resolution_is_fixed() {
 
 #[test]
 fn edited_or_truncated_logs_cannot_reopen() {
+    let _closing = closing("reopen");
     ok(&["open", "reopen"]);
     ok(&["-s", "reopen", "do", "x = 1"]);
     ok(&["-s", "reopen", "close"]);
@@ -41,23 +63,58 @@ fn edited_or_truncated_logs_cannot_reopen() {
     }
     std::fs::write(&log, original).unwrap();
     let reopened = ok(&["open", "reopen"]);
-    assert!(reopened.contains("resumed chunk 1/1"), "{reopened}");
+    assert!(reopened.contains("reconstructed 1 chunks"), "{reopened}");
     assert!(reopened.contains("resumed 1 chunks"), "{reopened}");
     ok(&["-s", "reopen", "close"]);
+}
+
+#[test]
+fn open_waits_for_previous_lock_holder_despite_stale_fatal() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    let name = "stale-fatal";
+    let _reaper = Reaper(name);
+    let dir = root().join("out/easel").join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    let lock = std::fs::File::create(dir.join("lock")).unwrap();
+    lock.lock().unwrap();
+    std::fs::write(dir.join("server.log"), "resuming previous server\neasel: fatal: previous server failed\n").unwrap();
+    let mut opener = Command::new(env!("CARGO_BIN_EXE_easel"))
+        .args(["open", name])
+        .env_remove("EASEL_WIDTH")
+        .env("EASEL_ROOT", root())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut progress = String::new();
+    BufReader::new(opener.stdout.as_mut().unwrap()).read_line(&mut progress).unwrap();
+    drop(lock);
+    let output = opener.wait_with_output().unwrap();
+    assert_eq!(progress, "resuming previous server\n");
+    assert!(output.status.success(), "open: {output:?}");
+    assert!(ok(&["-s", name, "status"]).starts_with("0 chunks"));
+    ok(&["-s", name, "close"]);
 }
 
 // A corrupt/obsolete chunk must never leave a partially resumed server running.
 #[test]
 fn replay_failure_is_fatal() {
     let name = "bad-replay";
+    let _closing = closing(name);
     let dir = root().join("out/easel").join(name);
     std::fs::create_dir_all(&dir).unwrap();
     let logs = root().join("paintings/lua");
     std::fs::create_dir_all(&logs).unwrap();
-    let text = "--@ chunk 1\nx = 1\n--@ chunk 2\nerror('cannot replay')\n--@ chunk 3\nx = 3\n";
-    std::fs::write(logs.join("bad-replay.lua"), text).unwrap();
+    ok(&["open", name]);
+    ok(&["-s", name, "do", "x = 1"]);
+    ok(&["-s", name, "close"]);
+    let text = std::fs::read_to_string(logs.join("bad-replay.lua")).unwrap()
+        + "\n--@ chunk 2\nerror('cannot replay')\n\n--@ chunk 3\nx = 3\n";
+    std::fs::write(logs.join("bad-replay.lua"), &text).unwrap();
     // Matching local witness isolates replay failure from edit detection.
-    std::fs::write(dir.join("committed.lua"), text).unwrap();
+    std::fs::write(dir.join("committed.lua"), &text).unwrap();
     let o = cmd(&["open", name]);
     assert!(!o.status.success(), "partial replay was accepted");
     assert!(String::from_utf8_lossy(&o.stderr).contains("replay failed at chunk 2"), "open: {o:?}");
@@ -69,6 +126,7 @@ fn replay_failure_is_fatal() {
 // says both, so the chunk isn't sent again.
 #[test]
 fn a_failed_look_after_a_chunk_still_reports_the_chunk() {
+    let _closing = closing("looked");
     ok(&["open", "looked"]);
     let out = ok(&["-s", "looked", "do", "x = 1", "--look"]);
     ok(&["-s", "looked", "close"]);
@@ -77,18 +135,15 @@ fn a_failed_look_after_a_chunk_still_reports_the_chunk() {
 
 #[test]
 fn an_implicit_scratch_reset_survives_a_failed_chunk() {
-    struct Closing;
-    impl Drop for Closing {
-        fn drop(&mut self) {
-            let _ = cmd(&["-s", "scratch-notice", "close"]);
-        }
-    }
-    let _closing = Closing;
+    // its own studio: the log directory is made read-only below
+    let studio = root().join("scratch-notice");
+    let (cmd, ok) = (|args: &[&str]| cmd_in(&studio, args), |args: &[&str]| ok_in(&studio, args));
+    let _closing = support::Closing(studio.join("out/easel/scratch-notice"));
     ok(&["open", "scratch-notice"]);
     ok(&["-s", "scratch-notice", "do", "canvas{size=300, aspect=4, seed=5, linen=15, ground={{pile={{\"lead white\",5},{\"yellow ochre\",1}}, um=80, apply=\"knife\"}}}"]);
     ok(&["-s", "scratch-notice", "do", "local old_swatch=1", "--scratch"]);
     ok(&["-s", "scratch-notice", "close"]);
-    let log = root().join("paintings/lua/scratch-notice-scratch.lua");
+    let log = studio.join("paintings/lua/scratch-notice-scratch.lua");
     let mut old = std::fs::read_to_string(&log).unwrap();
     old.push_str("\nbad(\n");
     std::fs::write(&log, old).unwrap();
@@ -100,11 +155,125 @@ fn an_implicit_scratch_reset_survives_a_failed_chunk() {
     assert!(error.contains("new scratch chunk fails"), "{error}");
     assert!(error.contains("the chunk failed and changed nothing"), "{error}");
     assert!(!std::fs::read_to_string(log).unwrap().contains("old_swatch"));
-    assert!(root().join("paintings/lua/scratch-notice-scratch-1.lua").exists());
+    assert!(studio.join("paintings/lua/scratch-notice-scratch-1.lua").exists());
+    // a fresh scratch canvas whose old log can't be put aside leaves that log and its
+    // record together
+    let (lua, record) = (studio.join("paintings/lua"), studio.join("out/easel/scratch-notice-scratch/committed.lua"));
+    ok(&["-s", "scratch-notice", "do", "local kept=1", "--scratch"]);
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&lua, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let o = cmd(&["-s", "scratch-notice", "do", "local fresh=1", "--scratch", "--new"]);
+    std::fs::set_permissions(&lua, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!o.status.success());
+    assert_eq!(std::fs::read_to_string(&record).unwrap(), std::fs::read_to_string(lua.join("scratch-notice-scratch.lua")).unwrap());
+    // a look at a scratch canvas that can't be reopened says it was put aside
+    ok(&["-s", "scratch-notice", "close"]);
+    let mut old = std::fs::read_to_string(lua.join("scratch-notice-scratch.lua")).unwrap();
+    old.push_str("\nbad(\n");
+    std::fs::write(lua.join("scratch-notice-scratch.lua"), old).unwrap();
+    ok(&["open", "scratch-notice"]);
+    let o = cmd(&["-s", "scratch-notice", "look", "--scratch"]);
+    assert!(!o.status.success());
+    let error = String::from_utf8(o.stderr).unwrap();
+    assert!(error.contains("couldn't be reopened, so it is put aside") && error.contains("no scratch canvas yet"), "{error}");
+    assert!(lua.join("scratch-notice-scratch-2.lua").exists());
+}
+
+// A chunk whose committed record can't be written isn't kept: the log, its record and the
+// state stay at the chunk before. A publication the easel stopped in is resolved on
+// reopen: kept when the log holds all of the pending record, else taken back out.
+#[test]
+fn an_interrupted_publication_goes_on_from_an_accepted_revision() {
+    let name = "publication";
+    let _reaper = Reaper(name);
+    let with = |a: &[&'static str]| [&["-s", name][..], a].concat();
+    let (dir, log) = (root().join("out/easel").join(name), root().join("paintings/lua/publication.lua"));
+    ok(&["open", name]);
+    ok(&with(&["do", "x = 1"]));
+    std::fs::create_dir(dir.join("committed.pending")).unwrap();
+    let o = cmd(&with(&["do", "y = 2"]));
+    std::fs::remove_dir(dir.join("committed.pending")).unwrap();
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("so it isn't kept"), "{o:?}");
+    assert!(!std::fs::read_to_string(&log).unwrap().contains("y = 2"));
+    while !ok(&with(&["status"])).starts_with("1 chunks") {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    ok(&with(&["do", "assert(x == 1 and y == nil)"]));
+    ok(&with(&["close"]));
+    // the easel stopped just before the record's rename: the chunk is kept
+    let committed = std::fs::read_to_string(&log).unwrap();
+    let grown = format!("{committed}\n--@ chunk 3\nz = 3\n");
+    std::fs::write(&log, &grown).unwrap();
+    std::fs::write(dir.join("committed.pending"), &grown).unwrap();
+    assert!(ok(&["open", name]).contains("the chunk is kept"));
+    ok(&with(&["do", "assert(z == 3)"]));
+    ok(&with(&["close"]));
+    // stopped while the chunk was appended: it is taken back out
+    let committed = std::fs::read_to_string(&log).unwrap();
+    std::fs::write(dir.join("committed.pending"), format!("{committed}\n--@ chunk 5\nw = 5\n")).unwrap();
+    std::fs::write(&log, format!("{committed}\n--@ chunk 5\nw = ")).unwrap();
+    assert!(ok(&["open", name]).contains("goes on from the chunk before it"));
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), committed);
+    ok(&with(&["do", "assert(z == 3 and w == nil)"]));
+    ok(&with(&["close"]));
+}
+
+// A note the easel is stopped in the middle of writing (here by a file size limit) leaves
+// the journal as it was, never a partial entry.
+#[test]
+fn an_interrupted_note_leaves_the_journal_whole() {
+    let studio = root().join("note-limit");
+    let journal = studio.join("notes/journal.md");
+    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+    let before = format!("{}\n", "x".repeat(200 * 512 - 8));
+    std::fs::write(&journal, &before).unwrap();
+    let easel = |args: &[&str]| Command::new(env!("CARGO_BIN_EXE_easel")).args(args).env_remove("EASEL_WIDTH").env("EASEL_ROOT", &studio).env("EASEL_SESSION", "s").output().unwrap();
+    let _closing = support::Closing(studio.join("out/easel/s"));
+    let mut server = Command::new("sh").args(["-c", "ulimit -f 200 && exec \"$0\" serve s", env!("CARGO_BIN_EXE_easel")]).env("EASEL_ROOT", &studio).env_remove("EASEL_WIDTH").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().unwrap();
+    while !easel(&["status"]).status.success() {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(!easel(&["note", "the sky is finished"]).status.success());
+    let _ = server.kill();
+    let _ = server.wait();
+    assert_eq!(std::fs::read_to_string(&journal).unwrap(), before);
+}
+
+// Named sessions share the studio's journal: notes written from two of them at once all
+// stay in it.
+#[test]
+fn notes_from_two_sessions_at_once_are_all_kept() {
+    let studio = root().join("note-race");
+    let easel = |args: &[&str]| ok_in(&studio, args);
+    let _closing = ["left", "right"].map(|name| support::Closing(studio.join("out/easel").join(name)));
+    for name in ["left", "right"] {
+        easel(&["open", name]);
+    }
+    std::thread::scope(|s| {
+        for name in ["left", "right"] {
+            s.spawn(move || {
+                for i in 0..20 {
+                    easel(&["-s", name, "note", &format!("{name} {i}")]);
+                }
+            });
+        }
+    });
+    for name in ["left", "right"] {
+        easel(&["-s", name, "close"]);
+    }
+    let journal = std::fs::read_to_string(studio.join("notes/journal.md")).unwrap();
+    for name in ["left", "right"] {
+        for i in 0..20 {
+            assert!(journal.contains(&format!(": {name} {i}\n")), "{name} {i} lost:\n{journal}");
+        }
+    }
+    assert_eq!(std::fs::read_dir(studio.join("notes")).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().starts_with(".journal.pending")).count(), 0);
 }
 
 #[test]
 fn journal_uses_the_selected_painting_clock() {
+    let _closing = closing("journal");
     ok(&["open", "journal"]);
     let result = cmd(&["-s", "journal", "note", "painting clock"]);
     ok(&["-s", "journal", "close"]);
@@ -120,6 +289,7 @@ fn journal_uses_the_selected_painting_clock() {
 fn a_running_session_refuses_every_request_while_its_log_is_edited() {
     let s = ["-s", "gate"];
     let with = |a: &[&'static str]| [&s[..], a].concat();
+    let _closing = closing("gate");
     ok(&["open", "gate"]);
     ok(&with(&["do", "x = 1"]));
     let log = root().join("paintings/lua/gate.lua");
@@ -245,15 +415,9 @@ fn rebuilding_serves_progress_and_refuses_nonstatus_requests() {
 fn a_look_never_overwrites_an_earlier_observation() {
     let s = ["-s", "gaps"];
     let with = |a: &[&'static str]| [&s[..], a].concat();
-    ok(&["open", "gaps"]);
     // a failing assertion must not leave the server running
-    struct Closing;
-    impl Drop for Closing {
-        fn drop(&mut self) {
-            let _ = cmd(&["-s", "gaps", "close"]);
-        }
-    }
-    let _closing = Closing;
+    let _closing = closing("gaps");
+    ok(&["open", "gaps"]);
     ok(&with(&["do", r#"canvas{size=300, aspect=4, seed=5, linen=15, ground={{pile={{"lead white", 5}, {"yellow ochre", 1}}, um=80, apply="knife"}}}"#]));
     let dir = root().join("out/easel/gaps");
     for n in 1..=2 {
@@ -317,6 +481,155 @@ fn racing_opens_start_one_server() {
         assert!(ok(&["-s", name, "status"]).starts_with("1 chunks"), "round {round}");
         ok(&["-s", name, "close"]);
     }
+}
+
+#[test]
+fn serve_waits_for_a_closing_servers_lock() {
+    use std::{
+        io::Read,
+        os::unix::net::UnixListener,
+        process::{Child, Stdio},
+        time::{Duration, Instant},
+    };
+    struct Server(Child);
+    impl Drop for Server {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let name = "serve-handoff";
+    let _closing = closing(name);
+    ok(&["open", name]);
+    ok(&["-s", name, "do", "x = 1"]);
+    ok(&["-s", name, "close"]);
+    let dir = root().join("out/easel").join(name);
+    let lock = std::fs::File::open(dir.join("lock")).unwrap();
+    lock.lock().unwrap();
+    let sock = sock_of(&dir);
+    let listener = UnixListener::bind(&sock).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut server = Server(Command::new(env!("CARGO_BIN_EXE_easel"))
+        .args(["serve", name])
+        .env_remove("EASEL_WIDTH").env("EASEL_ROOT", root())
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped())
+        .spawn().unwrap());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut conn = loop {
+        if let Ok((conn, _)) = listener.accept() {
+            break conn;
+        }
+        if let Some(status) = server.0.try_wait().unwrap() {
+            let mut error = String::new();
+            server.0.stderr.as_mut().unwrap().read_to_string(&mut error).unwrap();
+            panic!("serve exited instead of waiting for the closing server: {status}: {error}");
+        }
+        assert!(Instant::now() < deadline, "serve never checked the closing server");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut request = [0; 9];
+    conn.read_exact(&mut request).unwrap();
+    assert_eq!(&request, b"7\nstatus\n");
+    std::fs::remove_file(&sock).unwrap();
+    drop(listener);
+    drop(lock);
+    loop {
+        if let Some(status) = server.0.try_wait().unwrap() {
+            let mut error = String::new();
+            server.0.stderr.as_mut().unwrap().read_to_string(&mut error).unwrap();
+            panic!("serve exited at startup: {status}: {error}");
+        }
+        if let Ok(reply) = status_with_timeout(name)
+            && reply.starts_with("ok\n1 chunks")
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "serve never started after the lock was released");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    drop(conn);
+    assert!(status_with_timeout(name).unwrap().starts_with("ok\n1 chunks"));
+    ok(&["-s", name, "do", "assert(x == 1)"]);
+    ok(&["-s", name, "close"]);
+    assert!(server.0.wait().unwrap().success());
+}
+
+#[test]
+fn serve_refuses_a_stopped_owner() {
+    serve_refuses_unresponsive_owner("stopped-owner", true);
+}
+
+#[test]
+fn serve_refuses_an_owner_reading_an_incomplete_request() {
+    serve_refuses_unresponsive_owner("incomplete-owner", false);
+}
+
+fn serve_refuses_unresponsive_owner(name: &str, stopped: bool) {
+    use std::{
+        io::{Read, Write},
+        os::unix::{fs::MetadataExt, net::UnixStream},
+        process::{Child, Stdio},
+        time::{Duration, Instant},
+    };
+    struct Server(Child);
+    impl Drop for Server {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let spawn = || Server(Command::new(env!("CARGO_BIN_EXE_easel"))
+        .args(["serve", name])
+        .env_remove("EASEL_WIDTH").env("EASEL_ROOT", root())
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped())
+        .spawn().unwrap());
+    let mut owner = spawn();
+    let sock = sock_of(&root().join("out/easel").join(name));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(reply) = status_with_timeout(name)
+            && reply.starts_with("ok\n0 chunks")
+        {
+            break;
+        }
+        assert!(owner.0.try_wait().unwrap().is_none(), "{name}: owner exited at startup");
+        assert!(Instant::now() < deadline, "{name}: owner never started");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let ino = std::fs::metadata(&sock).unwrap().ino();
+    let incomplete = if stopped {
+        assert!(Command::new("kill").args(["-STOP", &owner.0.id().to_string()]).status().unwrap().success());
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let state = Command::new("ps").args(["-o", "stat=", "-p", &owner.0.id().to_string()]).output().unwrap();
+            if String::from_utf8_lossy(&state.stdout).contains('T') {
+                break;
+            }
+            assert!(Instant::now() < deadline, "{name}: owner did not stop");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        None
+    } else {
+        let mut conn = UnixStream::connect(&sock).unwrap();
+        conn.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
+        conn.write_all(b"7\nsta").unwrap();
+        Some(conn)
+    };
+    let mut contender = spawn();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let status = loop {
+        if let Some(status) = contender.0.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "{name}: second serve blocked on its owner");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let mut error = String::new();
+    contender.0.stderr.as_mut().unwrap().read_to_string(&mut error).unwrap();
+    assert!(!status.success() && error.contains("another easel serves"), "{name}: {status}: {error}");
+    assert_eq!(std::fs::metadata(&sock).unwrap().ino(), ino, "{name}: second serve replaced the socket");
+    drop(incomplete);
 }
 
 // A second server for a session that has one is refused before it touches anything, and

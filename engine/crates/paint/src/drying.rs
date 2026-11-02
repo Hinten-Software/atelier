@@ -33,7 +33,6 @@
 //! `wait`; a painting that never waits doesn't allocate it.
 
 use crate::canvas::Canvas;
-use crate::pigment::Pigment;
 use crate::surface::{COAT_UM, SET_TIME};
 use crate::{smoothstep, surface::vnoise};
 use rayon::prelude::*;
@@ -246,7 +245,7 @@ impl Pace {
     }
 
     /// Minutes until an open film of cure `c` and rate `r` is touch-dry.
-    fn to_dry(self, c: f32, r: f32) -> f32 {
+    pub(crate) fn to_dry(self, c: f32, r: f32) -> f32 {
         if self == Pace::EVEN || c >= GEL {
             return (1.0 - c).max(0.0) / (r * self.set);
         }
@@ -254,8 +253,13 @@ impl Pace {
     }
 
     /// Cure per minute of a set film whose open film's rate was `r`.
-    fn set_rate(self, r: f32) -> f32 {
+    pub(crate) fn set_rate(self, r: f32) -> f32 {
         if self == Pace::EVEN { r } else { r * self.set }
+    }
+
+    /// Cure per minute of an open film of rate `r` before its gel point.
+    pub(crate) fn open_rate(self, r: f32) -> f32 {
+        if self == Pace::EVEN { r } else { r * self.open }
     }
 }
 
@@ -335,8 +339,9 @@ pub enum Stage {
 pub(crate) struct Px {
     /// Oxidation of the open (wet) film: 0 fresh, `GEL` sets, 1 touch-dry.
     pub cure: f32,
-    /// Seconds the open film levels for when it sets (it levels for
-    /// `SET_TIME` after it is worked, at the fluidity it had then).
+    /// Seconds the open film levels after it is worked, at its fluidity
+    /// then. Engine 9 consumes this once while the film is still wet;
+    /// older engines defer it until baking.
     pub lev: f32,
     /// Volume of the open film at the last `wait`. A film whose volume
     /// changed since was worked, even where no bristle touched it (paint
@@ -403,8 +408,10 @@ impl Canvas {
             self.wait_on_grid(dt);
             return;
         }
-        self.age(dt);
+        let start = self.wet.clock.now;
+        self.age_from(dt, false, start + dt as f64);
         self.wet.clock.now += dt as f64;
+        self.skin_advance(start, self.wet.clock.now);
     }
 
     /// Wait `dt` minutes with solvent in the paint (engine 3,
@@ -436,6 +443,14 @@ impl Canvas {
     /// steps fall (a wait split off the grid) doesn't change it.
     fn wait_on_grid(&mut self, dt: f32) {
         const TICKS: f64 = crate::thinner::FLOW_TICKS as f64;
+        if self.engine >= 9 && dt > 0.0 {
+            let n = self.f.w * self.f.h;
+            if self.wet.clock.px.len() != n {
+                self.wet.clock.px = vec![Px::FRESH; n];
+            }
+            self.absorb_with(true);
+            self.level_open();
+        }
         let start = self.wet.clock.now;
         let end = start + dt as f64;
         let mut t = start;
@@ -453,7 +468,7 @@ impl Canvas {
             // minute and to the wait's end
             let minute = (aged.floor() + 1.0).min(end);
             if next == minute {
-                self.age_from((next - aged) as f32, true);
+                self.age_from((next - aged) as f32, true, next);
                 aged = next;
             }
             self.spread((next - t) as f32, &mut solvent);
@@ -461,12 +476,13 @@ impl Canvas {
             self.wet.clock.now = t;
             if solvent.is_empty() {
                 if end > aged {
-                    self.age_from((end - aged) as f32, true);
+                    self.age_from((end - aged) as f32, true, end);
                 }
                 break;
             }
         }
         self.wet.clock.now = end;
+        self.skin_advance(start, end);
     }
 
     /// `wait` on the minute grid until no solvent is left: to the next
@@ -483,18 +499,19 @@ impl Canvas {
 
     /// The open films age by `dt` minutes where they lie (the body of
     /// `wait`, without moving the clock).
-    fn age(&mut self, dt: f32) {
-        self.age_from(dt, false);
-    }
-
     /// `age`; with `flow` (`wait_on_grid`), a film under the bare
-    /// threshold that holds any paint keeps its cure and dries too.
-    fn age_from(&mut self, dt: f32, flow: bool) {
+    /// threshold that holds any paint keeps its cure and dries too. The
+    /// clock reads `end` when the step is over (the films that set keep
+    /// it, `skin`).
+    fn age_from(&mut self, dt: f32, flow: bool, end: f64) {
         let n = self.f.w * self.f.h;
         if self.wet.clock.px.len() != n {
             self.wet.clock.px = vec![Px::FRESH; n];
         }
         self.absorb_with(flow);
+        if self.engine >= 9 && dt > 0.0 {
+            self.level_open();
+        }
         let low = if flow { f32::MIN_POSITIVE } else { 1e-5 };
         let w = self.f.w;
         // age the open films
@@ -536,7 +553,7 @@ impl Canvas {
             }
         }
         // films past the gel point level and set
-        self.bake(false);
+        self.bake(false, end);
     }
 
     /// The open film's thickness (coats) as it dries, for each pixel of the
@@ -644,8 +661,17 @@ impl Canvas {
         if self.engine >= 3 && self.wet.has_solvent(self.f.w) {
             self.wait_out_solvent();
         }
+        if self.engine >= 9 && self.wet.dirty.is_some() {
+            let n = self.f.w * self.f.h;
+            if self.wet.clock.px.len() != n {
+                self.wet.clock.px = vec![Px::FRESH; n];
+            }
+        }
         if !self.wet.clock.px.is_empty() {
             self.absorb();
+        }
+        if self.engine >= 9 {
+            self.level_open();
         }
         // how long until the slowest film is touch-dry
         let mut left = 0.0f32;
@@ -684,8 +710,10 @@ impl Canvas {
                 }
             }
         }
-        self.bake(true);
+        let start = self.wet.clock.now;
+        self.bake(true, start);
         self.wet.clock.now += left as f64;
+        self.skin_advance(start, self.wet.clock.now);
     }
 
     /// Fold what was painted since the last `wait` into the drying state: a
@@ -763,11 +791,96 @@ impl Canvas {
 
     /// Level and bake open films into the dry picture: every film (`all`,
     /// clearing the wet layer's residue too) or those past the gel point.
-    fn bake(&mut self, all: bool) {
-        BAKE_SCRATCH.with(|s| self.bake_with_scratch(all, &mut s.borrow_mut()));
+    fn bake(&mut self, all: bool, end: f64) {
+        BAKE_SCRATCH.with(|s| self.bake_with_scratch(all, end, &mut s.borrow_mut()));
     }
 
-    fn bake_with_scratch(&mut self, all: bool, scratch: &mut [Vec<f32>; 8]) {
+    fn level_open(&mut self) {
+        let Some((x0, y0, x1, y1)) = self.wet.dirty else { return };
+        let (w, h) = (self.f.w, self.f.h);
+        let pad = ((2.0 / self.px_mm()).ceil() as usize).max(2);
+        let ex = (x0.saturating_sub(pad), y0.saturating_sub(pad), (x1 + pad).min(w), (y1 + pad).min(h));
+        let (ew, eh) = (ex.2 - ex.0, ex.3 - ex.1);
+        if !(ex.1..ex.3).any(|y| (ex.0..ex.2).any(|x| {
+            let i = y * w + x;
+            self.wet.vol[i] >= 1e-5 && self.wet.clock.px[i].lev > 0.0
+        })) {
+            return;
+        }
+        let mut add = Vec::with_capacity(ew * eh);
+        let mut stiff = Vec::with_capacity(ew * eh);
+        let mut sets = Vec::with_capacity(ew * eh);
+        let mut fluid = Vec::with_capacity(ew * eh);
+        let mut old = Vec::with_capacity(ew * eh);
+        for y in ex.1..ex.3 {
+            for x in ex.0..ex.2 {
+                let i = y * w + x;
+                add.push(if self.wet.vol[i] >= 1e-5 { self.wet.vol[i] * COAT_UM } else { 0.0 });
+                stiff.push(self.wet.hide[i][1]);
+                sets.push(self.wet.clock.px[i].lev);
+                fluid.push(1.0 - self.wet.hide[i][7].clamp(0.0, 1.0));
+                old.push(self.height[i]);
+            }
+        }
+        let mut transport = Vec::new();
+        let t = self.settle_with_transport(ex, &add, &stiff, &sets, true, self.drain.then_some(&fluid[..]), Some(&mut transport));
+        self.transport_settled(ex, &add, &t, &transport, &mut vec![0.0; ew * eh]);
+        for y in ex.1..ex.3 {
+            for x in ex.0..ex.2 {
+                let i = y * w + x;
+                let k = (y - ex.1) * ew + x - ex.0;
+                self.height[i] = old[k];
+                if add[k] > 0.0 {
+                    self.wet.vol[i] = t[k] / COAT_UM;
+                    let p = &mut self.wet.clock.px[i];
+                    p.seen = self.wet.vol[i];
+                    p.lev = 0.0;
+                }
+            }
+        }
+    }
+
+    fn transport_settled(&mut self, ex: (usize, usize, usize, usize), add: &[f32], t: &[f32], transport: &[(usize, usize, f32)], oil: &mut [f32]) {
+        let (w, ew, eh) = (self.f.w, ex.2 - ex.0, ex.3 - ex.1);
+        let mut volumes = add.to_vec();
+        let packed: Vec<_> = add.iter().enumerate().map(|(k, &a)| a * self.wet.hide[(ex.1 + k / ew) * w + ex.0 + k % ew][7]).collect();
+        for &(from, to, amount) in transport {
+            let i = (ex.1 + from / ew) * w + ex.0 + from % ew;
+            let j = (ex.1 + to / ew) * w + ex.0 + to % ew;
+            let source = self.wet.lat[i].clone();
+            let prop = if self.drain { crate::bristle::take_from(&mut self.wet.hide[i], volumes[from], amount) } else { crate::bristle::fluid_of(self.wet.hide[i]) };
+            let latent = &mut self.wet.lat[j];
+            let hide = &mut self.wet.hide[j];
+            let volume = volumes[to] + amount;
+            if self.wet.clock.px.len() == self.f.w * self.f.h {
+                let cure = self.wet.clock.px[i].cure;
+                let receiver = &mut self.wet.clock.px[j];
+                receiver.cure += (cure - receiver.cure) * (amount / volume);
+            }
+            let weight = amount / volume;
+            for k in 0..crate::wet::LAT {
+                latent[k] += (source[k] - latent[k]) * weight;
+            }
+            latent.blend_parts(&source, amount / volume);
+            for k in 0..hide.len() {
+                hide[k] += (prop[k] - hide[k]) * (amount / volume);
+            }
+            volumes[from] -= amount;
+            volumes[to] = volume;
+        }
+        for y in 0..eh {
+            for x in 0..ew {
+                let k = y * ew + x;
+                if t[k] <= 0.0 { continue; }
+                let i = (ex.1 + y) * w + ex.0 + x;
+                let hd = &mut self.wet.hide[i];
+                hd[7] = packed[k] / t[k];
+                oil[k] = if self.drain { crate::bristle::surface_oil(hd) * crate::wet::PACKED_OIL / hd[5].max(0.05) } else { hd[4] };
+            }
+        }
+    }
+
+    fn bake_with_scratch(&mut self, all: bool, end: f64, scratch: &mut [Vec<f32>; 8]) {
         let Some((x0, y0, x1, y1)) = self.wet.dirty else { return };
         let (w, h) = (self.f.w, self.f.h);
         let (x1, y1) = (x1.min(w), y1.min(h));
@@ -846,7 +959,17 @@ impl Canvas {
             }
             return;
         }
-        let t = self.settle_for(ex, &add, &stiff, &sets, self.engine >= 4, drain.then_some(&fluid[..]));
+        let t = if self.engine >= 9 {
+            for y in 0..eh {
+                for x in 0..ew {
+                    self.height[(ex.1 + y) * w + ex.0 + x] += add[y * ew + x];
+                }
+            }
+            self.surf_gen += 1;
+            add.clone()
+        } else {
+            self.settle_for(ex, &add, &stiff, &sets, self.engine >= 4, drain.then_some(&fluid[..]))
+        };
         // engine 4: the film's surface is as glossy as it is rich in oil (a
         // thin one shows the surface under it through), and dry paint seals
         // an absorbent ground's pores
@@ -893,6 +1016,16 @@ impl Canvas {
             cv
         };
         let px_um = self.px_mm() * 1000.0;
+        let spectral = self.spectral_films();
+        let volume_latent = self.engine >= crate::PIGMENT_MIXER;
+        if spectral && self.backing.is_empty() {
+            self.backing.resize(self.px.len(), Default::default());
+        }
+        let backing_rows = if spectral {
+            rayon::iter::Either::Left(self.backing[ex.1 * w..ex.3 * w].par_chunks_mut(w).map(Some))
+        } else {
+            rayon::iter::Either::Right((ex.1..ex.3).into_par_iter().map(|_| None))
+        };
         let wet = &mut self.wet;
         let (lat, hide) = (&wet.lat, &wet.hide);
         let add = &add;
@@ -901,8 +1034,9 @@ impl Canvas {
             .zip(wet.vol[ex.1 * w..ex.3 * w].par_chunks_mut(w))
             .zip(self.film[ex.1 * w..ex.3 * w].par_chunks_mut(w))
             .zip(wet.cover[ex.1 * w..ex.3 * w].par_chunks_mut(w))
+            .zip(backing_rows)
             .enumerate()
-            .for_each(|(j, (((px, vv), ff), cv))| {
+            .for_each(|(j, ((((px, vv), ff), cv), mut backing))| {
                 let y = ex.1 + j;
                 for x in ex.0..ex.2 {
                     let k = j * ew + x - ex.0;
@@ -918,14 +1052,32 @@ impl Canvas {
                     }
                     let ti = t[k] / COAT_UM;
                     let i = y * w + x;
-                    let c = mixbox::latent_to_linear_float_rgb(&lat[i]);
-                    px[x] = crate::wet::over_share(Pigment::masstone(c, hide[i][0]), px[x], ti, crate::wet::bead_cover(cover[k], ti, px_um));
+                    let cover = crate::wet::bead_cover(cover[k], ti, px_um);
+                    px[x] = if let Some(backing) = backing.as_deref_mut() {
+                        backing[x] = backing[x].under(px[x]).over_wet(&lat[i], hide[i][0], ti, cover);
+                        backing[x].color
+                    } else {
+                        crate::wet::over_latent(&lat[i], hide[i][0], px[x], ti, cover, false, volume_latent)
+                    };
                     ff[x] += ti;
                     vv[x] = 0.0;
                     cv[x] = 1.0;
                 }
             });
         self.clear_bare_solvent(ex);
+        // (the new material keeps each baked film curing from the top down)
+        if self.skins() {
+            for y in 0..eh {
+                for x in 0..ew {
+                    let k = y * ew + x;
+                    if add[k] > 0.0 {
+                        let i = (ex.1 + y) * w + ex.0 + x;
+                        let cure = self.wet.clock.px.get(i).map_or(0.0, |p| p.cure);
+                        self.skin_bake(i, t[k], cure, end);
+                    }
+                }
+            }
+        }
         let wet = &mut self.wet;
         if wet.clock.px.is_empty() {
             return;
@@ -985,6 +1137,288 @@ mod tests {
 
     fn lead_white() -> Paint {
         Paint::body(hex("#e8e4d8")).with_drying(drier::LEAD_WHITE)
+    }
+
+    #[test]
+    fn solvent_wet_settling_does_not_depend_on_wait_partition() {
+        let mut c = Canvas::new(32, 1.0, [1.0; 3]).with_engine(9).with_size_mm(4.0);
+        let paint = Paint::new([0.4; 3], 0.9, 0.1).with_drying(0.01);
+        c.wet.solv = vec![0.0; 32 * 32];
+        for y in 8..24 {
+            for x in 8..24 {
+                let i = y * 32 + x;
+                c.wet.vol[i] = if x < 16 { 4.0 } else { 0.5 };
+                c.wet.lat[i] = paint.latent();
+                c.wet.hide[i] = paint.prop();
+                c.wet.solv[i] = 20.0;
+                c.wet.cover[i] = 1.0;
+            }
+        }
+        c.wet.dirty = Some((8, 8, 24, 24));
+        let mut single = c.clone();
+        single.wait(1.0);
+        for parts in [4, crate::thinner::FLOW_TICKS] {
+            let mut split = c.clone();
+            for _ in 0..parts {
+                split.wait(1.0 / parts as f32);
+            }
+            for (i, (&a, &b)) in single.wet.vol.iter().zip(&split.wet.vol).enumerate() {
+                assert!((a - b).abs() * COAT_UM <= 1e-3, "{parts} waits, pixel {i}: {a} vs {b}");
+            }
+            assert!(split.wet.clock.px.iter().zip(&split.wet.vol).all(|(p, &v)| v < 1e-5 || p.lev == 0.0));
+            let mut baked = single.clone();
+            baked.dry();
+            split.dry();
+            for (i, (&a, &b)) in baked.height.iter().zip(&split.height).enumerate() {
+                assert!((a - b).abs() <= 1e-3, "dry, {parts} waits, pixel {i}: {a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn settling_carries_cure_before_the_receiving_film_ages() {
+        let mut c = Canvas::new(16, 1.0, [1.0; 3]).with_engine(9).with_size_mm(2.0);
+        let paint = Paint::new([0.4; 3], 0.9, 0.1);
+        for i in 0..256 {
+            c.wet.vol[i] = if i % 16 < 8 { 4.0 } else { 0.5 };
+            c.wet.lat[i] = paint.latent();
+            c.wet.hide[i] = paint.prop();
+            c.wet.cover[i] = 1.0;
+        }
+        c.wet.dirty = Some((0, 0, 16, 16));
+        c.wait(0.0);
+        for (i, p) in c.wet.clock.px.iter_mut().enumerate() {
+            p.cure = if i % 16 < 8 { 0.0 } else { GEL - 1e-6 };
+            p.lev = SET_TIME * fluid(p.cure);
+        }
+        let inventory = |c: &Canvas| c.wet.vol.iter().zip(&c.wet.clock.px).map(|(&v, p)| v as f64 * p.cure as f64).sum::<f64>();
+        let before = inventory(&c);
+        c.level_open();
+        let after = inventory(&c);
+        assert!((before - after).abs() < 1e-5, "cure inventory: {before} -> {after}");
+        let receiver = 8 * 16 + 8;
+        let v = c.wet.vol[receiver];
+        assert!(v > 0.5, "fresh paint must enter the old film: {v}");
+        assert!((c.wet.clock.px[receiver].cure - (GEL - 1e-6) * 0.5 / v).abs() < 1e-6);
+        c.wait(0.1);
+        assert_eq!(c.wet.vol[receiver], v);
+        assert_eq!(c.film[receiver], 0.0);
+
+        let mut c = Canvas::new(3, 1.0, [1.0; 3]).with_engine(9);
+        c.wet.clock.px = vec![Px::FRESH; 9];
+        for (i, cure) in [(0, 0.12), (1, 0.0), (2, 0.03)] {
+            c.wet.hide[i] = paint.prop();
+            c.wet.lat[i] = paint.latent();
+            c.wet.clock.px[i].cure = cure;
+        }
+        c.transport_settled((0, 0, 3, 1), &[20.0, 10.0, 10.0], &[15.0, 10.0, 15.0], &[(0, 1, 5.0), (1, 2, 5.0)], &mut [0.0; 3]);
+        for (i, cure) in [(0, 0.12), (1, 0.04), (2, 1.0 / 30.0)] {
+            assert!((c.wet.clock.px[i].cure - cure).abs() < 1e-6, "cure at {i}: {}", c.wet.clock.px[i].cure);
+        }
+    }
+
+    #[test]
+    fn settling_conserves_extensive_pigments_at_different_dilutions() {
+        let mut palette = crate::Palette::new("settling dilutions", crate::palette::catalog());
+        palette.engine = 9;
+        palette.glaze_film = true;
+        palette.carried_paint = true;
+        let mut c = Canvas::new(3, 1.0, [1.0; 3]).with_engine(9);
+        for (i, name, medium) in [(0, "Prussian blue", 0.9), (1, "lead white", 0.0)] {
+            let tube = palette.tubes.iter().position(|t| t.name == name).unwrap();
+            let paint = palette.pile(vec![(tube, 1.0)]).paint(medium);
+            c.wet.lat[i] = paint.latent();
+            c.wet.hide[i] = paint.prop();
+        }
+        let inventory = |c: &Canvas, volumes: &[f32; 9]| {
+            let mut values = (0..crate::wet::LAT).map(|k| (0..9).map(|i| volumes[i] as f64 * c.wet.lat[i][k] as f64).sum::<f64>()).collect::<Vec<_>>();
+            values.extend((0..palette.tubes.len()).map(|tube| (0..9).map(|i| volumes[i] as f64 * c.wet.lat[i].parts.iter().filter(|p| p.0 == tube).map(|p| p.1 as f64).sum::<f64>()).sum::<f64>()));
+            values
+        };
+        let before = inventory(&c, &[20.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let after_volumes = [15.0, 15.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        c.transport_settled((0, 0, 3, 3), &[20.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], &after_volumes, &[(0, 1, 5.0)], &mut [0.0; 9]);
+        for (a, b) in before.iter().zip(inventory(&c, &after_volumes)) {
+            assert!((a - b).abs() < 1e-6 * a.abs().max(1.0), "{a} -> {b}");
+        }
+    }
+
+    #[test]
+    fn settling_transfers_surface_oil_and_keeps_the_packed_layer() {
+        let mut c = Canvas::new(3, 1.0, [1.0; 3]).with_engine(9).with_drain(true);
+        let paint = Paint::body(hex("#405070"));
+        let add = [20.0, 10.0, 10.0];
+        for (i, oil, packed) in [(0, 0.8, 0.5), (1, 0.7, 0.0), (2, 0.9, 0.5)] {
+            c.wet.lat[i] = paint.latent();
+            c.wet.hide[i] = paint.prop();
+            c.wet.hide[i][4] = oil;
+            c.wet.hide[i][5] = crate::wet::PACKED_OIL;
+            c.wet.hide[i][6] = 0.6;
+            c.wet.hide[i][7] = packed;
+        }
+        let mut oil = [0.0; 3];
+        c.transport_settled((0, 0, 3, 1), &add, &[15.0, 15.0, 10.0], &[(0, 1, 5.0)], &mut oil);
+        for (i, bulk, top, packed) in [(0, 11.0 / 15.0, 1.0, 10.0), (1, 0.8, 0.8, 0.0), (2, 0.9, 1.2, 5.0)] {
+            let hd = &c.wet.hide[i];
+            assert!((hd[4] - bulk).abs() < 1e-6, "bulk oil at {i}: {}", hd[4]);
+            assert!((oil[i] - top).abs() < 1e-6, "surface oil at {i}: {}", oil[i]);
+            assert!((hd[7] * [15.0, 15.0, 10.0][i] - packed).abs() < 1e-6, "packed paint at {i}");
+        }
+
+        let t = [14.0, 15.0, 11.0];
+        c.transport_settled((0, 0, 3, 1), &[15.0, 15.0, 10.0], &t, &[(0, 2, 3.0), (2, 0, 2.0)], &mut oil);
+        for (i, bulk, top, packed) in [(0, 10.25 / 14.0, 1.0625, 10.0), (1, 0.8, 0.8, 0.0), (2, 9.75 / 11.0, 1.125, 5.0)] {
+            let hd = &c.wet.hide[i];
+            assert!((hd[4] - bulk).abs() < 1e-6, "bulk oil at {i}: {}", hd[4]);
+            assert!((oil[i] - top).abs() < 1e-6, "surface oil at {i}: {}", oil[i]);
+            assert!((hd[7] * t[i] - packed).abs() < 1e-6, "packed paint at {i}");
+        }
+        let total: f32 = t.iter().enumerate().map(|(i, v)| v * c.wet.hide[i][4]).sum();
+        assert!((total - 32.0).abs() < 1e-5, "total oil: {total}");
+    }
+
+    #[test]
+    fn untouched_relief_does_not_depend_on_wait_partition() {
+        for (size, mm) in [(128, 700.0), (400, 80.0)] {
+            let mut c = Canvas::new(size, 1.0, [0.45; 3]).with_engine(9).with_size_mm(mm).with_drain(true).with_glaze_film(true);
+            for (x, um) in [(220.0, 25.0f32), (500.0, 76.2), (780.0, 254.0)] {
+                let mut knife = crate::Knife::new(260.0);
+                knife.load(Paint::new([0.45; 3], 0.9, 0.8), 1.0);
+                let pressure = 1.0 - (um / 300.0).powf(2.0 / 3.0);
+                c.knife(&mut knife, &[(x, 100.0), (x, 900.0)], (pressure, pressure), Some(0.0), true, 0.0);
+            }
+            c.wait(0.0);
+            let mut dry = c.clone();
+            dry.dry();
+            let total = dry.clock() as f32 * 1.1;
+            for share in [0.25, 0.6, 1.0] {
+                let mut single = c.clone();
+                single.wait(total * share);
+                for n in [10, 100] {
+                    let mut split = c.clone();
+                    for step in 0..n {
+                        split.wait(total * share / n as f32);
+                        if step == n / 2 {
+                            let mut bytes = Vec::new();
+                            split.write_state(&mut bytes, "").unwrap();
+                            split = Canvas::read_state(&mut &bytes[..]).unwrap().0;
+                        }
+                    }
+                    for (i, (a, b)) in single.wet_surface().iter().zip(split.wet_surface()).enumerate() {
+                        assert!((a - b).abs() <= 1e-3, "{size}px, share {share}, {n} waits, pixel {i}: {a} vs {b}");
+                    }
+                    if share == 1.0 {
+                        assert_eq!(single.height, split.height);
+                        assert_eq!(single.film, split.film);
+                        assert_eq!(single.height, dry.height);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn covers_stay_above_dry_paint_without_inventing_peaks() {
+        let mut base = Canvas::new(384, 1.0, [0.45; 3]).with_engine(9).with_size_mm(48.0);
+        for pass in 0..3 {
+            let mut held = Held::new(Tool::hog_flat(200.0), 17 + pass).with_engine(9);
+            held.load(Paint::new([0.45; 3], 0.9, 1.0), 1.0);
+            base.drag(&mut held, &Gesture::line((200.0, 490.0 + pass as f32 * 5.0), (800.0, 490.0 + pass as f32 * 5.0)).ramps(0.0, 0.0).shake(0.0), None);
+        }
+        for _ in 0..2000 {
+            base.wait(60.0);
+            if base.wet.vol.iter().all(|v| *v < 1e-5) {
+                break;
+            }
+        }
+        base.dry();
+        assert!(base.height.iter().any(|h| *h > 500.0));
+        for gap in [5.0f32, 120.0] {
+            let mut c = base.clone();
+            let mut knife = crate::Knife::new(260.0);
+            knife.load(Paint::new([0.45; 3], 0.9, 0.1), 1.0);
+            let p = 1.0 - (gap / 300.0).powf(2.0 / 3.0);
+            c.knife(&mut knife, &[(300.0, 500.0), (700.0, 500.0)], (p, p), Some(std::f32::consts::FRAC_PI_2), true, 0.0);
+            let fresh = c.wet_surface();
+            let ceiling = fresh.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            c.dry();
+            for (i, ((wet, baked), old)) in fresh.iter().zip(&c.height).zip(&base.height).enumerate() {
+                assert!(wet >= old && baked >= old, "gap {gap}, pixel {i}: old {old}, wet {wet}, baked {baked}");
+                assert!(*baked <= ceiling + 1e-3, "gap {gap}, pixel {i}: {baked} exceeds fresh maximum {ceiling}");
+            }
+        }
+        let mut c = Canvas::new(384, 1.0, [0.45; 3]).with_engine(9).with_size_mm(48.0);
+        for (i, h) in c.height.iter_mut().enumerate() {
+            *h = 100.0 + 100.0 * (std::f32::consts::TAU * (i % 384) as f32 * 0.125 / 0.5).sin();
+        }
+        let old = c.height.clone();
+        let film = c.settle_for((0, 0, 384, 384), &vec![2.0; old.len()], &vec![1.0; old.len()], &vec![SET_TIME; old.len()], true, None);
+        for (new, old) in c.height.iter().zip(&old) {
+            assert!(new >= old, "a 2 µm cover cannot remove a dry sine ridge: {old} -> {new}");
+        }
+        let mean = film.iter().map(|v| *v as f64).sum::<f64>() / film.len() as f64;
+        assert!((mean - 2.0).abs() < 1e-5, "cover volume: {mean}");
+    }
+
+    #[test]
+    fn settling_conserves_each_colorant_in_overlapping_knife_marks() {
+        let mut p = crate::Palette::new("drying", crate::palette::catalog());
+        p.engine = 9;
+        p.glaze_film = true;
+        p.carried_paint = true;
+        let tube = |name| p.tubes.iter().position(|t| t.name == name).unwrap();
+        let mut c = Canvas::new(400, 1.0, [1.0; 3]).with_engine(9).with_drain(true).with_glaze_film(true);
+        let mut k = crate::Knife::new(200.0);
+        k.load(p.pile(vec![(tube("Prussian blue"), 1.0)]).paint(0.9), 1.0);
+        c.knife(&mut k, &[(420.0, 250.0), (420.0, 750.0)], (0.45, 0.45), Some(0.0), true, 0.1);
+        k.wipe();
+        k.load(p.pile(vec![(tube("lead white"), 1.0)]).paint(0.9), 1.0);
+        c.knife(&mut k, &[(580.0, 350.0), (580.0, 650.0)], (0.9, 0.9), Some(0.0), true, 0.9);
+        let inventory = |c: &Canvas, coats: &[f32]| {
+            let mut values = (0..crate::wet::LAT).map(|pig| coats.iter().enumerate().map(|(i, &v)| {
+                v as f64 * c.wet.lat[i][pig] as f64 * c.wet.hide[i][0] as f64
+                    / crate::mixer::scattering9(&c.wet.lat[i]).max(1e-9) as f64
+            }).sum::<f64>()).collect::<Vec<_>>();
+            values.extend((0..p.tubes.len()).map(|tube| coats.iter().enumerate().map(|(i, &v)| {
+                v as f64 * c.wet.lat[i].parts.iter().filter(|p| p.0 == tube).map(|p| p.1 as f64).sum::<f64>()
+            }).sum::<f64>()));
+            values
+        };
+        let before = inventory(&c, &c.wet.vol);
+        let volume = c.wet.vol.iter().map(|&v| v as f64).sum::<f64>();
+        let old = c.film.clone();
+        c.dry();
+        let film: Vec<_> = c.film.iter().zip(old).map(|(a, b)| a - b).collect();
+        let after = inventory(&c, &film);
+        for (pig, (&a, &b)) in before.iter().zip(&after).enumerate() {
+            assert!((a - b).abs() <= a.abs() * 1e-5 + 1e-6, "colorant {pig}: {a:.8} -> {b:.8}");
+        }
+        let baked = film.iter().map(|&v| v as f64).sum::<f64>();
+        assert!((volume - baked).abs() <= volume * 1e-6, "volume: {volume} -> {baked}");
+
+        let mut c = Canvas::new(3, 1.0, [1.0; 3]).with_engine(9).with_drain(true);
+        let mut add = vec![0.0; 9];
+        for (i, name, depth) in [(0, "Prussian blue", 20.0), (1, "lead white", 10.0), (3, "vermilion", 20.0)] {
+            let paint = p.pile(vec![(tube(name), 1.0)]).paint(0.9);
+            c.wet.vol[i] = depth / COAT_UM;
+            c.wet.lat[i] = paint.latent();
+            c.wet.hide[i] = paint.prop();
+            c.wet.hide[i][7] = 0.2;
+            add[i] = depth;
+        }
+        let before = inventory(&c, &c.wet.vol);
+        let mut t = add.clone();
+        t[0] = 15.0;
+        t[1] = 20.0;
+        t[3] = 15.0;
+        c.transport_settled((0, 0, 3, 3), &add, &t, &[(0, 1, 10.0), (3, 0, 5.0)], &mut [0.0; 9]);
+        let after = inventory(&c, &t.iter().map(|t| t / COAT_UM).collect::<Vec<_>>());
+        for (pig, (&a, &b)) in before.iter().zip(&after).enumerate() {
+            assert!((a - b).abs() <= a.abs() * 1e-5 + 1e-6, "2D colorant {pig}: {a:.8} -> {b:.8}");
+        }
+        for i in [0, 1, 3] {
+            assert!((t[i] * c.wet.hide[i][7] - add[i] * 0.2).abs() < 1e-6, "packed paint at {i}");
+        }
     }
 
     #[test]

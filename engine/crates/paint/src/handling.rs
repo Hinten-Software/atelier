@@ -985,10 +985,11 @@ impl Canvas {
         if hd.blender && self.blend_feather {
             self.receptive = Some(self.receptive(&tool));
         }
+        let engine = self.engine;
         self.paint_pass(pass, hd.dip_with.is_some(), |surf, ti, first_id| {
             // (a blender lays back paint it lifted: it mixes as it always did)
             let surf = if hd.blender { crate::bristle::Surf { skim: 0.0, ..surf } } else { surf };
-            let mut held = Held::new(tool.clone(), seed ^ 0x5EED ^ (ti as u64).wrapping_mul(0x9E37_79B9));
+            let mut held = Held::new(tool.clone(), seed ^ 0x5EED ^ (ti as u64).wrapping_mul(0x9E37_79B9)).with_engine(engine);
             let mut scratch = Vec::new();
             let mut b: crate::bristle::Bounds = None;
             let mut k = 0u32;
@@ -998,7 +999,7 @@ impl Canvas {
                     first_id.wrapping_add(k - 1)
                 });
                 if p.fresh {
-                    held = Held::new(p.tool.clone().unwrap_or_else(|| tool.clone()), seed ^ 0xF4E5 ^ (p.pts[0].0.to_bits() as u64) << 20 ^ p.pts[0].1.to_bits() as u64);
+                    held = Held::new(p.tool.clone().unwrap_or_else(|| tool.clone()), seed ^ 0xF4E5 ^ (p.pts[0].0.to_bits() as u64) << 20 ^ p.pts[0].1.to_bits() as u64).with_engine(engine);
                 }
                 if let Some(paint) = p.dip.clone() {
                     if hd.blender {
@@ -1646,13 +1647,7 @@ mod wet_edges {
     /// style's blend over x 250..550 (the band and 150 units of the dried
     /// paint beside it): the luminance just past the band's edge, 50 to 150
     /// units past it, and of the dried paint there before the blend.
-    fn blend_off_the_edge(feather: bool) -> (f32, f32, f32) {
-        let mut c = canvas(feather, false);
-        let ground = rect(&c, 100.0, 100.0, 900.0, 900.0);
-        fill(&mut c, &ground, "#1c2430", 1);
-        c.dry();
-        let band = rect(&c, 300.0, 300.0, 400.0, 700.0);
-        fill(&mut c, &band, "#f2ece0", 2);
+    fn blend_off_the_edge(mut c: Canvas) -> (f32, f32, f32) {
         let dried = lum(&c, 450.0, 550.0);
         let region = rect(&c, 250.0, 300.0, 550.0, 700.0);
         c.work(&region, &Style::oil().blend().unwrap(), 3);
@@ -1665,10 +1660,16 @@ mod wet_edges {
     /// across the dried paint to the mask's edge.
     #[test]
     fn a_blend_feathers_a_wet_edge_onto_dry_paint_and_stops() {
-        let (edge, far, dried) = blend_off_the_edge(true);
+        let mut c = canvas(false, false);
+        let ground = rect(&c, 100.0, 100.0, 900.0, 900.0);
+        fill(&mut c, &ground, "#1c2430", 1);
+        c.dry();
+        let band = rect(&c, 300.0, 300.0, 400.0, 700.0);
+        fill(&mut c, &band, "#f2ece0", 2);
+        let (edge, far, dried) = blend_off_the_edge(c.clone().with_blend_feather(true));
         assert!(edge > dried + 0.05, "feathered: the edge {edge}, the dried paint {dried}");
         assert!(far < dried + 0.01, "feathered: 50 to 150 units out {far}, the dried paint {dried}");
-        let (_, far, dried) = blend_off_the_edge(false);
+        let (_, far, dried) = blend_off_the_edge(c);
         assert!(far > dried + 0.08, "unfeathered: 50 to 150 units out {far}, the dried paint {dried}");
     }
 
@@ -1710,14 +1711,15 @@ mod wet_edges {
     /// as it did without.
     #[test]
     fn a_blend_still_works_a_thin_wet_film_on_dry_paint() {
+        let mut c = canvas(false, false);
+        let ground = rect(&c, 100.0, 100.0, 900.0, 900.0);
+        fill(&mut c, &ground, "#e4d8bc", 1);
+        c.dry();
+        let film = rect(&c, 250.0, 250.0, 750.0, 750.0);
+        let st = Style::oil();
+        c.work(&film, &st.scumble().color(|_, _| hex("#3a3040")).paint(0.6, 0.5).load(0.3).coverage(0.8), 2);
         let spread = |feather: bool| {
-            let mut c = canvas(feather, false);
-            let ground = rect(&c, 100.0, 100.0, 900.0, 900.0);
-            fill(&mut c, &ground, "#e4d8bc", 1);
-            c.dry();
-            let film = rect(&c, 250.0, 250.0, 750.0, 750.0);
-            let st = Style::oil();
-            c.work(&film, &st.scumble().color(|_, _| hex("#3a3040")).paint(0.6, 0.5).load(0.3).coverage(0.8), 2);
+            let mut c = c.clone().with_blend_feather(feather);
             let sd = |c: &Canvas| {
                 let (seen, w, s) = (c.seen(), c.f.w, c.f.scale);
                 let px = |u: f32| (u * s) as usize;

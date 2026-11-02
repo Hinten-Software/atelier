@@ -393,6 +393,41 @@ def test_background_companions_update_without_new_log_bytes(home, server):
     assert again["updates"] == []
 
 
+@pytest.mark.parametrize("already_failed", [False, True])
+def test_failed_background_companions_publish_a_terminal_update(home, server, already_failed):
+    _, studio, log = home
+    colour = png_of("red")
+    path = "out/easel/painting/new.png"
+    marker = studio / "out/easel/painting/.display/new.png"
+    marker.parent.mkdir(parents=True)
+    marker.write_bytes(b"failed\n" if already_failed else b"pending\n")
+    rows = look("new", colour).splitlines()
+    response = json.loads(rows[1])
+    response["message"]["content"].insert(0, {"type": "text", "text": path})
+    log.write_text(start(str(studio)) + look("old", png_of("blue")) + rows[0] + "\n" + line(response))
+    initial = json.loads(server(f"/api/events?p={PAINTER}")[1])
+    index = next(i for i, event in enumerate(initial["events"]) if event.get("img") == 1)
+    if already_failed:
+        event = initial["events"][index]
+    else:
+        assert initial["events"][index]["display_pending"] is True
+        marker.write_bytes(b"failed\n")
+        updated = json.loads(server(f"/api/events?p={PAINTER}&since={initial['total']}&epoch={initial['epoch']}&u={initial['nupdates']}")[1])
+        assert updated["events"] == []
+        assert [i for i, _ in updated["updates"]] == [index]
+        event = updated["updates"][0][1]
+        initial = updated
+    assert event["display_pending"] is False
+    assert event["display_failed"] is True
+    assert S.glance([str(log)])["look"] == 1
+    assert not any(event.get(light) for light in S.DISPLAY_LIGHTS)
+    again = json.loads(server(f"/api/events?p={PAINTER}&since={initial['total']}&epoch={initial['epoch']}&u={initial['nupdates']}")[1])
+    assert again["updates"] == []
+    assert server(f"/img?p={PAINTER}&i=1") == (200, colour)
+    for light in S.DISPLAY_LIGHTS:
+        assert server(f"/img?p={PAINTER}&i=1&{light}=1")[0] == 404
+
+
 @pytest.mark.parametrize("light", S.DISPLAY_LIGHTS)
 def test_reading_a_saved_survey_tile_gets_its_gallery_companion(home, server, light):
     import base64
@@ -632,6 +667,44 @@ def test_a_painter_working_elsewhere_exports_as_live(home, monkeypatch):
         assert session["active"] is active
 
 
+@pytest.mark.parametrize("cached", [False, True])
+def test_export_repairs_0600_to_0644_with_unchanged_content(home, monkeypatch, cached):
+    import export_static as E
+    root, studio, log = home
+    monkeypatch.setenv("HOME", str(root))
+    monkeypatch.setattr(S, "SESSIONS", str(root / ".pi/agent/sessions"))
+    monkeypatch.setattr(S, "RUNS", str(root / "run/studios.json"))
+    monkeypatch.setattr(S, "_lanes", {"at": 0.0, "map": {}})
+    monkeypatch.setattr(E, "EXPORTED", {})
+    log.write_text(start(str(studio)) + call("c1", "canvas{}") + result("c1", "ok · chunk 1")
+                   + look("l1", png_of("blue")))
+    out = root / "export"
+    E.export(str(out))
+    files = [out / rel for rel in E.owned(str(out))] + [out / E.MARKER]
+    before = {path: path.read_bytes() for path in files}
+    view = out / "data" / PAINTER / "v/0.jpg"
+    view_mtime = view.stat().st_mtime_ns
+    for path in files:
+        path.chmod(0o600)
+    unowned = out / "keep.txt"
+    unowned.write_bytes(b"not exported")
+    unowned.chmod(0o600)
+    if not cached:
+        E.EXPORTED.clear()
+    previous_umask = os.umask(0o077)
+    try:
+        E.export(str(out))
+    finally:
+        os.umask(previous_umask)
+    for path, data in before.items():
+        assert path.read_bytes() == data
+        assert path.stat().st_mode & 0o7777 == 0o644, path
+    if cached:
+        assert view.stat().st_mtime_ns == view_mtime
+    assert unowned.read_bytes() == b"not exported"
+    assert unowned.stat().st_mode & 0o7777 == 0o600
+
+
 def test_a_second_export_in_one_process_skips_unchanged_looks(home, monkeypatch):
     import export_static as E
     root, studio, log = home
@@ -772,6 +845,45 @@ def looks_at_once(*calls):
 
 def say(text):
     return line({"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}})
+
+
+@pytest.mark.parametrize("suffix,said", [
+    ("", True),
+    (say(" "), True),
+    (result("l1", "ok"), True),
+    (line({"type": "compaction", "summary": "old notes"}), True),
+    (line({"type": "thinking_level_change", "thinkingLevel": "high"}), True),
+    (line({"type": "message", "message": {"role": "assistant", "content": [
+        {"type": "text", "text": "Words"}, {"type": "thinking", "thinking": "Next"}]}}), False),
+    (line({"type": "message", "message": {"role": "assistant", "content": [
+        {"type": "text", "text": "Words"}, {"type": "toolCall", "id": "c2", "name": "status"}]}}), False),
+    (call("c2", "canvas{}") + say("Words"), True),
+    (look("l2", b"picture"), False),
+    (line({"type": "message", "message": {"role": "user", "content": "Continue"}}), False),
+    (line({"type": "model_change", "modelId": "gpt-6.1-sol"}), False),
+    (line({"type": "compaction", "summary": "## The canvas clock\n\n- Latest painting time the easel printed: day 1, 10:00\n"}), False),
+])
+def test_local_picker_speech_flag_tracks_the_last_emitted_event(home, server, monkeypatch, suffix, said):
+    import time
+    _, studio, log = home
+    monkeypatch.setattr(S, "lanes", dict)
+    old = time.time() - 300
+    timestamp = S.datetime.fromtimestamp(old).astimezone().isoformat()
+    log.write_text((start(str(studio)) + look("l1", png_of("blue")) + say("**Blue Pond**\n\nDone.")).replace(
+        "2026-09-29T10:00:00.000Z", timestamp))
+    os.utime(log, (old, old))
+    first, = json.loads(server("/api/sessions")[1])
+    assert first["outcome"] is None
+    assert first["mtime"] == pytest.approx(old)
+    assert first.get("said") is True
+    with log.open("a") as fh:
+        fh.write(suffix)
+    log.with_name("2026-09-30T10-00-00-000Z_s2.jsonl").touch()
+    session, = json.loads(server("/api/sessions")[1])
+    assert session["said"] is said
+    assert str(log) not in S._cache
+    events = S.stream("p:" + PAINTER, [str(log)])["events"]
+    assert session["said"] == (events[-1]["kind"] == "say")
 
 
 def test_a_held_knife_is_never_the_picker_fallback(home):
@@ -1340,6 +1452,65 @@ def test_the_event_slider_is_named_and_described_by_its_position():
     scrub = re.search(r'<input type="range" id="scrub"[^>]*>', html).group(0)
     assert re.search(r'aria-label="[^"]+"', scrub)
     assert 'aria-describedby="pos"' in scrub and 'id="pos"' in html
+
+
+def test_rewound_event_total_refreshes_after_a_shorter_epoch_and_append():
+    lines = open(os.path.join(HERE, "index.html")).readlines()
+    functions = []
+    for name in ("reset", "poll", "show", "status"):
+        first = next(i for i, line in enumerate(lines)
+                     if line.startswith((f"function {name}(", f"async function {name}(")))
+        last = first if lines[first].rstrip().endswith("}") else next(
+            i for i in range(first + 1, len(lines)) if lines[i].rstrip() == "}")
+        functions.append("".join(lines[first:last + 1]))
+    script = r"""
+const assert = require('node:assert/strict');
+const elements = new Map(), noop = () => {};
+const $ = id => {
+  if (!elements.has(id)) elements.set(id, {classList:{toggle:noop}, appendChild:noop, querySelector:() => ({})});
+  return elements.get(id);
+};
+const document = {createDocumentFragment:() => ({})};
+const stop = noop, clearCode = noop, noPicture = noop, stripEnd = noop, ticks = noop,
+  refreshLiveCode = noop, warmSoon = noop, codeAt = noop, journal = noop, journalScroll = noop,
+  doing = noop, ago = noop, outcomeLabel = noop, qOf = noop, easelClockAt = noop;
+const P = () => 'fixture', stopped = () => true, sittingAt = () => 0, paintedFor = () => 0, fmt = String;
+let renders = 0;
+const pictures = () => renders++;
+let Q = 'p=fixture', gen = 0, busy = false, STATIC = false, HOSTED = false,
+  epoch = null, events = [], nUpd = 0, pos = 0, live = true, playing = null,
+  sitStarts = [], nSittings = 0, allSessions = [], sessionsLoaded = false,
+  disconnected = false, response;
+const fetch = async () => ({ok:true, headers:{get:() => null}, json:async () => structuredClone(response)});
+""" + "\n".join(functions) + r"""
+(async () => {
+  for (STATIC of [false, true]) {
+    reset(); live = true;
+    const fixture = Array.from({length:16}, (_, i) => ({kind:'say', text:String(i), ts:'2026-10-06T10:00:00Z'}));
+    response = {epoch:1, sittings:1, events:fixture};
+    await poll();
+    live = false; show(14);
+    assert.equal($('pos').textContent, '15/16');
+    response = {epoch:2, sittings:1, events:fixture.slice(0, 2)};
+    lastStatic = 0; await poll();
+    assert.equal($('pos').textContent, '2/2');
+    assert.equal(pos, 1);
+    assert.equal($('scrub').max, 1);
+    const previousRenders = renders;
+    response.events = STATIC ? fixture.slice(0, 3) : fixture.slice(2, 3);
+    lastStatic = 0; await poll();
+    assert.equal(events.length, 3);
+    assert.equal($('scrub').max, 2);
+    assert.equal($('scrub').value, 1);
+    assert.equal(pos, 1);
+    assert.equal(live, false);
+    assert.equal(renders, previousRenders, 'appending while rewound does not redraw the selection');
+    assert.equal($('pos').textContent, '2/3');
+  }
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+    result = subprocess.run(["node", "-"], input=script, text=True, capture_output=True, timeout=10)
+    assert result.returncode == 0, result.stderr
 
 
 def test_ask_critic_shows_the_note_and_the_whole_reply(home, server):
