@@ -16,6 +16,7 @@ harness/painter/easel-client.ts     easel-mcp/src/upstream/easel-client.ts
 harness/painter/journal.ts          easel-mcp/src/upstream/journal.ts
 harness/painter/context-images.ts   easel-mcp/src/upstream/context-images.ts
 harness/painter/easel-tools.ts      easel-mcp/src/upstream/easel-tools.ts
+harness/painter/note-publication.ts easel-mcp/src/upstream/note-publication.ts
 notes/thinner/baseline/old_files    engine/notes/thinner/baseline/old_files
 LICENSE                             LICENSE-claude-paint
 THIRD_PARTY_NOTICES.md              THIRD_PARTY_NOTICES.md
