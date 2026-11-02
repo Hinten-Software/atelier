@@ -199,7 +199,7 @@ The tube box:
 | zinc white | zinc oxide | 0.6 | 0.6 | 1.0 | 0.35 |
 | lead-tin yellow | lead-tin oxide | 0.85 | 0.75 | 0.6 | 2.0 |
 | Naples yellow | lead antimonate | 0.85 | 0.75 | 0.6 | 1.6 |
-| lemon chrome | pale lead chromate with lead sulfate | 0.8 | 0.7 | 0.8 | 1.8 |
+| lemon chrome | pale lead chromate with lead sulfate | 0.8 | 0.7 | 0.9998816 | 1.8 |
 | pale cadmium | cadmium sulfide, a pale grade | 0.85 | 0.7 | 1.1 | 0.9 |
 | deep cadmium | cadmium sulfide, a deep grade | 0.9 | 0.6 | 1.2 | 0.9 |
 | cadmium yellow | cadmium sulfide | 0.85 | 0.7 | 1.1 | 0.9 |
@@ -210,9 +210,9 @@ The tube box:
 | raw sienna | sienna earth, unroasted | 0.4 | 0.5 | 0.7 | 1.2 |
 | orange chrome | basic lead chromate | 0.88 | 0.75 | 0.9 | 1.8 |
 | Mars orange | synthetic iron oxide, an orange grade | 0.5 | 0.7 | 1.1 | 1.1 |
-| red lead | lead tetroxide | 0.85 | 0.8 | 0.8 | 2.2 |
-| orange vermilion | mercuric sulfide, a yellower grade | 0.9 | 0.75 | 1.0 | 0.4 |
-| Chinese vermilion | mercuric sulfide, a deeper grade | 0.9 | 0.75 | 1.0 | 0.4 |
+| red lead | lead tetroxide | 0.85 | 0.8 | 0.9766364 | 2.2 |
+| orange vermilion | mercuric sulfide, a yellower grade | 0.9 | 0.75 | 0.989209 | 0.4 |
+| Chinese vermilion | mercuric sulfide, a deeper grade | 0.9 | 0.75 | 0.989209 | 0.4 |
 | cadmium red | cadmium sulfoselenide | 0.9 | 0.7 | 1.1 | 0.9 |
 | Mars red | synthetic iron oxide | 0.9 | 0.7 | 1.2 | 1.1 |
 | Indian red | nearly pure ferric oxide | 0.92 | 0.7 | 1.2 | 1.0 |
@@ -224,16 +224,16 @@ The tube box:
 | bone brown | bone roasted until brown | 0.6 | 0.6 | 0.9 | 0.3 |
 | bitumen | asphaltum | 0.12 | 0.3 | 0.7 | 0.15 |
 | cerulean blue | cobalt stannate | 0.8 | 0.7 | 0.6 | 1.4 |
-| ultramarine blue | synthetic ultramarine | 0.3 | 0.5 | 1.1 | 0.95 |
+| ultramarine blue | synthetic ultramarine | 0.3 | 0.5 | 1.0021298 | 0.95 |
 | ultramarine ash | natural ultramarine, a pale last extraction | 0.15 | 0.5 | 0.3 | 0.95 |
 | Antwerp blue | Prussian blue on an alumina base | 0.4 | 0.45 | 1.6 | 1.6 |
-| viridian | hydrated chromium oxide | 0.3 | 0.5 | 0.9 | 1.0 |
-| emerald green | copper aceto-arsenite | 0.6 | 0.6 | 0.6 | 1.6 |
+| viridian | hydrated chromium oxide | 0.3 | 0.5 | 1.0000236 | 1.0 |
+| emerald green | copper aceto-arsenite | 0.6 | 0.6 | 1.0588969 | 1.6 |
 | cobalt violet | cobalt phosphate or arsenate | 0.35 | 0.55 | 0.35 | 1.4 |
 | strontium yellow | strontium chromate | 0.55 | 0.65 | 0.8 | 1.0 |
 | barium yellow | barium chromate (lemon yellow) | 0.45 | 0.7 | 0.9 | 1.0 |
 | zinc yellow | potassium zinc chromate | 0.4 | 0.6 | 0.65 | 0.8 |
-| carmine lake | carminic acid (cochineal) on alumina | 0.1 | 0.3 | 1.2 | 0.4 |
+| carmine lake | carminic acid (cochineal) on alumina | 0.1 | 0.3 | 1.0044435 | 0.4 |
 | yellow lake | flavonoid dye (weld, quercitron) on alumina and chalk | 0.08 | 0.35 | 0.5 | 0.4 |
 | vine black | charcoal of vine twigs | 0.75 | 0.45 | 0.6 | 0.9 |
 
