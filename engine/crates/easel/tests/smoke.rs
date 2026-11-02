@@ -9,6 +9,7 @@ use std::process::{Command, Output};
 
 #[path = "../../paint/tests/support/image_tolerance.rs"]
 mod image_tolerance;
+mod support;
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_TARGET_TMPDIR")).join("easel-smoke")
@@ -34,7 +35,7 @@ fn fails(args: &[&str]) -> String {
 struct Closing;
 impl Drop for Closing {
     fn drop(&mut self) {
-        let _ = easel(&["-s", "sketch-smoke", "close"]);
+        support::stop_servers(&root());
     }
 }
 
@@ -65,7 +66,8 @@ fn a_short_session_at_the_easel() {
     let r = ok(&["-s", "sketch-smoke", "do", CANVAS]);
     assert!(r.contains("ok · chunk 1"), "{r}");
     let r = ok(&["-s", "sketch-smoke", "do", PAINT]);
-    assert!(r.contains("pile(lead white 6, yellow ochre 2, vermilion 0.3; medium 0.2)"), "{r}");
+    assert!(r.contains("pile(lead white 6 (72%), yellow ochre 2 (24%), vermilion 0.3 (4%); medium 0.2)"), "{r}");
+    assert!(r.contains("pile(lead white 4 (80%), cobalt blue 1 (20%); medium 0.35)"), "{r}");
     assert!(r.contains("day 2, "), "wait returns the time of day: {r}");
     assert!(r.contains("ok · chunk 2"), "{r}");
 

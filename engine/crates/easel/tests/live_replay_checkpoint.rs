@@ -1,7 +1,9 @@
+use sha2::Digest;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+mod support;
 
 const CHUNKS: [&str; 12] = [
     r#"canvas{size=300, aspect=5, linen={16,14}, seed=3, ground={{pile={{"lead white",6},{"raw umber",1}}, um=50, apply="roller"}}}"#,
@@ -32,6 +34,7 @@ struct Studio {
     child: Option<Child>,
     identity: &'static str,
     state_store: bool,
+    name: &'static str,
 }
 
 impl Studio {
@@ -50,14 +53,14 @@ impl Studio {
         } else {
             PathBuf::from(env!("CARGO_BIN_EXE_easel"))
         };
-        Self { root, binary, child: None, identity: "original", state_store: false }
+        Self { root, binary, child: None, identity: "original", state_store: false, name: "painting" }
     }
 
     fn command(&self) -> Command {
         let mut command = Command::new(&self.binary);
         command.current_dir("/")
             .env("EASEL_ROOT", &self.root)
-            .env("EASEL_SESSION", "painting")
+            .env("EASEL_SESSION", self.name)
             .env("RAYON_NUM_THREADS", "2")
             .env("PAINT_LIVE_CHECKPOINT_TEST_IDENTITY", self.identity)
             .env_remove("EASEL_WIDTH")
@@ -79,15 +82,15 @@ impl Studio {
         String::from_utf8(output.stdout).unwrap()
     }
 
-    fn dir(&self) -> PathBuf { self.root.join("out/easel/painting") }
-    fn log(&self) -> PathBuf { self.root.join("paintings/lua/painting.lua") }
+    fn dir(&self) -> PathBuf { self.root.join("out/easel").join(self.name) }
+    fn log(&self) -> PathBuf { self.root.join("paintings/lua").join(format!("{}.lua", self.name)) }
     fn bytes(&self, name: &str) -> Vec<u8> { std::fs::read(self.dir().join(name)).unwrap() }
 
     fn start(&mut self) {
         assert!(self.child.is_none());
         std::fs::create_dir_all(self.dir()).unwrap();
         let log = std::fs::File::create(self.dir().join("server.log")).unwrap();
-        self.child = Some(self.command().args(["serve", "painting"])
+        self.child = Some(self.command().args(["serve", self.name])
             .stdin(Stdio::null()).stdout(log.try_clone().unwrap()).stderr(log)
             .spawn().unwrap());
         let chunks = std::fs::read_to_string(self.log()).map(|source| source.lines().filter(|line| line.starts_with("--@ chunk ")).count()).unwrap_or(0);
@@ -170,6 +173,7 @@ impl Drop for Studio {
             let _ = child.kill();
             let _ = child.wait();
         }
+        support::stop_servers(&self.root);
     }
 }
 
@@ -177,6 +181,86 @@ struct Batch {
     source: Vec<u8>,
     canvas: Vec<u8>,
     frames: Vec<(String, Vec<u8>)>,
+}
+
+#[test]
+fn the_first_chunk_is_checkpointed_and_a_two_chunk_crash_only_repaints_the_tail() {
+    let mut studio = Studio::new("early-crash", false);
+    studio.start();
+    studio.ok(&["do", CHUNKS[0]]);
+    assert!(studio.dir().join("replay.ckpt").is_file());
+    let checkpoint = studio.bytes("replay.ckpt");
+    studio.ok(&["do", &format!("{}\nmark(100)", CHUNKS[1])]);
+    assert_eq!(studio.bytes("replay.ckpt"), checkpoint);
+    studio.ok(&["save", "expected.png"]);
+    let source = std::fs::read(studio.log()).unwrap();
+    studio.kill();
+    studio.start();
+    let log = String::from_utf8(studio.bytes("server.log")).unwrap();
+    assert!(log.contains("reconstructed 1 chunks"), "{log}");
+    let repaint: Vec<_> = log.lines().filter(|line| line.starts_with("resuming chunk ")).collect();
+    assert_eq!(repaint, ["resuming chunk 2/2"], "{log}");
+    studio.ok(&["save", "actual.png"]);
+    assert_eq!(std::fs::read(studio.root.join("actual.png")).unwrap(), std::fs::read(studio.root.join("expected.png")).unwrap());
+    assert_eq!(std::fs::read(studio.log()).unwrap(), source);
+    assert_eq!(studio.bytes("committed.lua"), source);
+    studio.close();
+}
+
+#[test]
+fn a_missing_checkpoint_never_authorizes_a_chunk_zero_replay() {
+    let mut studio = Studio::new("missing-checkpoint", false);
+    studio.start();
+    for _ in 0..10 { studio.ok(&["do", "counter = (counter or 0) + 1"]); }
+    studio.kill();
+    std::fs::remove_file(studio.dir().join("replay.ckpt")).unwrap();
+    let source = std::fs::read(studio.log()).unwrap();
+    let frames = files(&studio.dir().join("hand-frames"));
+    let result = studio.cmd(&["open", "painting"]);
+    assert!(!result.status.success(), "missing checkpoint triggered automatic replay");
+    assert!(String::from_utf8_lossy(&result.stderr).contains("no checkpoint found; refusing resume"));
+    let log = String::from_utf8(studio.bytes("server.log")).unwrap();
+    assert!(!log.contains("resuming chunk "), "{log}");
+    assert!(!log.contains("replaying the full log"), "{log}");
+    assert_eq!(std::fs::read(studio.log()).unwrap(), source);
+    assert_eq!(studio.bytes("committed.lua"), source);
+    assert_files(&files(&studio.dir().join("hand-frames")), &frames);
+    assert!(!studio.cmd(&["status"]).status.success());
+    assert!(!studio.dir().join("replay.ckpt").exists());
+}
+
+#[test]
+fn live_open_refuses_obsolete_pigment_checkpoints_without_replaying() {
+    use sha2::{Digest, Sha256};
+    for format in 0..4 {
+        let mut studio = Studio::new(&format!("obsolete-pigment-{format}"), false);
+        studio.start();
+        for _ in 0..10 { studio.ok(&["do", "x = (x or 0) + 1"]); }
+        studio.close();
+        let obsolete = if format < 3 {
+            let mut bytes = [b"EASLRP01", b"EASLRP02", b"EASLRP03"][format].to_vec();
+            bytes.extend([0; 32]);
+            bytes
+        } else {
+            let bytes = studio.bytes("replay.ckpt");
+            assert_eq!(&bytes[..8], b"EASLRP04");
+            let mut payload = zstd::stream::decode_all(&bytes[48..]).unwrap();
+            payload[..8].copy_from_slice(&(paint::mixer::identity() ^ 1).to_le_bytes());
+            let mut changed = bytes[..48].to_vec();
+            changed.extend(zstd::stream::encode_all(payload.as_slice(), 1).unwrap());
+            let digest = Sha256::digest(&changed[40..]);
+            changed[8..40].copy_from_slice(&digest);
+            changed
+        };
+        std::fs::write(studio.dir().join("replay.ckpt"), obsolete).unwrap();
+        let output = studio.cmd(&["open", "painting"]);
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("obsolete pigment representation"), "{error}");
+        let log = String::from_utf8(studio.bytes("server.log")).unwrap();
+        assert!(!log.contains("resuming chunk"), "{log}");
+        assert!(!log.contains("replaying the full log"), "{log}");
+    }
 }
 
 struct Fixture {
@@ -245,9 +329,9 @@ fn assert_files(actual: &[(String, Vec<u8>)], expected: &[(String, Vec<u8>)]) {
 }
 
 fn assert_tail(log: &str) {
-    assert!(log.contains("reconstructed 10 chunks"), "{log}");
+    assert!(log.contains("reconstructed 11 chunks"), "{log}");
     let repaint: Vec<_> = log.lines().filter(|line| line.starts_with("resuming chunk ")).collect();
-    assert_eq!(repaint, ["resuming chunk 11/12", "resuming chunk 12/12"], "{log}");
+    assert_eq!(repaint, ["resuming chunk 12/12"], "{log}");
 }
 
 fn resume_matches_uninterrupted(tag: &str, painter: bool) {
@@ -276,8 +360,9 @@ fn resume_matches_uninterrupted(tag: &str, painter: bool) {
             assert_eq!(std::fs::read(resumed.log()).unwrap(), source);
             assert!(!resumed.root.join("out/easel/painting-scratch/hand-frames").exists());
         }
-        if i == 8 { assert!(!resumed.dir().join("replay.ckpt").exists()); }
-        if i == 9 { checkpoint = resumed.bytes("replay.ckpt"); }
+        if i == 0 { checkpoint = resumed.bytes("replay.ckpt"); }
+        if i == 9 { assert_eq!(resumed.bytes("replay.ckpt"), checkpoint); }
+        if i == 10 { checkpoint = resumed.bytes("replay.ckpt"); }
     }
     assert!(!checkpoint.is_empty());
     assert!(resumed.bytes("replay.ckpt") == checkpoint, "checkpoint changed before another ten commits");
@@ -326,8 +411,8 @@ fn painter_profile_uses_the_same_binary_checkpoint_and_hand_frames() {
 }
 
 #[test]
-fn invalid_checkpoint_falls_back_to_full_replay_and_matching_frames() {
-    for mode in ["corrupt", "identity", "missing-frame"] {
+fn invalid_checkpoint_requires_recovery_without_replaying_or_changing_frames() {
+    for mode in ["corrupt", "identity", "prefix", "missing-frame"] {
         let mut studio = Studio::new(mode, false);
         fixture().copy_into(&studio);
         assert!(!studio.bytes("replay.ckpt").is_empty());
@@ -335,19 +420,28 @@ fn invalid_checkpoint_falls_back_to_full_replay_and_matching_frames() {
             std::fs::write(studio.dir().join("replay.ckpt"), [0u8; 48]).unwrap();
         } else if mode == "missing-frame" {
             std::fs::remove_file(studio.dir().join("hand-frames/00001.png")).unwrap();
+        } else if mode == "prefix" {
+            let source = String::from_utf8(fixture().source.clone()).unwrap().replace("seed=3", "seed=4");
+            std::fs::write(studio.log(), &source).unwrap();
+            std::fs::write(studio.dir().join("committed.lua"), &source).unwrap();
         } else {
             studio.identity = "changed";
         }
-        studio.start();
+        let before = setup_files(&studio);
+        let source = std::fs::read(studio.log()).unwrap();
+        let result = studio.cmd(&["open", "painting"]);
+        assert!(!result.status.success(), "{mode}: recovery was silently authorized");
         let log = String::from_utf8(studio.bytes("server.log")).unwrap();
-        assert!(log.contains("replay checkpoint"), "missing fallback diagnostic: {log}");
+        assert!(log.contains("easel: fatal:"), "missing recovery diagnostic: {log}");
         let reason = match mode { "corrupt" => "unsupported format", "missing-frame" => "00001.png", _ => "differs" };
-        assert!(log.contains(reason), "missing {mode} fallback reason: {log}");
-        if mode != "missing-frame" { assert!(!log.contains("reconstructed 10 chunks"), "{log}"); }
+        assert!(log.contains(reason), "missing {mode} recovery reason: {log}");
+        if mode != "missing-frame" { assert!(!log.contains("reconstructed 11 chunks"), "{log}"); }
         let repaint: Vec<_> = log.lines().filter(|line| line.starts_with("resuming chunk ")).map(str::to_string).collect();
-        assert_eq!(repaint, (1..=12).map(|n| format!("resuming chunk {n}/12")).collect::<Vec<_>>(), "{log}");
-        studio.close();
-        studio.batch();
+        assert!(repaint.is_empty(), "{log}");
+        assert!(!log.contains("replaying the full log"), "{log}");
+        assert!(!studio.cmd(&["status"]).status.success());
+        assert_eq!(std::fs::read(studio.log()).unwrap(), source);
+        assert_files(&setup_files(&studio), &before);
     }
 }
 
@@ -371,7 +465,7 @@ fn cached_fixture_copies_are_byte_identical_and_mutation_isolated() {
 }
 
 #[test]
-fn an_unreplaceable_checkpoint_does_not_abort_full_replay_or_close() {
+fn an_unreplaceable_checkpoint_preserves_the_log_and_requires_recovery() {
     let mut studio = Studio::new("checkpoint-directory", false);
     std::fs::create_dir_all(studio.dir().join("replay.ckpt")).unwrap();
     std::fs::write(studio.dir().join("replay.ckpt/kept"), b"not a checkpoint").unwrap();
@@ -379,15 +473,138 @@ fn an_unreplaceable_checkpoint_does_not_abort_full_replay_or_close() {
     for n in 1..=12 { studio.ok(&["do", &format!("counter = {n}")]); }
     let source = std::fs::read(studio.log()).unwrap();
     studio.kill();
-    studio.start();
+    let result = studio.cmd(&["open", "painting"]);
+    assert!(!result.status.success());
     let log = String::from_utf8(studio.bytes("server.log")).unwrap();
     let repaint: Vec<_> = log.lines().filter(|line| line.starts_with("resuming chunk ")).map(str::to_string).collect();
-    assert_eq!(repaint, (1..=12).map(|n| format!("resuming chunk {n}/12")).collect::<Vec<_>>(), "{log}");
+    assert!(repaint.is_empty(), "{log}");
     assert!(log.contains("replay checkpoint"), "{log}");
-    studio.close();
+    assert!(!studio.cmd(&["status"]).status.success());
     assert_eq!(std::fs::read(studio.log()).unwrap(), source);
     assert_eq!(studio.bytes("committed.lua"), source);
     assert_eq!(studio.bytes("replay.ckpt/kept"), b"not a checkpoint");
+}
+
+#[test]
+fn failed_finalization_keeps_the_live_session_for_retry() {
+    for blocked in ["live.ckpt", "live.png", "hand-frames/00002.png"] {
+        let mut studio = Studio::new(&format!("close-{}", blocked.replace('/', "-")), false);
+        studio.name = "sketch";
+        studio.start();
+        studio.ok(&["do", CHUNKS[0]]);
+        let source = std::fs::read(studio.log()).unwrap();
+        let path = studio.dir().join(blocked);
+        std::fs::create_dir(&path).unwrap();
+        let result = studio.cmd(&["close"]);
+        assert!(!result.status.success(), "close succeeded despite blocked {blocked}");
+        let error = String::from_utf8_lossy(&result.stderr);
+        if blocked.starts_with("hand-frames/") { assert!(error.contains("final hand-time frame not saved"), "{error}"); }
+        assert!(studio.child.as_mut().unwrap().try_wait().unwrap().is_none());
+        assert!(studio.ok(&["status"]).starts_with("1 chunks"));
+        assert_eq!(std::fs::read(studio.log()).unwrap(), source);
+        std::fs::remove_dir(path).unwrap();
+        studio.close();
+        assert!(!studio.bytes("live.ckpt").is_empty());
+        assert!(!studio.bytes("live.png").is_empty());
+        let index = String::from_utf8(studio.bytes("hand-frames/frames.tsv")).unwrap();
+        assert_eq!(index.lines().filter(|line| line.ends_with("\tfinal")).count(), 1, "{index}");
+    }
+}
+
+#[test]
+fn failed_accepted_chunk_frames_close_without_reexecuting_the_chunk() {
+    let mut studio = Studio::new("close-accepted-frame", false);
+    studio.name = "sketch";
+    studio.start();
+    studio.ok(&["do", CHUNKS[0]]);
+    let path = studio.dir().join("hand-frames/00002.png");
+    std::fs::create_dir(&path).unwrap();
+    studio.ok(&["do", "assert(counter == nil); counter = 9"]);
+    let source = std::fs::read(studio.log()).unwrap();
+    let result = studio.cmd(&["close"]);
+    assert!(!result.status.success());
+    assert!(studio.ok(&["status"]).starts_with("2 chunks"));
+    std::fs::remove_dir(path).unwrap();
+    let globals = studio.ok(&["globals"]);
+    assert!(globals.contains("2\tcounter\tnumber 9"), "{globals}");
+    studio.close();
+    assert_eq!(std::fs::read(studio.log()).unwrap(), source);
+    assert_eq!(studio.bytes("committed.lua"), source);
+    assert!(String::from_utf8(studio.bytes("live.txt")).unwrap().starts_with("chunks 2\nreplayed 0\n"));
+    let states = String::from_utf8(studio.bytes("hand-frames/frames.states")).unwrap();
+    let state: serde_json::Value = serde_json::from_str(states.lines().last().unwrap()).unwrap();
+    assert_eq!(state["chunk"], 2);
+    assert_eq!(state["identity"]["source"], serde_json::json!(sha2::Sha256::digest(&source).to_vec()));
+    let index = String::from_utf8(studio.bytes("hand-frames/frames.tsv")).unwrap();
+    assert_eq!(index.lines().filter(|line| line.ends_with("\tfinal")).count(), 1, "{index}");
+    assert!(index.contains("\t2\tchunk"), "{index}");
+}
+
+#[test]
+fn strict_batch_recovers_a_live_checkpoint_and_tail_without_full_replay() {
+    let mut studio = Studio::new("strict-live-recovery", false);
+    studio.name = "sketch";
+    studio.start();
+    studio.ok(&["do", CHUNKS[0]]);
+    for n in 1..=9 { studio.ok(&["do", &format!("counter = {n}")]); }
+    let checkpoint = studio.root.join("recovery.ckpt");
+    let original = studio.bytes("replay.ckpt");
+    studio.ok(&["do", "assert(counter == 9); counter = 10"]);
+    studio.ok(&["do", "assert(counter == 10); counter = 11"]);
+    studio.ok(&["save", "expected.png"]);
+    let live_checkpoint = studio.bytes("replay.ckpt");
+    studio.kill();
+    let source = studio.root.join("recovery.lua");
+    let committed = studio.bytes("committed.lua");
+    std::fs::write(&source, &committed).unwrap();
+    let out = studio.root.join("recovered.png");
+    let final_checkpoint = studio.root.join("recovered.ckpt");
+    let args = ["run", source.to_str().unwrap(), "--require-replay-checkpoint", "--replay-checkpoint",
+        checkpoint.to_str().unwrap(), "--out", out.to_str().unwrap(), "--checkpoint-out", final_checkpoint.to_str().unwrap()];
+    let missing_option = studio.cmd(&["run", source.to_str().unwrap(), "--require-replay-checkpoint", "--out", out.to_str().unwrap()]);
+    assert!(!missing_option.status.success());
+    assert!(String::from_utf8_lossy(&missing_option.stderr).contains("requires --replay-checkpoint"));
+    let missing = studio.cmd(&args);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("refusing resume"));
+    assert!(!checkpoint.exists());
+    assert!(!out.exists());
+    std::fs::write(&checkpoint, b"corrupt checkpoint").unwrap();
+    let corrupt = studio.cmd(&args);
+    assert!(!corrupt.status.success());
+    assert!(String::from_utf8_lossy(&corrupt.stderr).contains("refusing resume"));
+    assert_eq!(std::fs::read(&checkpoint).unwrap(), b"corrupt checkpoint");
+    assert!(!out.exists());
+    std::fs::write(&checkpoint, &original).unwrap();
+    std::fs::write(&source, String::from_utf8(committed.clone()).unwrap().replace("seed=3", "seed=4")).unwrap();
+    let wrong_prefix = studio.cmd(&args);
+    assert!(!wrong_prefix.status.success());
+    assert!(String::from_utf8_lossy(&wrong_prefix.stderr).contains("differs; refusing resume"));
+    assert_eq!(std::fs::read(&checkpoint).unwrap(), original);
+    assert!(!out.exists());
+    std::fs::write(&source, &committed).unwrap();
+    let wrong_environment = studio.command().args(args).env("PAINT_LIVE_CHECKPOINT_TEST_IDENTITY", "changed").output().unwrap();
+    assert!(!wrong_environment.status.success());
+    assert!(String::from_utf8_lossy(&wrong_environment.stderr).contains("differs; refusing resume"));
+    assert_eq!(std::fs::read(&checkpoint).unwrap(), original);
+    let mut first_batch = args.to_vec();
+    first_batch.extend(["--until-chunk", "11"]);
+    let first = studio.cmd(&first_batch);
+    assert!(first.status.success(), "{}", String::from_utf8_lossy(&first.stderr));
+    let report = String::from_utf8_lossy(&first.stderr);
+    assert!(report.contains("reconstructed 1 chunks"), "{report}");
+    assert!(report.contains("  chunk  11  "), "{report}");
+    assert!(!report.contains("  chunk   1  "), "{report}");
+    assert!(!out.exists());
+    let completed = studio.cmd(&args);
+    assert!(completed.status.success(), "{}", String::from_utf8_lossy(&completed.stderr));
+    let report = String::from_utf8_lossy(&completed.stderr);
+    assert!(report.contains("reconstructed 11 chunks"), "{report}");
+    assert!(!report.contains("  chunk   1  "), "{report}");
+    assert_eq!(std::fs::read(&out).unwrap(), std::fs::read(studio.root.join("expected.png")).unwrap());
+    assert!(!std::fs::read(final_checkpoint).unwrap().is_empty());
+    assert_eq!(studio.bytes("replay.ckpt"), live_checkpoint);
+    assert_eq!(studio.bytes("committed.lua"), committed);
 }
 
 fn stale_rebuild_after_executable_replacement(state_store: bool) {
@@ -402,7 +619,7 @@ fn stale_rebuild_after_executable_replacement(state_store: bool) {
     let revision = state_store.then(|| studio.bytes("state/CURRENT"));
     let old_inode = std::fs::metadata(&studio.binary).unwrap().ino();
     let replacement = studio.binary.with_extension("replacement");
-    std::fs::copy(env!("CARGO_BIN_EXE_easel"), &replacement).unwrap();
+    assert!(Command::new("cp").arg(env!("CARGO_BIN_EXE_easel")).arg(&replacement).status().unwrap().success());
     std::fs::rename(replacement, &studio.binary).unwrap();
     assert_ne!(std::fs::metadata(&studio.binary).unwrap().ino(), old_inode);
     let failed = studio.cmd(&["do", "for i=1,1000 do t['x' .. i] = i end; for i=1,1000 do t['x' .. i] = nil end; error('force stale rebuild')"]);

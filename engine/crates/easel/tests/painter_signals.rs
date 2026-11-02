@@ -30,7 +30,7 @@ fn fails(args: &[&str]) -> String {
 struct Closing(&'static str);
 impl Drop for Closing {
     fn drop(&mut self) {
-        let _ = cmd(&["-s", self.0, "close"]);
+        support::stop_server(&root().join("out/easel").join(self.0));
     }
 }
 
@@ -77,6 +77,75 @@ fn open_drains_progress_written_between_reading_the_log_and_readiness() {
 }
 
 #[test]
+fn open_reports_failed_status_after_replay_progress() {
+    use std::{io::{Read, Write}, os::unix::net::UnixListener, process::{Child, Stdio}};
+
+    struct Opener(Child);
+    impl Drop for Opener {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let s = "failed-status";
+    let dir = root().join("out/easel").join(s);
+    std::fs::create_dir_all(&dir).unwrap();
+    let lock = std::fs::File::create(dir.join("lock")).unwrap();
+    lock.try_lock().unwrap();
+    let sock = support::sock_of(&dir);
+    let listener = UnixListener::bind(&sock).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut log = std::fs::File::create(dir.join("server.log")).unwrap();
+    writeln!(log, "resuming chunk 1/1").unwrap();
+    let mut opener = Opener(Command::new(env!("CARGO_BIN_EXE_easel"))
+        .args(["open", s])
+        .env_remove("EASEL_WIDTH").env_remove("EASEL_BOX").env_remove("EASEL_SESSION")
+        .env("EASEL_ROOT", root())
+        .stdout(Stdio::piped()).stderr(Stdio::piped())
+        .spawn().unwrap());
+    let error = "session integrity: painting.lua differs from the log the session wrote. The easel goes on only from the log it wrote; nothing ran.";
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut requests = 0usize;
+    let status = loop {
+        if let Some(status) = opener.0.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            opener.0.kill().unwrap();
+            opener.0.wait().unwrap();
+            std::fs::remove_file(&sock).unwrap();
+            panic!("open kept waiting after {} failed status replies and their diagnostic log lines", requests.saturating_sub(3));
+        }
+        match listener.accept() {
+            Ok((mut conn, _)) => {
+                conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut request = [0; 9];
+                conn.read_exact(&mut request).unwrap();
+                assert_eq!(&request, b"7\nstatus\n");
+                match requests {
+                    0 | 1 => conn.write_all(b"err\nthe easel is starting; retry in a moment\n").unwrap(),
+                    2 => conn.write_all(b"ok\nrebuilding from the log (0 of 1 chunks)\n").unwrap(),
+                    _ => {
+                        writeln!(log, "status 0.00s err").unwrap();
+                        writeln!(conn, "err\n{error}").unwrap();
+                    }
+                }
+                requests += 1;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(1)),
+            Err(e) => panic!("status listener: {e}"),
+        }
+    };
+    std::fs::remove_file(sock).unwrap();
+    let mut stderr = String::new();
+    opener.0.stderr.as_mut().unwrap().read_to_string(&mut stderr).unwrap();
+    assert!(!status.success(), "open ignored the failed status");
+    assert!(stderr.contains(error), "{stderr}");
+    assert_eq!(requests, 4, "open polled again after the failed status");
+}
+
+#[test]
 fn a_full_palette_refuses_a_new_pile_and_names_the_piles_on_it() {
     let s = "full";
     let with = |a: &[&'static str]| [&["-s", s][..], a].concat();
@@ -92,7 +161,7 @@ fn a_full_palette_refuses_a_new_pile_and_names_the_piles_on_it() {
     for i in 1..=16 {
         assert!(e.contains(&format!("\"mix{i}\" (")), "mix{i} is named: {e}");
     }
-    assert!(e.contains("palette{scrape={p1, p2}}") && e.contains("the chunk failed and changed nothing"), "{e}");
+    assert!(e.contains(r#"palette{scrape={p1, "mix1"}} scrapes off the pile p1 and the one listed as "mix1"."#) && e.contains("the chunk failed and changed nothing"), "{e}");
     assert_eq!(std::fs::read(&log).unwrap(), before, "the refused chunk isn't in the log");
     // nothing was scraped off: every pile is still on the palette
     let board = ok(&with(&["do", "print(palette())"]));
@@ -104,6 +173,12 @@ fn a_full_palette_refuses_a_new_pile_and_names_the_piles_on_it() {
     ok(&with(&["do", r#"b = brush("filbert", 8) b:load(p[1], 0.9)"#]));
     let e = fails(&with(&["do", "b:load(p[2], 0.9)"]));
     assert!(e.contains("b:load: that pile was scraped off, and knifing it again needs room: the palette is full"), "{e}");
+    assert!(e.contains(r#""pile 17" (lead white 0.50 + smalt 0.50)"#), "an unnamed pile is listed by the name scrape takes: {e}");
+    // a pile whose variable is gone is scraped by the name the palette lists it under
+    let r = ok(&with(&["do", r#"p[3] = nil q = nil palette{scrape={"mix3", "pile 17"}} print(palette())"#]));
+    assert!(r.contains("14 heap(s)") && !r.contains("mix3:") && !r.contains("pile 17:"), "{r}");
+    let e = fails(&with(&["do", r#"palette{scrape={"mix33"}}"#]));
+    assert!(e.contains(r#"palette: scrape: no pile on the palette is listed as "mix33" (on it now: "mix4", "mix5","#), "{e}");
     // the log replays as painted
     let r = ok(&with(&["check"]));
     assert!(r.contains("replay matches the live canvas within tolerance"), "{r}");
@@ -122,6 +197,11 @@ fn an_older_log_still_scrapes_the_oldest_pile_off() {
     let text = format!("-- easel session \"{s}\": a painting replayed chunk by chunk.\n-- Each \"--@ chunk\" line starts one chunk as it was run at the easel.\n--@ engine 7\n--@ limbs-join-nearest\n\n--@ chunk 1\n{CANVAS}\n\n--@ chunk 2\n{SIXTEEN} {SEVENTEENTH} b = brush(\"filbert\", 8) b:load(p[1], 0.9)\n");
     std::fs::write(logs.join(format!("{s}.lua")), &text).unwrap();
     std::fs::write(dir.join("committed.lua"), &text).unwrap();
+    assert!(fails(&["open", s]).contains("no checkpoint found; refusing resume"));
+    ok(&["run", logs.join(format!("{s}.lua")).to_str().unwrap(),
+        "--replay-checkpoint", dir.join("replay.ckpt").to_str().unwrap(),
+        "--frames-every", "60", "--frames-dir", dir.join("hand-frames").to_str().unwrap(),
+        "--frame-width", "1000", "--gallery", "--out", dir.join("recovered.png").to_str().unwrap()]);
     let r = ok(&["open", s]);
     assert!(r.contains("resumed 2 chunks"), "{r}");
     let board = ok(&["-s", s, "do", "print(palette())"]);
@@ -170,6 +250,7 @@ fn a_reopen_answers_status_with_its_replay_and_requests_wait_for_it() {
     }
     let s = "reopen";
     let with = |a: &[&'static str]| [&["-s", s][..], a].concat();
+    let _closing = Closing(s);
     ok(&["open", s]);
     for _ in 0..3 {
         ok(&with(&["do", "local sum = 0; for i = 1, 150000000 do sum = sum + i end; assert(sum > 0)"]));
