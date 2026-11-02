@@ -15,7 +15,8 @@
  * Nothing here counts the artist's work or times the machine (see upstream/easel-client.ts).
  *
  * Kept in step with upstream/easel-tools.ts (her current version, for reference): when it changes (tools/upstream),
- * the same change is made here, in MCP's terms. Last ported: claude-paint fea9aa6 (2026-10-21: look's mask and
+ * the same change is made here, in MCP's terms. Last ported: claude-paint 4bbbbec (2026-10-25: every reply labelled
+ * [painting] or [scratch canvas]; her critic's look and note publication are hers). Before that: fea9aa6 (look's mask and
  * scaled crops, compare of any studio image, value in the gallery light; log's find; status of a running chunk and of
  * a rebuild; the fresh scratch canvas and glaze coverage in paint's description; her client's timeouts that say what
  * landed). Not served (the owner, 2026-10-21): probe and look's edges mode (numbers and a computed map, not a
@@ -86,9 +87,11 @@ const scratch = z.boolean().optional().describe(
 	"true: work on a small trial canvas beside the painting, to try a mix or a mark first. It is primed like the painting's canvas and has its own palette, brushes, log and clock.",
 );
 const on = (p: { scratch?: boolean }) => (p.scratch ? ["--scratch"] : []);
-// (the easel says where the last scratch canvas's log went: a path in paintings/, which the studio doesn't name)
+// every reply says which canvas it is about (upstream's `label`, since 4bbbbec); the easel says where the last scratch
+// canvas's log went: a path in paintings/, which the studio doesn't name
+const label = (scratch?: boolean) => (scratch ? "[scratch canvas]" : "[painting]");
 const tag = (p: { scratch?: boolean }, t: string) =>
-	p.scratch ? `[scratch canvas]\n${t.replace(/ \(the last one's log is paintings\/lua\/scratch-\d+\.lua\)/, " (the last one is put aside)")}` : t;
+	`${label(p.scratch)}\n${p.scratch ? t.replace(/ \(the last one's log is paintings\/lua\/scratch-\d+\.lua\)/, " (the last one is put aside)") : t}`;
 // a survey's tiles in one reply, as many as a Claude Code tool result carries (upstream's surveyReply sizes this for
 // pi's context, and its words speak of a budget: this one says only what is shown and what is left to read)
 const SURVEY_TILES = 4;
@@ -195,7 +198,7 @@ server.registerTool("look", {
 	}
 	let paths: string[];
 	({ said, paths } = renameLooks(studio, said));
-	if (onScratch) said = `[scratch canvas]\n${said}`;
+	said = `${label(onScratch)}\n${said}`;
 	if (paths.length === 0) return fail(said);
 	// (a survey names several looks: each is shown, in order, within what one reply carries)
 	const images = paths.map((path) => ({ type: "image" as const, data: readFileSync(resolve(studio, path)).toString("base64"), mimeType: "image/png" }));

@@ -208,6 +208,8 @@ def prepare(artist: Artist, theme: str | None, box: str = DEFAULT_BOX) -> dict:
     os.replace(tmp, easel)
     for src, dst in NOTES.items():
         (s / dst).write_text(guide_for(box) if src == "easel_guide.md" else strip_comments((MATERIALS / src).read_text()))
+    # a new file: since claude-paint 4bbbbec a revised journal is a link into out/ (note-publication.ts), which goes below
+    (s / JOURNAL).unlink(missing_ok=True)
     (s / JOURNAL).write_text("")
     for leftover in (s / "paintings" / "lua").glob("*"):
         leftover.unlink()
