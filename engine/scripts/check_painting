@@ -74,28 +74,32 @@ fi
 echo "log: $log ($chunks chunks); $record"
 
 E() { EASEL_ROOT="$work" EASEL_SESSION=painting "$easel" "$@"; }
+# atelier: `run` writes no live.txt, so the replay's build and platform are worked out as a server writes them
+# (main.rs save_live: the FNV-1a of the executable, and Rust's OS-ARCH); hashed before the replay, as it runs
+replaybuild=$(python3 -I -c 'import sys
+h = 0xcbf29ce484222325
+for b in open(sys.argv[1], "rb").read(): h = ((h ^ b) * 0x100000001b3) & 0xffffffffffffffff
+print(f"{h:016x}")' "$easel")
+case "$(uname -s)" in Darwin) os=macos ;; Linux) os=linux ;; *) os=$(uname -s | tr '[:upper:]' '[:lower:]') ;; esac
+arch=$( { [ "$os" = macos ] && lipo -archs "$easel" 2>/dev/null; } || uname -m)  # the easel's, not a Rosetta shell's
+case "$arch" in arm64) arch=aarch64 ;; esac
+replayplatform=$os-$arch
 t0=$(date +%s)
 if ! out=$(cd "$work" && E run "$work/paintings/lua/painting.lua" --out "$work/replayed.png" --checkpoint-out "$work/out/easel/painting/live.ckpt" 2>&1); then
   echo "$out"
-  echo "check: FAILED: the log doesn't reopen ($(echo "$out" | tail -1))"
+  echo "check: FAILED: the log doesn't replay ($(echo "$out" | tail -1))"
   exit 1
 fi
 echo "$out"
+# atelier: the canvas as an open reports it (runner/export.py canvas_of reads it), from the replay's save header
+setup=$(head -c 1048576 "$work/out/easel/painting/live.ckpt" | LC_ALL=C sed -n 's/^setup=//p' | head -1)
+echo "replayed: $chunks chunks · ${setup:-no canvas yet}"
 t1=$(date +%s)
 
 live=$studio/out/easel/painting/live.png
 livetxt=$studio/out/easel/painting/live.txt
 livebuild=$(awk '$1 == "build" { print $2 }' "$livetxt" 2>/dev/null || true)
-# atelier: `run` writes no live.txt, so the replay's build and platform are worked out as a server writes them
-# (main.rs save_live: the FNV-1a of the executable, and Rust's OS-ARCH)
-replaybuild=$(python3 -I -c 'import sys
-h = 0xcbf29ce484222325
-for b in open(sys.argv[1], "rb").read(): h = ((h ^ b) * 0x100000001b3) & 0xffffffffffffffff
-print(f"{h:016x}")' "$easel")
 liveplatform=$(awk '$1 == "platform" { print $2 }' "$livetxt" 2>/dev/null || true)
-case "$(uname -s)" in Darwin) os=macos ;; Linux) os=linux ;; *) os=$(uname -s | tr '[:upper:]' '[:lower:]') ;; esac
-case "$(uname -m)" in arm64) arch=aarch64 ;; *) arch=$(uname -m) ;; esac
-replayplatform=$os-$arch
 samebuild=false
 [ -n "$livebuild" ] && [ "$livebuild" = "$replaybuild" ] && samebuild=true
 lk=none

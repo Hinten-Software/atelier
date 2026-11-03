@@ -28,7 +28,7 @@ import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { reviseJournal } from "./upstream/journal.ts";
+import { JOURNAL, reviseJournal } from "./upstream/journal.ts";
 import {
 	atEasel, hideCounters, logFind, logReply, lookArgs, paintReply, renameLooks, statusReply, studioPath, tail, toolWords,
 } from "./upstream/easel-client.ts";
@@ -272,6 +272,14 @@ const hidden = (real: string) => {
 	const parts = inStudio(real).split(sep);
 	return HIDDEN.has(parts[0].toLowerCase()) || parts.some((x) => x.startsWith("."));
 };
+/** Where the journal really is: since claude-paint 4bbbbec a revised journal is a link into out/ (note-publication.ts). */
+const journalReal = () => {
+	try {
+		return realpathSync.native(resolve(studio, JOURNAL));
+	} catch {
+		return undefined;
+	}
+};
 /** Text, as far as a reader can tell: no NUL byte in the first 8 KB. */
 const isText = (buf: Buffer) => !buf.subarray(0, 8192).includes(0);
 
@@ -283,7 +291,7 @@ server.registerTool("read", {
 	const found = studioPath(studio, p.path);
 	if (!found || !existsSync(found)) return fail(found ? `${p.path}: no such file in the studio` : `${p.path} is outside the studio`);
 	const real = realpathSync.native(found); // the true case of the path
-	if (inStudio(real) !== "" && hidden(real)) return fail(`${p.path} is outside the studio`);
+	if (inStudio(real) !== "" && hidden(real) && real !== journalReal()) return fail(`${p.path} is outside the studio`);
 	let st;
 	try {
 		st = statSync(real);

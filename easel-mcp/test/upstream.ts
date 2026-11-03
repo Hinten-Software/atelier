@@ -47,8 +47,8 @@ await check("survey and compare together refused", "look", { survey: true, compa
 await check("a mask shown over the view", "look", { mask: "m" }, (t, e, n) => (!e && n === 1) || (e && /mask/.test(t)));
 await check("the edges mode isn't served", "look", { mode: "value,edges" }, (t, e) => e && !t.includes("edges"));
 await check("nor its alias", "look", { mode: "edge" }, (t, e) => e && !/edge/.test(t));
-await check("log finds lines", "log", { find: "brush" }, (t, e) => !e && /^\d+ lines? of the log/.test(t) && !t.includes("paintings/"));
-await check("log finds nothing", "log", { find: "nothing like this" }, (t, e) => !e && t.startsWith("no line of the log"));
+await check("log finds lines", "log", { find: "brush" }, (t, e) => !e && /^\[painting\]\n\d+ lines? of the log/.test(t) && !t.includes("paintings/"));
+await check("log finds nothing", "log", { find: "nothing like this" }, (t, e) => !e && t.startsWith("[painting]\nno line of the log"));
 await check("a crop is shown with its scale", "look", { crop: "0,0,200,160" }, (t, e, n) => !e && n === 1);
 await check("the knife held up", "look", { hold: "p", at: "300,200" }, (t, e, n) => (!e && n === 1) || (e && /knife|pile/.test(t)));
 await client.close();
