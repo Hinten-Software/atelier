@@ -104,6 +104,8 @@ She develops actively; this is routine. In a worktree of its own (the runner pai
 - `easel-mcp/src/upstream/journal.ts`: `JOURNAL` is `journal` (hers `notes/journal.md`). server.ts names it so in
   `note`'s reply (`noted in journal`, `revised in journal`), where the easel and journal.ts give its absolute path.
 - `tools/upstream/import.sh`: the cache's fetch takes tags she moved (`--force`).
+- `tools/build-engine.sh`, since 4bbbbec: `SOURCE_DATE_EPOCH=0`, since her mimalloc stamps its C build's date and time
+  into the easel; without it two builds of one commit differ in those bytes.
 
 Known, hers, at 4bbbbec (they fail the same on her files alone, built apart from ours):
 `session_integrity::an_interrupted_note_leaves_the_journal_whole` (the note succeeds under `ulimit -f`) and

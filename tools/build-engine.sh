@@ -22,7 +22,11 @@ export ATELIER_BUILD=1
 # builds; ours is not (engine/Cargo.toml says so too since 2026-10-19, for builds made without this script)
 export CARGO_PROFILE_RELEASE_INCREMENTAL=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
 # engine/.cargo/config.toml sets CFLAGS for Lua's fixed hash seed; set here, it must carry that define too
-export CFLAGS="-Dluai_makeseed()=0x5eedu -ffile-prefix-map=$cargo_home=/cargo -ffile-prefix-map=$HOME=/home"
+# since claude-paint 4bbbbec mimalloc's C stamps __DATE__ and __TIME__ into the easel: a fixed date keeps two builds of
+# one commit the same bytes (clang reads SOURCE_DATE_EPOCH; the -Wno flag only marks the change for cargo, which
+# rebuilds C when CFLAGS change, not when SOURCE_DATE_EPOCH does)
+export SOURCE_DATE_EPOCH=0
+export CFLAGS="-Dluai_makeseed()=0x5eedu -ffile-prefix-map=$cargo_home=/cargo -ffile-prefix-map=$HOME=/home -Wno-date-time"
 cargo build --release -p easel
 RUSTFLAGS="$remap --cfg atelier_painter" cargo build --release -q -p easel --target-dir target/painter
 boxes=$(awk '/^const BOXES/,/^\];/' crates/paint/src/palette.rs | sed -n 's/^        "\([a-z-]*\)",$/\1/p')
