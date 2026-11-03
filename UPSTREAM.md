@@ -27,6 +27,21 @@ merged as #101 (2026-10-15; after her history's rewrite `d68525eb`). Since the s
 a file `width` (4800) beside the painter's easel, written by tools/build-engine.sh and copied by runner/studio.py;
 our ATELIER/NEW_WIDTH, WIDTH_MARK and LOOK_SCALE changes are gone.
 
+## When to take one
+
+She works in bursts: days of commits to her main (often a feature, then a string of fixes to it), then days of
+quiet (1-4 Oct, 13 Oct, 22-25 Oct). A sync taken in a burst takes a feature half tuned. So (the owner, 2026-11-02):
+
+- Look about once a week: `gh api repos/aliceisjustplaying/claude-paint/commits/main` against `tools/upstream/commit`.
+- Take her main once a burst has settled: no commits for 5-7 days after it. A new tag of hers (after `v1.0`)
+  counts as settled too.
+- Sooner only for a fix the atelier needs (a crash, a memory or replay problem in our runs).
+- A large engine change on her main (in waiting since 2026-10-23: her `alice/oil-*-wip` branches, an oil-physics
+  rewrite, and `alice/conserve-engine9-mixing`, `alice/engine9-opacity`): wait out the fixes that follow it, then the
+  full procedure below with a 4800 px memory test of the new engine before new paintings get it.
+- Merged into `main` between works only (step 9). Finished and running works keep their easels, so a later change
+  to an engine reaches only new paintings.
+
 ## Taking a newer claude-paint
 
 She develops actively; this is routine. In a worktree of its own (the runner paints from `main`'s files):
