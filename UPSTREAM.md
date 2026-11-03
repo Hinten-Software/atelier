@@ -3,7 +3,7 @@
 Source: https://github.com/aliceisjustplaying/claude-paint (Alice; code MIT,
 texts and paintings CC BY 4.0). Gallery: https://stillwet.art.
 
-Merged: `fea9aa62` (2026-10-21; before it `693f49f2`, 2026-10-13, and `78c86ce`, 2026-10-10), on branch `upstream`
+Merged: `4bbbbec3` (2026-11-02; before it `fea9aa62`, 2026-10-21, `693f49f2`, 2026-10-13, and `78c86ce`, 2026-10-10), on branch `upstream`
 (her files, unmodified, at our paths) and merged into `main`. The exact commit is in `tools/upstream/commit`; every
 work records it (`engine_upstream` in its manifest). First taken: `a198dd0` (2026-10-03, after tag `round-22.1`).
 
@@ -94,9 +94,20 @@ She develops actively; this is routine. In a worktree of its own (the runner pai
   `edges` mode or pastel stick (its header says what was last ported).
 - `easel-mcp/src/upstream/easel-client.ts`: `tail()`'s default note points to `log` with an offset, not to the
   painting's file. Her chunk waits are taken as they are (`WIDE_WAIT_MS`, 48 and 50 minutes at 4800 px).
+- `engine/scripts/check_painting` and `tools/upstream/verify.sh`, since 4bbbbec: they replay with `easel run`
+  (`--checkpoint-out` for the canvas state), since her #280 an `easel open` no longer replays a log without a replay
+  checkpoint. `run` writes no `live.txt`, so check_painting works out the replay's build (the FNV-1a of the
+  executable) and platform (Rust's OS-ARCH) as `main.rs` `save_live` writes them, for the byte-for-byte rule.
+- `runner/studio.py` `prepare()`, since 4bbbbec: removes `journal` before writing the new work's empty one. Her note
+  publication (`note-publication.ts`, mapped in map.txt) leaves a revised journal as a link into `out/`, which
+  prepare() clears. `easel-mcp/src/server.ts`'s `read` follows `journal` there (it refuses everything else in `out/`).
 - `easel-mcp/src/upstream/journal.ts`: `JOURNAL` is `journal` (hers `notes/journal.md`). server.ts names it so in
   `note`'s reply (`noted in journal`, `revised in journal`), where the easel and journal.ts give its absolute path.
 - `tools/upstream/import.sh`: the cache's fetch takes tags she moved (`--force`).
+
+Known, hers, at 4bbbbec (they fail the same on her files alone, built apart from ours):
+`session_integrity::an_interrupted_note_leaves_the_journal_whole` (the note succeeds under `ulimit -f`) and
+`bristle::knife_skim::a_skimming_knife_keeps_its_light_on_wet_dark_paint` (0.437 on wet against 0.843 on dried).
 
 Known, hers: `rag::tests::a_dry_rag_leaves_a_pale_tint_and_spirits_lift_nearly_to_the_ground` failed here at 78c86ce
 and 693f49f alike (0.8993 against its 0.9); at fea9aa6 it passes. Her script tests that expect her tolerant
@@ -110,6 +121,30 @@ runs after `tools.ts`, in the same studio: it needs the canvas `tools.ts` paints
 ## Changes
 
 Engine changes are atelier events (requirements ENG-5), listed here with their date and reason.
+
+- 2026-11-02 claude-paint 4bbbbec merged (the owner: "start the sync"; 71 commits): new paintings are painted on
+  engine 9, her measured pigment mixer (tubes measured from real oil paint mix by what they absorb and scatter; a
+  strong tube tints and hides far more than before) with all her switches; a live session keeps its rollback packed
+  and one canvas at a time (mimalloc); the replay checkpoint's history kept out of memory; an `easel open` refuses a
+  log without a replay checkpoint. The painters' tools: every reply says which canvas it is from ("[painting]" or
+  "[scratch canvas]"); a revised journal entry keeps its earlier versions. The easel guide: recipes count only
+  proportions, `palette{scrape=...}` by name, distance masks, `drying()` only reports, how a tube's strength and
+  hiding read under the new mixer, a paragraph on keeping the journal honest; the every box's tube table from the new
+  easel. Memory at 4800 px, tf's iii-011 log (116 chunks) painted live on engine 9 (the owner chose engine 9 and to
+  watch memory): 18.2 GB at the end (engine 8: 16.4), 21.8 GB at its highest on one 218 s chunk (engine 8: about
+  17.9), compute 78 min (engine 8: 45), the saved canvas state 8.9 GB (engine 8: 4.0). Earlier paintings keep their
+  easels and are not repainted.
+  Her new easel no longer paints an older engine's log as painted: fifteen tubes take their colour from her measured
+  data and a calibrated strength (`palette.rs` `tube()`: `mixer::tube`, `mixer::tube_strength`) whatever engine the
+  log names, and her table's strengths changed with them (Prussian blue 3.0 to 1.0). i-011 (engine 8) replayed with
+  it: every pixel differs, the same strokes in deeper, more saturated colour; with its own archived replay easel
+  (c0aae70f…) byte for byte. So every finished work checks with the easel archived at its start (works.py
+  `replay_env`), never this one, and `verify.sh` reports all of them as differing until she gates the change by
+  engine. Checked: her tests (two of hers fail on her files alone, see "Known, hers"), the release profile, the
+  runner's tests, the easel tools (tools.ts, upstream.ts; their checks now expect the `[painting]` label, and a
+  revised journal reads), the white room, the live check (engine 9, 5 chunks, byte for byte), the probes. An
+  adversarial review of our changes found that check_painting no longer reported the canvas setup the site's size
+  caption reads, and that a revised journal could not be read; both fixed.
 
 - 2026-10-21 after a dead-code audit (the owner): the easel's help and two width errors say what the atelier's
   build does (the journal, the easel guide, the log's width, `NEW_WIDTH`), and `logged_width`'s fallbacks name

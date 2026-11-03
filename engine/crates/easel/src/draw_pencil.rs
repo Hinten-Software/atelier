@@ -9,7 +9,7 @@
 //! heap: a failed chunk restores it with everything else, and a replay
 //! blunts it the same way.
 
-use crate::api::{S, check_keys, err, frame, mask_of, num, points, seed_of, wrap};
+use crate::api::{S, check_keys, err, frame, num, paint_mask_of, points, seed_of, wrap};
 use mlua::{Lua, Result, Table, Value};
 use paint::graphite::{self, Lead, Mark};
 use paint::{Canvas, Mask, Shape};
@@ -371,7 +371,7 @@ pub fn install(lua: &Lua, st: S) -> Result<()> {
             if let Some(o) = &o {
                 check_keys(o, if st1.borrow().paper { &["angle", "spacing", "length", "pressure", "graded", "seed"] } else { HATCH_KEYS }, "hatch")?;
             }
-            let m = mask_of(&m)?;
+            let m = paint_mask_of(&st1, &m)?;
             let get = |k: &str| -> Result<Option<f32>> { o.as_ref().map(|o| num(o, k)).transpose().map(Option::flatten) };
             let mmu = {
                 let s = st1.borrow();
@@ -403,11 +403,22 @@ pub fn install(lua: &Lua, st: S) -> Result<()> {
         })?)?;
     }
     // p:sharpen(): a fresh point
-    methods.set("sharpen", lua.create_function(|_, p: Table| p.set("worn", 0.0))?)?;
+    {
+        let st1 = st.clone();
+        methods.set("sharpen", lua.create_function(move |_, p: Table| {
+            if st1.borrow().tubes.calls_agree && is_stick(&st1, &p)? {
+                return err("sharpen: a pastel stick has no point to sharpen; its end wears into facets as it draws (p.facets)");
+            }
+            p.set("worn", 0.0)
+        })?)?;
+    }
     // p:width(): the width of the line it draws now, in units (at pressure 0.5)
     {
         let st1 = st.clone();
         methods.set("width", lua.create_function(move |_, p: Table| {
+            if st1.borrow().tubes.calls_agree && is_stick(&st1, &p)? {
+                return err("width: a pastel stick draws no line of one width; a look with hold and at shows where it would touch");
+            }
             let lead = lead_of(&p)?;
             let worn: f32 = p.get::<Option<f32>>("worn")?.unwrap_or(0.0);
             let s = st1.borrow();
@@ -484,7 +495,7 @@ pub fn install(lua: &Lua, st: S) -> Result<()> {
             let strength = get("strength")?.unwrap_or(0.9);
             let f = frame(&st1)?;
             let m = match &a {
-                Value::UserData(_) => (*mask_of(&a)?).clone(),
+                Value::UserData(_) => (*paint_mask_of(&st1, &a)?).clone(),
                 Value::Table(_) => {
                     let pts = points(&a)?;
                     let mmu = {
@@ -502,6 +513,7 @@ pub fn install(lua: &Lua, st: S) -> Result<()> {
             let mut s = st1.borrow_mut();
             let c = s.canvas.as_mut().ok_or_else(|| mlua::Error::runtime("no canvas yet: call canvas{} first"))?;
             c.erase(&m, strength);
+            s.mark_effects += 1;
             Ok(())
         })?)?;
     }
@@ -512,7 +524,7 @@ pub fn install(lua: &Lua, st: S) -> Result<()> {
         g.set("fix", lua.create_function(move |_, a: Value| {
             let m = match &a {
                 Value::Nil => None,
-                v => Some(mask_of(v)?),
+                v => Some(paint_mask_of(&st1, v)?),
             };
             let mut s = st1.borrow_mut();
             let paper = s.paper;
@@ -529,11 +541,12 @@ pub fn install(lua: &Lua, st: S) -> Result<()> {
             if c.drawing_optics() {
                 c.fix_drawing(m.as_deref());
             }
+            s.mark_effects += 1;
             Ok(())
         })?)?;
     }
-    // drawing_guide(): the drawn lines as geometry over the whole canvas (1
-    // on a line, unbroken; the same in a crop): the mask to paint into the drawing
+    // drawing_guide(): the drawn lines as continuous coverage over the whole
+    // canvas (lighter for light lines; the same in a crop): the mask to paint into the drawing
     {
         let st1 = st.clone();
         g.set("drawing_guide", lua.create_function(move |_, ()| {
@@ -585,6 +598,15 @@ pub(crate) fn install_paper(lua: &Lua, st: S) -> Result<()> {
             }).collect();
             let speed = along(o.as_ref(), "speed", n, 60.0)?;
             let roll = along(o.as_ref(), "roll", n, 0.0)?;
+            // (a stroke's upper limits: `p:stroke`'s)
+            if st1.borrow().tubes.calls_agree {
+                if force.iter().any(|f| *f > 20.0) {
+                    return err("side: force is newtons, 0 to 20 (light 0.1–0.5, normal 0.5–2, heavy 2–5)");
+                }
+                if speed.iter().any(|v| *v > 2000.0) {
+                    return err("side: speed is mm/s, 1 to 2000 (hatching 60–400)");
+                }
+            }
             // (laid flat: the hand presses the piece down along its length)
             stick_stroke(lua, &st1, &p, &pts, &force, &vec![0.0; n], &az, &roll, &speed)
         })?)?;
@@ -661,6 +683,7 @@ pub(crate) fn install_paper(lua: &Lua, st: S) -> Result<()> {
         g.set("pastel", lua.create_function(move |lua, (v, o): (Value, Option<Table>)| {
             let pile = crate::api::pile_of(&v, "pastel")?;
             let tubes = st1.borrow().tubes.clone();
+            let pile = if tubes.pastel_current_heap { crate::api::resolve(&st1, pile) } else { pile };
             if let Some(o) = &o {
                 check_keys(o, STICK_KEYS, "pastel")?;
             }
@@ -761,7 +784,7 @@ pub(crate) fn install_paper(lua: &Lua, st: S) -> Result<()> {
                     })
                 }
                 Value::UserData(_) => {
-                    let m = mask_of(&a)?;
+                    let m = paint_mask_of(&st1, &a)?;
                     if angle.is_some_and(|v| !(v.is_finite() && (-360.0..=360.0).contains(&v))) {
                         return err("smudge: angle is the lanes' direction in degrees, -360 to 360");
                     }
@@ -808,7 +831,7 @@ pub(crate) fn install_paper(lua: &Lua, st: S) -> Result<()> {
             if let Some(o) = &o {
                 check_keys(o, &["grammage", "tone"], "lay_sheet")?;
             }
-            let m = mask_of(&a)?;
+            let m = paint_mask_of(&st1, &a)?;
             let grammage = o.as_ref().map(|o| num(o, "grammage")).transpose()?.flatten().unwrap_or(120.0);
             if !(40.0..=400.0).contains(&grammage) {
                 return err("lay_sheet: grammage is g/m² (40 to 400; a mask is usually 80–160)");
@@ -899,6 +922,32 @@ mod tests {
         s.run(src).unwrap_or_else(|e| panic!("{src}: {e}")).out
     }
 
+    /// A new painting's stick keeps its strokes' upper limits on its side and refuses the
+    /// pencil's sharpen and width; an older log's as it was painted.
+    #[test]
+    fn a_stick_on_its_side_keeps_stroke_limits_and_refuses_pencil_calls() {
+        for agree in [false, true] {
+            let mut tubes = crate::session::box_for(None).unwrap();
+            tubes.calls_agree = agree;
+            let mut s = Session::with_box(W, tubes).unwrap().with_paper(true).unwrap();
+            run(&mut s, PAPER);
+            run(&mut s, r#"p = pastel(pile{{"vermilion", 1}}, {kind="soft"})"#);
+            for (src, says) in [
+                ("p:side({{100, 100}, {300, 100}}, {force=21})", "side: force is newtons, 0 to 20"),
+                ("p:side({{100, 100}, {300, 100}}, {speed=2001})", "side: speed is mm/s, 1 to 2000"),
+                ("p:sharpen()", "sharpen: a pastel stick has no point to sharpen"),
+                ("p:width()", "width: a pastel stick draws no line of one width"),
+            ] {
+                match s.run(src) {
+                    Err(e) => assert!(e.contains(if agree { says } else { "kind" }), "{src}: {e}"),
+                    Ok(_) => assert!(!agree, "{src} was accepted"),
+                }
+            }
+            assert!(s.run("p:stroke({{100, 100}, {300, 100}}, {force=21})").is_err());
+            run(&mut s, "p:side({{100, 100}, {300, 100}}, {force=20, speed=2000}); l = pencil('2B'); l:sharpen(); print(l:width())");
+        }
+    }
+
     #[test]
     fn graphite_color_survives_pastel_erasing_save_and_replay() {
         use crate::session::{DRAWING_OPTICS_MARK, box_for};
@@ -929,6 +978,39 @@ mod tests {
             let difference = s.canvas().unwrap().pixels().iter().zip(&original).flat_map(|(a, b)| a.iter().zip(b).map(|(a, b)| (a - b).abs())).fold(0.0f32, f32::max);
             if enabled { assert!(difference < 2e-5, "original graphite pixels: {difference}"); }
             else { assert!(difference > 2e-5, "legacy replay: {difference}"); }
+        }
+    }
+
+    /// A new painting's `pastel(p)` takes the color of p's heap as it is now, added to,
+    /// without another visit to the heap or more time; an older log's takes the pile as it
+    /// was first knifed, so it replays as painted. The log and a save keep the switch.
+    #[test]
+    fn a_new_paintings_pastel_takes_its_heap_as_it_is_now() {
+        use crate::session::{PASTEL_HEAP_MARK, box_for};
+        for enabled in [false, true] {
+            let older = "--@ engine 8\n--@ paper\n";
+            let mut s = Session::with_box(64, box_for(if enabled { None } else { Some(older) }).unwrap()).unwrap().with_paper(true).unwrap();
+            run(&mut s, "canvas{size=64, aspect=1, seed=4, paper={grammage=200}}");
+            run(&mut s, r#"w = pile{{"lead white", 1}} w:add{{"bone black", 1}} q = pile{{"lead white", 1}}"#);
+            let mut stick = |src: &str| {
+                let before = s.st.borrow().clock;
+                let color = run(&mut s, &format!("p = pastel({src}) print(p.r, p.g, p.b)"));
+                (color, s.st.borrow().clock - before)
+            };
+            let (added, added_secs) = stick("w");
+            let (white, white_secs) = stick("q");
+            let (grey, _) = stick(r#"pile{{"lead white", 1}, {"bone black", 1}}"#);
+            assert_eq!(&added, if enabled { &grey } else { &white }, "{added} {white} {grey}");
+            assert_ne!(white, grey);
+            assert_eq!(added_secs, white_secs);
+            let program = s.program("pastel");
+            assert_eq!(program.lines().any(|l| l == PASTEL_HEAP_MARK), enabled);
+            assert_eq!(box_for(Some(&program)).unwrap().pastel_current_heap, enabled);
+            let path = std::env::temp_dir().join(format!("easel-pastel-heap-{}-{enabled}.ckpt", std::process::id()));
+            crate::save::write(&s, &program, &path).unwrap();
+            let restored = crate::save::read(&path).unwrap().session;
+            std::fs::remove_file(path).unwrap();
+            assert_eq!(restored.st.borrow().tubes.pastel_current_heap, enabled);
         }
     }
 

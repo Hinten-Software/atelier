@@ -1,10 +1,11 @@
 //! Wet paint sitting on top of the dry picture.
 //!
 //! Every pixel holds a volume of wet paint (thickness, in "layer units": 1.0
-//! is one normal coat), its pigment mixture as a Mixbox latent vector of the
+//! is one normal coat), its pigment mixture as a latent vector of the
 //! masstone (mixing is linear in latent space, weighted by volume) and its
-//! Kubelka–Munk scattering per coat (mixed linearly by volume, as K and S mix
-//! in the two-constant KM model; absorption follows from masstone and S).
+//! Kubelka–Munk scattering per coat. Engine 9 retains the latent's measured
+//! spectral K and S; the carried mean scattering records dilution and
+//! drainage. Older engines derive RGB absorption from masstone and S.
 //! Brushes exchange paint with this layer. It ages as the painting's clock
 //! runs (`Canvas::wait`, see `drying`); `Canvas::dry` waits until it is
 //! touch-dry, baking it into the dry picture with Kubelka–Munk.
@@ -24,18 +25,88 @@ use crate::canvas::Canvas;
 use crate::color::{Rgb, luminance};
 use crate::pigment::{Pigment, hiding_of, scatter_for};
 
-pub const LAT: usize = mixbox::LATENT_SIZE;
-#[derive(Clone, Default, PartialEq)]
+pub const LAT: usize = crate::mixer::LATENT_SIZE;
+#[derive(Clone, PartialEq)]
 #[cfg_attr(feature = "replay-effects", derive(serde::Serialize, serde::Deserialize))]
 #[repr(C)]
 pub struct Latent {
+    #[cfg_attr(feature = "replay-effects", serde(with = "latent_array"))]
     pub color: [f32; LAT],
     pub parts: Vec<(usize, f32)>,
+    #[cfg_attr(feature = "replay-effects", serde(skip))]
+    pub(crate) layers: Vec<Layer>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "replay-effects", derive(serde::Serialize, serde::Deserialize))]
+pub(crate) struct Layer {
+    pub(crate) share: f32,
+    pub(crate) lat: Latent,
+    pub(crate) hide: Prop,
+}
+
+impl Default for Latent {
+    fn default() -> Self { Self::from_color([0.0; LAT]) }
+}
+
+#[cfg(test)]
+mod latent_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_debug_keeps_twenty_one_lanes() {
+        let latent = Latent::default();
+        assert_eq!(format!("{latent:?}"), format!("{:?}", [0.0f32; crate::mixer::LEGACY_LATENT_SIZE]));
+        let mut extended = latent;
+        extended.color[LAT - 1] = 1.0;
+        assert_eq!(format!("{extended:?}"), format!("{:?}", extended.color));
+    }
+
+    #[cfg(feature = "replay-effects")]
+    #[test]
+    fn expanded_tuple_deserialization_is_safe_and_rejects_short_input() {
+        use serde::de::value::{Error, SeqDeserializer};
+        let color: [f32; LAT] = std::array::from_fn(|i| i as f32 * 0.01);
+        let decoded = latent_array::deserialize(SeqDeserializer::<_, Error>::new(color.into_iter())).unwrap();
+        assert_eq!(decoded, color);
+        let short = SeqDeserializer::<_, Error>::new([0.0f32; crate::mixer::LEGACY_LATENT_SIZE].into_iter());
+        assert!(latent_array::deserialize(short).is_err());
+    }
+}
+
+#[cfg(feature = "replay-effects")]
+mod latent_array {
+    use super::LAT;
+    use serde::{Deserializer, Serializer, de::{Error, SeqAccess, Visitor}, ser::SerializeTuple};
+
+    pub fn serialize<S: Serializer>(color: &[f32; LAT], serializer: S) -> Result<S::Ok, S::Error> {
+        let mut tuple = serializer.serialize_tuple(LAT)?;
+        for value in color { tuple.serialize_element(value)?; }
+        tuple.end()
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[f32; LAT], D::Error> {
+        struct Array;
+        impl<'de> Visitor<'de> for Array {
+            type Value = [f32; LAT];
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { write!(f, "{LAT} latent floats") }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut color = [0.0; LAT];
+                for (i, value) in color.iter_mut().enumerate() {
+                    *value = seq.next_element()?.ok_or_else(|| A::Error::invalid_length(i, &self))?;
+                }
+                Ok(color)
+            }
+        }
+        deserializer.deserialize_tuple(LAT, Array)
+    }
 }
 
 impl std::fmt::Debug for Latent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.parts.is_empty() { self.color.fmt(f) } else { f.debug_tuple("Latent").field(&self.color).field(&self.parts).finish() }
+        let width = if self.color[crate::mixer::LEGACY_LATENT_SIZE..].iter().all(|&c| c == 0.0) { crate::mixer::LEGACY_LATENT_SIZE } else { LAT };
+        let color = &self.color[..width];
+        if self.parts.is_empty() { color.fmt(f) } else { f.debug_tuple("Latent").field(&color).field(&self.parts).finish() }
     }
 }
 
@@ -49,7 +120,67 @@ impl std::ops::DerefMut for Latent {
 }
 
 impl Latent {
-    pub fn from_color(color: [f32; LAT]) -> Self { Self { color, parts: Vec::new() } }
+    pub fn from_color(color: [f32; LAT]) -> Self { Self { color, parts: Vec::new(), layers: Vec::new() } }
+
+    pub(crate) fn layers(&self, volume: f32, hide: Prop) -> Vec<Layer> {
+        if self.layers.is_empty() {
+            return vec![Layer { share: volume, lat: self.clone(), hide }];
+        }
+        let scatter: f32 = self.layers.iter().map(|l| l.share * l.hide[0]).sum();
+        let scale = if scatter > 0.0 { hide[0] / scatter } else { 1.0 };
+        self.layers.iter().cloned().map(|mut l| {
+            l.share *= volume;
+            l.hide[0] *= scale;
+            l
+        }).collect()
+    }
+
+    pub(crate) fn from_layers(mut layers: Vec<Layer>) -> (f32, Self, Prop) {
+        layers.retain(|l| l.share > 0.0);
+        let (mut volume, mut lat, mut hide) = (0.0, Self::default(), [0.0; 10]);
+        for layer in &layers {
+            mix_into(&mut volume, &mut lat, &mut hide, layer.share, &layer.lat, layer.hide);
+        }
+        if layers.len() > 1 {
+            for layer in &mut layers { layer.share /= volume; }
+            lat.layers = layers;
+        }
+        (volume, lat, hide)
+    }
+
+    pub(crate) fn split_top(&self, volume: f32, hide: Prop, take: f32, drain: bool) -> (Vec<Layer>, Vec<Layer>) {
+        let mut below = self.layers(volume, hide);
+        let mut top = Vec::new();
+        let mut left = take.min(volume).max(0.0);
+        while left > 0.0 {
+            let Some(mut layer) = below.pop() else { break };
+            let amount = left.min(layer.share);
+            left -= amount;
+            let mut remaining = layer.hide;
+            if drain {
+                layer.hide = crate::bristle::take_from(&mut remaining, layer.share, amount);
+            }
+            if amount < layer.share {
+                let mut rest = layer.clone();
+                rest.hide = remaining;
+                rest.share -= amount;
+                below.push(rest);
+            }
+            layer.share = amount;
+            top.push(layer);
+        }
+        top.reverse();
+        (below, top)
+    }
+
+    pub(crate) fn concentrate(&mut self, factor: f32) {
+        for c in &mut self.color { *c *= factor; }
+        self.scale_parts(factor);
+        for layer in &mut self.layers {
+            layer.lat.concentrate(factor);
+            layer.hide[0] *= factor;
+        }
+    }
 
     pub(crate) fn add_parts(&mut self, other: &Self, weight: f32) {
         for &(i, f) in &other.parts {
@@ -65,6 +196,7 @@ impl Latent {
     }
 
     pub(crate) fn blend_parts(&mut self, other: &Self, weight: f32) {
+        self.layers = Vec::new();
         if self.parts.is_empty() && other.parts.is_empty() { return; }
         self.scale_parts(1.0 - weight);
         self.add_parts(other, weight);
@@ -115,11 +247,14 @@ fn lerp_prop(p: &mut Prop, q: Prop, a: f32) {
 /// hiding with `Paint::new`/`with_hiding`; `hiding()` reports it back.
 #[derive(Clone, Debug)]
 pub struct Paint {
+    pub pigment_latent: Option<[f32; LAT]>,
+    pub spectral_films: bool,
+    pub volume_latent: bool,
     pub parts: Vec<(usize, f32)>,
     /// Masstone, linear RGB: the paint's color laid thick (and over itself).
     pub color: Rgb,
-    /// Kubelka–Munk scattering per coat (flat across channels; absorption
-    /// follows from it and the masstone). See `pigment::scatter_for`.
+    /// Kubelka–Munk scattering per coat: the spectral mean for engine 9's
+    /// piles, flat across RGB channels for older paints.
     pub scatter: f32,
     /// Stiffness: 0 = fluid, rich in medium (a glaze), 1 = stiff tube paint.
     /// Sets how the paint levels as it dries (see `surface::settle`). How
@@ -168,17 +303,23 @@ impl Paint {
     /// ratio: over black ÷ over white; 0.05 = glaze, 0.5 = scumble,
     /// 0.92 = body).
     pub fn new(color: Rgb, hiding: f32, stiff: f32) -> Self {
-        Paint { parts: Vec::new(), color, scatter: scatter_for(luminance(color), hiding), stiff, drying: 1.0, thinner: 0.0, solvent: 0.0, oil: 1.0, packed: PACKED_OIL, floor: DRAINED_FLOOR, oil_volume: OIL_VOLUME }
+        Paint { pigment_latent: None, spectral_films: false, volume_latent: false, parts: Vec::new(), color, scatter: scatter_for(luminance(color), hiding), stiff, drying: 1.0, thinner: 0.0, solvent: 0.0, oil: 1.0, packed: PACKED_OIL, floor: DRAINED_FLOOR, oil_volume: OIL_VOLUME }
     }
     /// A paint of masstone `color` that scatters `scatter` per coat.
     pub fn km(color: Rgb, scatter: f32, stiff: f32) -> Self {
-        Paint { parts: Vec::new(), color, scatter, stiff, drying: 1.0, thinner: 0.0, solvent: 0.0, oil: 1.0, packed: PACKED_OIL, floor: DRAINED_FLOOR, oil_volume: OIL_VOLUME }
+        Paint { pigment_latent: None, spectral_films: false, volume_latent: false, parts: Vec::new(), color, scatter, stiff, drying: 1.0, thinner: 0.0, solvent: 0.0, oil: 1.0, packed: PACKED_OIL, floor: DRAINED_FLOOR, oil_volume: OIL_VOLUME }
     }
     pub fn body(color: Rgb) -> Self {
         Paint::new(color, 0.92, 1.0)
     }
     pub fn scumble(color: Rgb) -> Self {
         Paint::new(color, 0.5, 0.6)
+    }
+    pub fn with_engine(mut self, engine: u32) -> Self {
+        if self.pigment_latent.is_none() {
+            self.volume_latent = engine >= crate::PIGMENT_MIXER;
+        }
+        self
     }
     /// This paint with its scattering set so one coat hides `hiding`
     /// (the masstone, stiffness and drying rate stay).
@@ -209,7 +350,7 @@ impl Paint {
         hiding_of(luminance(self.color), self.scatter)
     }
     pub fn latent(&self) -> Latent {
-        Latent { color: mixbox::linear_float_rgb_to_latent(&self.color), parts: self.parts.clone() }
+        Latent { color: self.pigment_latent.unwrap_or_else(|| if self.volume_latent { crate::mixer::encode9(&self.color) } else { crate::mixer::encode(&self.color) }), parts: self.parts.clone(), layers: Vec::new() }
     }
     /// Kubelka–Munk scattering per coat (the `scatter` field).
     pub fn scatter(&self) -> f32 {
@@ -221,6 +362,10 @@ impl Paint {
     }
     /// What `coats` of this paint look like laid over `under`.
     pub fn over(&self, under: Rgb, coats: f32) -> Rgb {
+        if self.spectral_films {
+            if self.volume_latent { return crate::mixer::over9(&self.latent(), self.scatter, under, coats); }
+            return crate::mixer::over(&self.latent(), self.scatter, under, coats);
+        }
         self.pigment().over(under, coats)
     }
 }
@@ -342,6 +487,33 @@ pub(crate) fn over_share(pig: Pigment, under: Rgb, coats: f32, cover: f32) -> Rg
     [under[0] + (o[0] - under[0]) * c, under[1] + (o[1] - under[1]) * c, under[2] + (o[2] - under[2]) * c]
 }
 
+pub(crate) fn over_latent(lat: &Latent, scatter: f32, under: Rgb, coats: f32, cover: f32, spectral: bool, volume_latent: bool) -> Rgb {
+    if !spectral && lat.layers.is_empty() {
+        let color = if volume_latent { crate::mixer::decode9(lat) } else { crate::mixer::decode(lat) };
+        return over_share(Pigment::masstone(color, scatter), under, coats, cover);
+    }
+    if cover.is_nan() || cover <= 0.0 {
+        return under;
+    }
+    let cover = cover.min(1.0);
+    let over = if lat.layers.is_empty() {
+        if volume_latent { crate::mixer::over9(lat, scatter, under, (coats / cover).min(1e4)) } else { crate::mixer::over(lat, scatter, under, (coats / cover).min(1e4)) }
+    } else {
+        let mean: f32 = lat.layers.iter().map(|l| l.share * l.hide[0]).sum();
+        let scale = if mean > 0.0 { scatter / mean } else { 1.0 };
+        lat.layers.iter().fold(under, |rgb, l| {
+            let thickness = (coats * l.share / cover).min(1e4);
+            if spectral {
+                if volume_latent { crate::mixer::over9(&l.lat, l.hide[0] * scale, rgb, thickness) } else { crate::mixer::over(&l.lat, l.hide[0] * scale, rgb, thickness) }
+            } else {
+                let color = if volume_latent { crate::mixer::decode9(&l.lat) } else { crate::mixer::decode(&l.lat) };
+                Pigment::masstone(color, l.hide[0] * scale).over(rgb, thickness)
+            }
+        })
+    };
+    std::array::from_fn(|k| under[k] + (over[k] - under[k]) * cover)
+}
+
 /// Paste stands at most this tall for its width (a bead of oil paint: stroke
 /// ridges of 0.1-0.3 mm on strokes 1-2 mm wide are 0.1-0.3; 0.5 is stiff
 /// impasto).
@@ -374,8 +546,12 @@ impl Canvas {
         if v < 1e-5 {
             return self.px[i];
         }
-        let c = mixbox::latent_to_linear_float_rgb(&self.wet.lat[i]);
-        over_share(Pigment::masstone(c, self.wet.hide[i][0]), self.px[i], v, bead_cover(self.wet.cover[i], v, self.px_mm() * 1000.0))
+        let cover = bead_cover(self.wet.cover[i], v, self.px_mm() * 1000.0);
+        if self.spectral_films() {
+            return self.backing.get(i).copied().unwrap_or_default().under(self.px[i])
+                .over_wet(&self.wet.lat[i], self.wet.hide[i][0], v, cover).color;
+        }
+        over_latent(&self.wet.lat[i], self.wet.hide[i][0], self.px[i], v, cover, false, self.engine >= crate::PIGMENT_MIXER)
     }
 
     /// The visible colors, pixel by pixel over the window: the dry

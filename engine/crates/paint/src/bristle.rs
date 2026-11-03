@@ -2,7 +2,7 @@
 //!
 //! A `Tool` is a physical brush (round sable, hog flat, filbert, fan, rigger,
 //! badger blender). `Held` is that brush in the hand: every bristle has its
-//! own little reservoir of paint (volume + Mixbox pigment mix + KM scattering).
+//! own little reservoir of paint (volume + pigment mix + KM scattering).
 //!
 //! As the handle moves along a `Gesture`:
 //! - bristles splay with pressure and their tips trail behind the motion,
@@ -374,6 +374,8 @@ pub struct Held {
     /// Painting on a canvas that drains (`Canvas::with_drain`): and the
     /// pigment's packing, `Prop`'s last five (`with_packing`).
     shows_packing: bool,
+    #[cfg_attr(feature = "replay-effects", serde(skip))]
+    volume_latent: bool,
     /// Dry pastel held in the bristles, mg (`Canvas::dust_pastel`, the
     /// paper-and-pastel switch's `b:dust`); a wipe takes its share off.
     /// Printed only when there is some, so a brush that never brushed pastel
@@ -506,7 +508,7 @@ impl Held {
                 }
             })
             .collect();
-        Held { tool, bristles, shows_solvent: false, shows_oil: false, shows_packing: false, pastel_mg: 0.0 }
+        Held { tool, bristles, shows_solvent: false, shows_oil: false, shows_packing: false, volume_latent: false, pastel_mg: 0.0 }
     }
 
     /// The brush of a painting with engine `v`: from engine 3 its `Debug`
@@ -515,6 +517,7 @@ impl Held {
     pub fn with_engine(mut self, v: u32) -> Self {
         self.shows_solvent = v >= 3;
         self.shows_oil = v >= 4;
+        self.volume_latent = v >= crate::PIGMENT_MIXER;
         self
     }
 
@@ -544,6 +547,7 @@ impl Held {
     /// canvas of engine 3 takes it: `Canvas::drag` and `touch` panic before
     /// drawing otherwise.
     pub fn load(&mut self, paint: Paint, amount: f32) {
+        let paint = if self.volume_latent { paint.with_engine(crate::PIGMENT_MIXER) } else { paint };
         let lat = paint.latent();
         let full = self.full();
         let scatter = paint.scatter();
@@ -572,6 +576,7 @@ impl Held {
     /// colors then come off side by side within one stroke and mingle as they
     /// go. With `Part::ALL` this is `load`.
     pub fn load_part(&mut self, paint: Paint, amount: f32, part: &Part) {
+        let paint = if self.volume_latent { paint.with_engine(crate::PIGMENT_MIXER) } else { paint };
         let lat = paint.latent();
         let full = self.full();
         let scatter = paint.scatter();
@@ -828,9 +833,11 @@ pub(crate) struct Surf {
     pub(crate) skim: f32,
     /// Engine 7 (`crate::engine7`): brushes exchange paint with its kernel.
     pub(crate) e7: bool,
+    pub(crate) volume_latent: bool,
     /// Engine 8 (`crate::REACH_END`): a stroke's mark reaches its path's
     /// end (`drag_on`).
     pub(crate) reach_end: bool,
+    pub(crate) layers: bool,
 }
 // SAFETY: callers only run brushes concurrently on pixel sets that cannot
 // overlap (tiles separated by more than the largest stroke extent).
@@ -895,7 +902,9 @@ impl Surf {
             // With the drain switch it drains the film as its pigment packs,
             // from the ground up (`ground_drain`)
             if !self.absorb.is_null() {
+                let scatter = hd[0];
                 *vol = if self.drain { ground_drain(&mut *self.absorb.add(i), t, hd) } else { ground_draw(&mut *self.absorb.add(i), v, t, hd) };
+                if self.volume_latent && scatter > 0.0 { l.concentrate(hd[0] / scatter); }
             }
         }
     }
@@ -912,6 +921,9 @@ impl Surf {
             return unsafe { self.add(i, v, lat, hide, cure) };
         }
         unsafe {
+            if self.layers && *self.vol.add(i) > self.skim {
+                return self.lay_layers(i, v, lat, hide, cure, self.skim);
+            }
             let buried = (*self.vol.add(i) - self.skim).max(0.0);
             let below = (self.drain && buried > 0.0).then(|| skim_top(&mut *self.hide.add(i), *self.vol.add(i), buried));
             *self.vol.add(i) -= buried;
@@ -920,6 +932,35 @@ impl Surf {
             if let Some(below) = below {
                 restore_buried(&mut *self.hide.add(i), &below, buried / *self.vol.add(i));
             }
+        }
+    }
+
+    pub(crate) unsafe fn lay_layers(&self, i: usize, v: f32, lat: &Latent, hide: Prop, cure: f32, skim: f32) {
+        if v <= 0.0 { return; }
+        unsafe {
+            let (mut below, top) = (*self.lat.add(i)).split_top(*self.vol.add(i), *self.hide.add(i), skim, self.drain);
+            let (volume, pigment, properties) = Latent::from_layers(top);
+            *self.vol.add(i) = volume;
+            *self.lat.add(i) = pigment;
+            *self.hide.add(i) = properties;
+            self.add(i, v, lat, hide, cure);
+            let mut pigment = (*self.lat.add(i)).clone();
+            pigment.layers.clear();
+            below.push(crate::wet::Layer { share: *self.vol.add(i), lat: pigment, hide: *self.hide.add(i) });
+            let (volume, pigment, properties) = Latent::from_layers(below);
+            *self.vol.add(i) = volume;
+            *self.lat.add(i) = pigment;
+            *self.hide.add(i) = properties;
+        }
+    }
+
+    pub(crate) unsafe fn pickup_lat(&self, i: usize, v: f32) -> Option<Latent> {
+        unsafe {
+            if !self.layers || (*self.lat.add(i)).layers.is_empty() { return None; }
+            let (_, top) = (*self.lat.add(i)).split_top(*self.vol.add(i), *self.hide.add(i), v, self.drain);
+            let (_, mut lat, _) = Latent::from_layers(top);
+            lat.layers = Vec::new();
+            Some(lat)
         }
     }
 
@@ -936,15 +977,31 @@ impl Surf {
     /// bare (as `wait` judges it) holds no film to have one.
     #[inline]
     pub(crate) unsafe fn take(&self, i: usize, v: f32) -> Prop {
+        unsafe { self.take_with_lat(i, v).0 }
+    }
+
+    #[inline]
+    pub(crate) unsafe fn take_with_lat(&self, i: usize, v: f32) -> (Prop, Option<Latent>) {
         unsafe {
             self.film_give(i, v);
             let vol = &mut *self.vol.add(i);
+            if self.layers && !(*self.lat.add(i)).layers.is_empty() {
+                let (below, top) = (*self.lat.add(i)).split_top(*vol, *self.hide.add(i), v, self.drain);
+                let (_, mut picked, got) = Latent::from_layers(top);
+                picked.layers = Vec::new();
+                let (left, lat, hide) = Latent::from_layers(below);
+                *vol = left;
+                *self.lat.add(i) = lat;
+                *self.hide.add(i) = hide;
+                if self.cure_now && *vol < 1e-5 && !self.dry.is_null() { (*self.dry.add(i)).cure = 0.0; }
+                return (if self.drain { fluid_of(got) } else { got }, Some(picked));
+            }
             let got = if self.drain { take_from(&mut *self.hide.add(i), *vol, v) } else { *self.hide.add(i) };
             *vol -= v;
             if self.cure_now && *vol < 1e-5 && !self.dry.is_null() {
                 (*self.dry.add(i)).cure = 0.0;
             }
-            got
+            (got, None)
         }
     }
 
@@ -1053,7 +1110,9 @@ impl Canvas {
             receptive: self.receptive.as_ref().map_or(std::ptr::null(), |r| r.as_ptr()),
             skim: if self.brush_skim { BRUSH_SKIM_COATS } else { 0.0 },
             e7: crate::engine7::active(self.engine),
+            volume_latent: self.engine >= crate::PIGMENT_MIXER,
             reach_end: self.engine >= crate::REACH_END,
+            layers: self.engine >= crate::PIGMENT_MIXER,
         }
     }
 
@@ -1901,8 +1960,9 @@ pub(crate) unsafe fn exchange(
                     if take > 0.0 {
                         let tv = take * px_area;
                         got_v += tv;
-                        got_l.add_parts(&*sf.lat.add(i), tv);
-                        let l = &*sf.lat.add(i);
+                        let picked = sf.pickup_lat(i, take);
+                        let l = picked.as_ref().unwrap_or(&*sf.lat.add(i));
+                        got_l.add_parts(l, tv);
                         for k in 0..LAT {
                             got_l[k] += l[k] * tv;
                         }
@@ -1985,12 +2045,6 @@ pub(crate) unsafe fn exchange(
                             to[0] = (tx, ty, 1.0);
                             1
                         };
-                        // the source's paint, read once: nothing below writes
-                        // lat at `i` (`take` lowers its volume and, with the
-                        // drain switch, its packed share, and returns the
-                        // paint it lifts; `add` writes `j != i`). Its cure is
-                        // read per destination: `take` zeroes it when the
-                        // film goes bare (see the kernel_traps tests)
                         let l = (*sf.lat.add(i)).clone();
                         for &(tx, ty, share) in &to[..n_to] {
                             if share <= 0.0 {
@@ -2039,8 +2093,9 @@ pub(crate) unsafe fn exchange(
                                     // (its film there thins but still covers it)
                                     let cj = &mut *sf.cover.add(j);
                                     *cj = if fine { ((if *sf.vol.add(j) < 1e-6 { 0.0 } else { *cj }) + (m / v.max(1e-9)).min(1.0) * *sf.cover.add(i)).min(1.0) } else { 1.0 };
+                                    let picked = sf.pickup_lat(i, m).or_else(|| sf.layers.then(|| (*sf.lat.add(i)).clone()));
                                     let hd = sf.take(i, m);
-                                    sf.add(j, m, &l, hd, cure);
+                                    sf.add(j, m, picked.as_ref().unwrap_or(&l), hd, cure);
                                 }
                             }
                         }
@@ -2611,7 +2666,7 @@ mod kernel_traps {
     /// Trap A, the kernel: an empty filbert that doesn't pick up (so it only
     /// ploughs, sharing each pixel's paint bilinearly among four
     /// destinations) dragged through films at the threshold leaves approximately
-    /// the wet volume and cure recorded from main (4ec3169). A plough that
+    /// the wet volume and cure recorded from this seeded construction. A plough that
     /// hoisted the source's cure out of its destination loop fails this.
     #[test]
     fn ploughing_films_at_the_threshold_leaves_the_recorded_cure() {
@@ -2627,7 +2682,15 @@ mod kernel_traps {
         let zeroed = (0..n).filter(|&i| before[i] > 0.0 && c.wet.clock.px[i].cure == 0.0).count();
         // the strokes did plough thin films under the threshold
         assert!(zeroed > 1000, "{zeroed} films ploughed bare");
-        let expected = image::open(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/plough_volume_cure.png")).unwrap().to_rgb16();
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/plough_volume_cure.png");
+        if std::env::var_os("UPDATE_GOLDEN").is_some() {
+            let reference = image::ImageBuffer::<image::Rgb<u16>, Vec<u16>>::from_fn(c.f.w as u32, c.f.h as u32, |x, y| {
+                let i = y as usize * c.f.w + x as usize;
+                image::Rgb([(c.wet.vol[i] / 0.01 * 65535.0).round() as u16, (c.wet.clock.px[i].cure / 0.1 * 65535.0).round() as u16, 0])
+            });
+            reference.save(path).unwrap();
+        }
+        let expected = image::open(path).unwrap().to_rgb16();
         assert_eq!(expected.dimensions(), (c.f.w as u32, c.f.h as u32));
         for (i, pixel) in expected.pixels().enumerate() {
             for (channel, (value, scale)) in [(c.wet.vol[i], 0.01), (c.wet.clock.px[i].cure, 0.1)].into_iter().enumerate() {
@@ -2769,6 +2832,117 @@ const PRESS_IN_UM: f32 = 60.0;
 /// it; finer hollows than that it bridges (`Canvas::knife`).
 const FLEX_MM: f32 = 4.0;
 
+#[cfg(test)]
+mod volume_mixing {
+    use super::*;
+
+    #[test]
+    fn raw_rgb_loads_use_the_tools_engine_before_mixing() {
+        for engine in [1, 2, 3, 4, 5, 7, 8, 9] {
+            let a = Paint::body([0.2, 0.4, 0.7]);
+            let b = Paint::new([0.6, 0.1, 0.2], 0.5, 0.6);
+            let encode = if engine >= crate::PIGMENT_MIXER { crate::mixer::encode9 } else { crate::mixer::encode };
+            let expected: [f32; LAT] = std::array::from_fn(|k| (encode(&a.color)[k] + encode(&b.color)[k]) * 0.5);
+            let mut held = Held::new(Tool::hog_flat(20.0), 17).with_engine(engine);
+            held.load(a.clone(), 0.5);
+            for bristle in &held.bristles {
+                assert_eq!(bristle.lat.color, encode(&a.color), "engine {engine}");
+            }
+            let mut hand = crate::hand::Hand::new((0.0, 0.0), 100.0, 17).with_engine(engine);
+            let taken = hand.take(Tool::hog_flat, 0.2, a.clone(), 0.5);
+            for bristle in &taken.bristles {
+                assert_eq!(bristle.lat.color, encode(&a.color), "hand engine {engine}");
+            }
+            held.load_part(b.clone(), 0.5, &Part::ALL);
+            for bristle in &held.bristles {
+                assert!((0..LAT).all(|k| (bristle.lat[k] - expected[k]).abs() < 2e-6), "engine {engine}");
+            }
+            let mut knife = Knife::new(20.0).with_engine(engine);
+            knife.load(a.clone(), 0.5);
+            let loaded = knife.paint().unwrap();
+            assert_eq!(loaded.latent().color, encode(&a.color), "knife engine {engine}");
+            assert!((0..3).all(|k| (loaded.color[k] - a.color[k]).abs() < 2e-6));
+            knife.load(b, 0.5);
+            assert!((0..LAT).all(|k| (knife.lat[k] - expected[k]).abs() < 2e-6));
+            let mut canvas = Canvas::new(2, 1.0, [0.8; 3]).with_engine(engine);
+            canvas.wet.vol.fill(1.0);
+            canvas.wet.lat.fill(loaded.latent());
+            canvas.wet.hide.fill(loaded.prop());
+            let actual = canvas.look_px(0);
+            let preview = a.over([0.8; 3], 1.0);
+            assert!((0..3).all(|k| (actual[k] - preview[k]).abs() < 2e-6), "engine {engine}: {actual:?} != {preview:?}");
+            for stipple in [false, true] {
+                let mut canvas = Canvas::new(64, 1.0, [0.8; 3]).with_engine(engine);
+                let mask = crate::Mask::from_fn(canvas.f, |_, _| 1.0);
+                let rgb = a.color;
+                if stipple {
+                    canvas.stipple(&mask, &crate::Stipple::new(Tool::hog_flat(100.0)).color(move |_, _| rgb).jitter(0.0, 0.0).coverage(|_, _| 1.0), 17);
+                } else {
+                    canvas.work(&mask, &crate::Handling::new(Tool::hog_flat(100.0)).color(move |_, _| rgb).jitter(0.0, 0.0).coverage(1.0), 17);
+                }
+                assert!(canvas.wet_total() > 0.0);
+                for (i, lat) in canvas.wet.lat.iter().enumerate().filter(|(i, _)| canvas.wet.vol[*i] > 0.0) {
+                    assert!((0..LAT).all(|k| (lat[k] - encode(&rgb)[k]).abs() < 2e-6), "engine {engine}, stipple {stipple}, pixel {i}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn palette_tools_and_wet_exchange_keep_the_same_extensive_pigments() {
+        let mut palette = crate::Palette::new("mixing", crate::palette::catalog());
+        palette.engine = 9;
+        palette.glaze_film = true;
+        palette.carried_paint = true;
+        for (a, b, medium) in [("green earth", "magenta", 0.0), ("Prussian blue", "lead white", 0.9), ("yellow ochre", "lead white", 0.8), ("raw umber", "lead white", 0.0)] {
+            let a = palette.tubes.iter().position(|t| t.name == a).unwrap();
+            let b = palette.tubes.iter().position(|t| t.name == b).unwrap();
+            let pa = palette.pile(vec![(a, 1.0)]).paint(medium);
+            let pb = palette.pile(vec![(b, 1.0)]).paint(0.0);
+            let total = 2.0 - medium;
+            let expected = palette.pile(vec![(a, (1.0 - medium) / total), (b, 1.0 / total)]).paint(medium * 0.5);
+            let check = |lat: &Latent, hide: Prop| {
+                for k in 0..LAT {
+                    assert!((lat[k] - expected.latent()[k]).abs() < 2e-6, "channel {k}: {} != {}", lat[k], expected.latent()[k]);
+                }
+                assert!((hide[0] - expected.scatter).abs() < 2e-6);
+                for &(i, f) in &lat.parts {
+                    let want = expected.parts.iter().find(|p| p.0 == i).unwrap().1;
+                    assert!((f - want).abs() < 2e-6);
+                }
+                let pigment = crate::mixer::pigment9(lat);
+                let p = crate::mixer::pigment9(&pa.latent());
+                let q = crate::mixer::pigment9(&pb.latent());
+                for w in 0..crate::spectral::N {
+                    for (got, want) in [(pigment.k[w], (p.k[w] + q.k[w]) * 0.5), (pigment.s[w], (p.s[w] + q.s[w]) * 0.5)] {
+                        assert!((got - want).abs() < 2e-5 * want.abs().max(1.0));
+                    }
+                }
+            };
+            let mut knife = Knife::new(20.0);
+            knife.load(pa.clone(), 0.5);
+            knife.load(pb.clone(), 0.5);
+            let mixed = knife.paint().unwrap();
+            check(&mixed.latent(), mixed.prop());
+            for k in 0..3 { assert!((mixed.color[k] - expected.color[k]).abs() < 2e-6); }
+            let mut held = Held::new(Tool::hog_flat(20.0), 17);
+            held.load(pa.clone(), 0.5);
+            held.load(pb.clone(), 0.5);
+            for bristle in &held.bristles { check(&bristle.lat, bristle.hide); }
+            let mut canvas = Canvas::new(2, 1.0, [0.8; 3]).with_engine(9).with_glaze_film(true);
+            let sf = canvas.surf();
+            unsafe {
+                sf.add(0, 0.5, &pa.latent(), pa.prop(), 0.0);
+                sf.add(0, 0.5, &pb.latent(), pb.prop(), 0.0);
+                let film = crate::engine7::add::Film::of(&sf);
+                film.add(1, 0.5, &crate::engine7::add::Paint7::new(false, false, &pa.latent(), pa.prop(), 0.0));
+                film.add(1, 0.5, &crate::engine7::add::Paint7::new(false, false, &pb.latent(), pb.prop(), 0.0));
+            }
+            for i in 0..2 { check(&canvas.wet.lat[i], canvas.wet.hide[i]); }
+        }
+    }
+}
+
 /// How deep (coats; about 6 µm) a knife's paint laid on wet paint mixes into
 /// it when the canvas skims (`Canvas::knife`): the blade slides the paint on
 /// without stirring it in, so only the film where the two meet blends.
@@ -2790,6 +2964,8 @@ pub struct Knife {
     /// On a canvas that drains (`Canvas::with_drain`): its `Debug` gives the
     /// paint's packing too (`with_packing`). Not printed itself.
     shows_packing: bool,
+    spectral_films: bool,
+    volume_latent: bool,
 }
 
 /// As derived, but the paint's properties without the pigment's packing
@@ -2824,7 +3000,11 @@ impl Knife {
     }
 
     pub fn new(width: f32) -> Self {
-        Knife { width: if width.is_finite() { width.clamp(1.0, 1000.0) } else { 1.0 }, vol: 0.0, solvent: 0.0, lat: Latent::default(), hide: [0.0; 10], cure: 0.0, shows_packing: false }
+        Knife { width: if width.is_finite() { width.clamp(1.0, 1000.0) } else { 1.0 }, vol: 0.0, solvent: 0.0, lat: Latent::default(), hide: [0.0; 10], cure: 0.0, shows_packing: false, spectral_films: false, volume_latent: false }
+    }
+    pub fn with_engine(mut self, engine: u32) -> Self {
+        self.volume_latent = engine >= crate::PIGMENT_MIXER;
+        self
     }
     /// The knife of a painting whose canvas drains (`Canvas::with_drain`):
     /// its `Debug` gives the paint's packing too.
@@ -2844,7 +3024,12 @@ impl Knife {
             return;
         }
         let liquid = amount * self.full();
+        let paint = if self.volume_latent { paint.with_engine(crate::PIGMENT_MIXER) } else { paint };
+        self.volume_latent = paint.volume_latent;
         let v = liquid * (1.0 - paint.thinner);
+        if v > 0.0 {
+            self.spectral_films = (self.vol > 1e-9 && self.spectral_films) || paint.spectral_films;
+        }
         self.solvent += liquid * paint.thinner;
         let lat = paint.latent();
         self.cure = mix_cure(self.cure, self.vol, 0.0, v);
@@ -2856,14 +3041,15 @@ impl Knife {
         if self.vol <= 1e-9 {
             return None;
         }
-        let color = mixbox::latent_to_linear_float_rgb(&self.lat);
+        let color = if self.volume_latent { crate::mixer::decode9(&self.lat) } else { crate::mixer::decode(&self.lat) };
         let p = Paint::km(color, self.hide[0], self.hide[1].clamp(0.0, 1.0)).with_drying(self.hide[2]);
-        Some(Paint { solvent: self.hide[3], oil: self.hide[4], packed: self.hide[5], floor: self.hide[6], oil_volume: self.hide[8], thinner: self.solvent / (self.vol + self.solvent), ..p })
+        Some(Paint { pigment_latent: Some(self.lat.color), spectral_films: self.spectral_films, volume_latent: self.volume_latent, parts: self.lat.parts.clone(), solvent: self.hide[3], oil: self.hide[4], packed: self.hide[5], floor: self.hide[6], oil_volume: self.hide[8], thinner: self.solvent / (self.vol + self.solvent), ..p })
     }
     /// Wipe the blade clean on the rag.
     pub fn wipe(&mut self) {
         self.vol = 0.0;
         self.solvent = 0.0;
+        self.spectral_films = false;
     }
     /// Paint on the blade, relative to a full load.
     pub fn fullness(&self) -> f32 {
@@ -2940,11 +3126,13 @@ impl Canvas {
     /// canvas that skims (`with_knife_skim`) paint laid on wet paint stays
     /// on top of it, mixing with only the film where the two meet.
     pub fn knife(&mut self, k: &mut Knife, pts: &[(f32, f32)], pressure: (f32, f32), angle: Option<f32>, lay: bool, lift: f32) {
+        k.volume_latent = self.engine >= crate::PIGMENT_MIXER;
         // (the blade's length is a public field: nothing to pull with one that is no length)
         if Knife::check_path(pts, self.f.scale).is_err() || !pressure.0.is_finite() || !pressure.1.is_finite() || angle.is_some_and(|a| !a.is_finite()) || !lift.is_finite() || !(k.width.is_finite() && (1.0..=1000.0).contains(&k.width)) {
             return;
         }
         self.assert_thinner_supported(k.solvent > 0.0, "Canvas::knife");
+        k.spectral_films = self.spectral_films();
         self.tally.stroke(&Tool::hog_flat(k.width), pts, self.mm_per_unit);
         let id = self.next_stroke_ids(1);
         // engine 5: knife-laid paint tears where it parts from the blade:
@@ -3054,7 +3242,7 @@ impl Canvas {
                         if ex <= 1e-7 {
                             continue;
                         }
-                        let l = (*sf.lat.add(i)).clone();
+                        let l = sf.pickup_lat(i, ex).unwrap_or_else(|| (*sf.lat.add(i)).clone());
                         let cure = if sf.dry.is_null() { 0.0 } else { (*sf.dry.add(i)).cure };
                         let hd = sf.take(i, ex);
                         if !sf.solv.is_null() { *sf.solv.add(i) -= ex_solvent * crate::surface::COAT_UM; }
@@ -3161,6 +3349,211 @@ impl Canvas {
         // (the window's own pixels, as a brush's bounds: a crop's start at its corner)
         if let Some((x0, y0, x1, y1)) = bounds.map(|(x0, y0, x1, y1)| (x0 - sf.ox, y0 - sf.oy, x1 - sf.ox, y1 - sf.oy)) {
             self.wet.touch(x0, y0, x1, y1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod skim_pigments {
+    use super::*;
+
+    #[test]
+    fn fallback_plough_keeps_inventory_when_the_last_skim_layer_is_lifted() {
+        let mut c = Canvas::new(128, 1.0, [0.3; 3]).with_engine(9);
+        let dark = Paint::body([0.01; 3]).latent();
+        let light = Paint::body([1.0; 3]).latent();
+        let i = 30 * c.f.w + 60;
+        c.wet.vol[i] = 1.0;
+        c.wet.lat[i] = dark;
+        c.wet.lat[i].parts = vec![(0, 1.0)];
+        c.wet.hide[i] = Paint::body([0.01; 3]).prop();
+        let mut light = light;
+        light.parts = vec![(1, 1.0)];
+        let sf = c.surf();
+        unsafe {
+            sf.lay_layers(i, 0.25, &light, Paint::body([1.0; 3]).prop(), 0.0, 0.25);
+            sf.take(i, 0.5 - 0.001);
+        }
+        assert_eq!(c.wet.lat[i].layers.len(), 2);
+        let inventory = |c: &Canvas| {
+            let mut sum = vec![0.0f64; LAT + 2];
+            for (&v, l) in c.wet.vol.iter().zip(&c.wet.lat) {
+                for q in 0..LAT { sum[q] += v as f64 * l[q] as f64; }
+                for &(q, f) in &l.parts { sum[LAT + q] += v as f64 * f as f64; }
+            }
+            sum
+        };
+        let before = inventory(&c);
+        let tool = Tool { pickup: 0.0, push: 1.0, ..Tool::filbert(100.0) };
+        let mut held = Held::new(tool, 4);
+        let mut bounds = None;
+        let generation = crate::engine7::window::with(|scratch| scratch.generation);
+        unsafe {
+            crate::engine7::exchange::exchange(sf, &mut held.bristles[0], &held.tool, (10.5, 30.5), (110.5, 30.5), 4.0, 1.0, 1.0, None, 1.0, None, 1, &mut Vec::new(), &mut bounds, (0, 0, 128, 128));
+        }
+        assert_eq!(crate::engine7::window::with(|scratch| scratch.generation), generation);
+        assert!(c.wet.lat[i].layers.is_empty());
+        assert!(c.wet.vol.iter().filter(|&&v| v > 0.0).count() > 2);
+        for (q, (a, b)) in before.into_iter().zip(inventory(&c)).enumerate() {
+            assert!((a - b).abs() < 2e-7, "component {q}: {a} -> {b}");
+        }
+    }
+
+    #[test]
+    fn mixed_skims_let_go_of_their_layers() {
+        let mut c = Canvas::new(2, 1.0, [0.3; 3]).with_engine(9);
+        let paints = [Paint::body([0.01; 3]), Paint::body([1.0; 3]), Paint::body([0.5, 0.2, 0.1])];
+        c.wet.vol[0] = 1.0;
+        c.wet.lat[0] = paints[0].latent();
+        c.wet.hide[0] = paints[0].prop();
+        let sf = c.surf();
+        for paint in &paints {
+            unsafe { sf.lay_layers(0, 0.25, &paint.latent(), paint.prop(), 0.0, SKIM_COATS) };
+        }
+        assert!(c.wet.lat[0].layers.len() > 1);
+        unsafe { sf.add(0, 0.25, &paints[1].latent(), paints[1].prop(), 0.0) };
+        assert!(c.wet.lat[0].layers.is_empty());
+        assert_eq!(c.wet.lat[0].layers.capacity(), 0, "a mixed pixel still holds its buried layers' memory");
+    }
+
+    #[test]
+    fn retained_skims_break_up_only_the_contacted_packed_paint() {
+        for path in ["brush", "engine7", "knife"] {
+            let mut c = Canvas::new(2, 1.0, [0.3; 3]).with_engine(9).with_drain(true);
+            c.wet.vol[0] = 1.0;
+            c.wet.hide[0] = [0.8, 0.6, 1.0, 0.0, 0.4, 0.7, 0.4, 1.0, 0.4, 0.0];
+            let mut sf = c.surf();
+            sf.skim = SKIM_COATS;
+            let mut knife = Knife::new(20.0);
+            knife.load(Paint { oil: 1.0, packed: 0.7, floor: 0.4, oil_volume: 0.4, ..Paint::body([1.0; 3]) }, 1.0);
+            for pass in 0..=3 {
+                let added = if pass == 0 { 0.0 } else { 0.25 };
+                unsafe {
+                    match path {
+                        "brush" => sf.lay(0, added, &knife.lat, knife.hide, 0.0),
+                        "engine7" => crate::engine7::add::Film::of(&sf).lay(0, added, &crate::engine7::add::Paint7::new(sf.lean, sf.drain, &knife.lat, knife.hide, 0.0), sf.skim),
+                        _ => knife_add(&sf, 0, added, &knife, true),
+                    }
+                }
+                let (vol, hd) = (c.wet.vol[0], c.wet.hide[0]);
+                let packed = if pass == 0 { 1.0 } else { 1.0 - SKIM_COATS };
+                assert!((vol - (1.0 + 0.25 * pass as f32)).abs() < 1e-6, "{path}: volume {vol}");
+                assert!((vol * hd[7] - packed).abs() < 1e-6, "{path}: packed paint {} at pass {pass}", vol * hd[7]);
+                assert!((vol * hd[4] - (0.4 + 0.25 * pass as f32)).abs() < 1e-6, "{path}: oil {} at pass {pass}", vol * hd[4]);
+            }
+        }
+    }
+
+    #[test]
+    fn retained_pickup_lifts_fluid_oil_before_packed_paint() {
+        let mut c = Canvas::new(2, 1.0, [0.3; 3]).with_engine(9).with_drain(true);
+        let base = Paint::body([0.01; 3]);
+        let top = Paint::body([1.0; 3]);
+        let mut below = base.prop();
+        below[4] = 0.4;
+        below[6] = 0.4;
+        below[7] = 1.0;
+        let mut above = top.prop();
+        above[4] = 0.7;
+        above[6] = 0.4;
+        above[7] = 0.5;
+        (c.wet.vol[0], c.wet.lat[0], c.wet.hide[0]) = Latent::from_layers(vec![
+            crate::wet::Layer { share: 0.6, lat: base.latent(), hide: below },
+            crate::wet::Layer { share: 0.4, lat: top.latent(), hide: above },
+        ]);
+        let sf = c.surf();
+        let mut oil = 0.52;
+        let mut packed = 0.8;
+        for (take, lifted_oil, lifted_packed) in [(0.1, 1.0, 0.0), (0.2, 0.7, 0.1), (0.3, 0.4, 0.3)] {
+            let got = unsafe { sf.take(0, take) };
+            oil -= take * lifted_oil;
+            packed -= lifted_packed;
+            assert!((got[4] - lifted_oil).abs() < 1e-6, "lifted oil: {got:?}");
+            assert_eq!(got[7], 0.0);
+            assert!((c.wet.vol[0] * c.wet.hide[0][4] - oil).abs() < 1e-6);
+            assert!((c.wet.vol[0] * c.wet.hide[0][7] - packed).abs() < 1e-6);
+        }
+        assert!(c.wet.lat[0].layers.is_empty());
+        assert_eq!(c.wet.lat[0], base.latent());
+    }
+
+    #[test]
+    fn skimming_preserves_each_pigment_and_reveals_the_buried_paint() {
+        let mut palette = crate::Palette::new("skim", crate::palette::catalog());
+        palette.engine = 9;
+        palette.glaze_film = true;
+        palette.carried_paint = true;
+        let black = palette.tubes.iter().position(|t| t.name == "bone black").unwrap();
+        let white = palette.tubes.iter().position(|t| t.name == "lead white").unwrap();
+        let dark = palette.pile(vec![(black, 1.0)]).paint(0.0);
+        let light = palette.pile(vec![(white, 1.0)]).paint(0.0);
+        let inventory = |c: &Canvas, k: &Knife, brush: Option<&Held>| {
+            let mut latent = [0.0f64; LAT];
+            let mut recipe = vec![0.0f64; palette.tubes.len()];
+            let mut add = |v: f64, l: &Latent| {
+                for q in 0..LAT { latent[q] += v * l[q] as f64; }
+                for &(q, amount) in &l.parts { recipe[q] += v * amount as f64; }
+            };
+            let area = 1.0 / c.f.scale.powi(2) as f64;
+            for (i, &v) in c.wet.vol.iter().enumerate() { add(v as f64 * area, &c.wet.lat[i]); }
+            add(k.vol as f64, &k.lat);
+            if let Some(brush) = brush {
+                for bristle in &brush.bristles { add(bristle.vol as f64, &bristle.lat); }
+            }
+            (latent, recipe)
+        };
+        for brush in [false, true] {
+            for skim in [false, true] {
+                let mut c = Canvas::new(200, 1.0, [1.0; 3]).with_engine(9).with_drain(true).with_glaze_film(true).with_knife_skim(!brush && skim).with_brush_skim(brush && skim);
+                let mut base = Knife::new(120.0);
+                base.load(dark.clone(), 1.0);
+                c.knife(&mut base, &[(500.0, 250.0), (500.0, 750.0)], (0.45, 0.45), Some(0.0), true, 0.1);
+                let mut knife = Knife::new(120.0);
+                let mut tool = Tool::hog_flat(100.0);
+                tool.pickup = 0.0;
+                tool.push = 0.0;
+                let mut held = Held::new(tool, 17);
+                if brush { held.load(light.clone(), 1.0); } else { knife.load(light.clone(), 1.0); }
+                let before = inventory(&c, &knife, brush.then_some(&held));
+                if brush {
+                    c.drag(&mut held, &Gesture::line((500.0, 350.0), (500.0, 650.0)).ramps(0.0, 0.0), None);
+                } else {
+                    c.knife(&mut knife, &[(500.0, 350.0), (500.0, 650.0)], (0.05, 0.05), Some(0.0), true, 0.1);
+                }
+                let after = inventory(&c, &knife, brush.then_some(&held));
+                for (a, b) in before.0.iter().zip(after.0).chain(before.1.iter().zip(after.1)) {
+                    assert!((a - b).abs() <= 1e-5 * a.abs().max(1.0), "brush={brush} skim={skim}: {a} -> {b}");
+                }
+                let mut saved = Vec::new();
+                c.write_state(&mut saved, "skim").unwrap();
+                let (mut restored, _) = Canvas::read_state(&mut &saved[..]).unwrap();
+                assert_eq!(restored.wet.lat, c.wet.lat);
+                assert_eq!(restored.seen(), c.seen());
+                if skim {
+                    let mut worked = c.clone();
+                    let empty_knife = Knife::new(120.0);
+                    let mut pickup = Held::new(Tool::hog_flat(100.0), 23);
+                    let before = inventory(&worked, &empty_knife, Some(&pickup));
+                    worked.drag(&mut pickup, &Gesture::line((500.0, 350.0), (500.0, 650.0)).ramps(0.0, 0.0), None);
+                    let after = inventory(&worked, &empty_knife, Some(&pickup));
+                    for (a, b) in before.0.iter().zip(after.0).chain(before.1.iter().zip(after.1)) {
+                        assert!((a - b).abs() <= 1e-5 * a.abs().max(1.0), "pickup: {a} -> {b}");
+                    }
+                    assert!(pickup.carried_parts().iter().any(|&(p, v)| p == black && v > 0.0));
+                    let sf = restored.surf();
+                    let i = restored.wet.lat.iter().position(|l| l.layers.len() > 1 && l.layers[0].lat.parts == vec![(black, 1.0)]).unwrap();
+                    let buried = restored.wet.vol[i] * restored.wet.lat[i].layers[0].share;
+                    let take = restored.wet.vol[i] - 0.5 * buried;
+                    unsafe {
+                        let picked = sf.pickup_lat(i, take).unwrap();
+                        assert!(picked.parts.iter().any(|&(p, v)| p == black && v > 0.0));
+                        sf.take(i, take);
+                    }
+                    assert_eq!(restored.wet.lat[i].parts, vec![(black, 1.0)]);
+                    let expected = crate::wet::over_latent(&dark.latent(), dark.scatter, restored.px[i], restored.wet.vol[i], crate::wet::bead_cover(restored.wet.cover[i], restored.wet.vol[i], restored.px_mm() * 1000.0), true, true);
+                    assert_eq!(restored.look_px(i), expected);
+                }
+            }
         }
     }
 }

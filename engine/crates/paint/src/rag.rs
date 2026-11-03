@@ -43,6 +43,7 @@ use crate::rng::{Rng, hash2};
 use crate::smoothstep;
 use crate::surface::COAT_UM;
 use crate::tally::{Tally, pace as hand};
+use crate::wet::Latent;
 
 /// Hand time of a rag. [E]: estimates.
 pub mod pace {
@@ -496,6 +497,9 @@ pub struct RagPass {
     /// Refold whenever the face in use is loaded past this (None: never).
     pub refold: Option<f32>,
     pub seed: u64,
+    /// The strokes run where the mask is at least half its highest value, not half of
+    /// full: a faint mask is wiped as a full one is, and lifts by its value.
+    pub graded: bool,
 }
 
 impl Canvas {
@@ -640,9 +644,15 @@ impl Canvas {
                 if take > 0.0 {
                     // (the drain switch: the rag lifts from the top down,
                     // `bristle::take_from`)
-                    let h = if self.drain { crate::bristle::take_from(&mut self.wet.hide[i], self.wet.vol[i], take) } else { self.wet.hide[i] };
+                    let layers = if self.engine >= crate::PIGMENT_MIXER && !self.wet.lat[i].layers.is_empty() {
+                        let (below, top) = self.wet.lat[i].split_top(self.wet.vol[i], self.wet.hide[i], take, self.drain);
+                        Some((Latent::from_layers(below), Latent::from_layers(top)))
+                    } else { None };
+                    let h = if let Some((_, (_, _, h))) = &layers {
+                        if self.drain { crate::bristle::fluid_of(*h) } else { *h }
+                    } else if self.drain { crate::bristle::take_from(&mut self.wet.hide[i], self.wet.vol[i], take) } else { self.wet.hide[i] };
                     if pooled {
-                        let l = &self.wet.lat[i];
+                        let l = layers.as_ref().map_or(&self.wet.lat[i], |(_, (_, lat, _))| lat);
                         got.lat.add_parts(l, take);
                         for q in 0..l.len() {
                             got.lat[q] += l[q] * take;
@@ -658,6 +668,11 @@ impl Canvas {
                         got.vol += take;
                     }
                     let ts = self.rag_take(i, take);
+                    if let Some(((volume, lat, hide), _)) = layers {
+                        self.wet.vol[i] = volume;
+                        self.wet.lat[i] = lat;
+                        self.wet.hide[i] = hide;
+                    }
                     got.solv += ts * COAT_UM;
                     row_s += ts;
                     row += take;
@@ -776,7 +791,9 @@ impl Canvas {
         // drains paint a brush lays (`bristle::ground_drain`)
         if self.drain && self.absorb_any {
             let hd = &mut self.wet.hide[i];
+            let scatter = hd[0];
             self.wet.vol[i] = crate::bristle::ground_drain(&mut self.absorb[i], t, hd);
+            if self.engine >= crate::PIGMENT_MIXER && scatter > 0.0 { self.wet.lat[i].concentrate(hd[0] / scatter); }
         }
         if solv_um > 0.0
             && let Some(sv) = self.wet.solv.get_mut(i)
@@ -1063,7 +1080,7 @@ impl Canvas {
         for pass in 0..o.passes.max(1) {
             let ang = o.angle + if pass == 0 { 0.0 } else { rng.range(-0.18, 0.18) };
             let shift = if pass % 2 == 1 { 0.5 } else { 0.0 };
-            let plan = plan_region(m, rag.width, ang, shift, &mut rng);
+            let plan = plan_region(m, rag.width, ang, shift, o.graded, &mut rng);
             for (k, pts) in plan.iter().enumerate() {
                 if let Some(lim) = o.refold
                     && rag.load > lim
@@ -1091,16 +1108,21 @@ impl Canvas {
 /// Strokes over mask `m` (whole canvas) for a pad `w` units wide, in
 /// direction `ang`: rows about 0.6 pad apart (offset by `shift` rows),
 /// each the runs of the row inside the mask, pulled in at both ends,
-/// bowed a little, alternating direction.
-pub fn plan_region(m: &Mask, w: f32, ang: f32, shift: f32, rng: &mut Rng) -> Vec<Vec<(f32, f32)>> {
+/// bowed a little, alternating direction. Inside: at least 0.5, or `graded`, at least
+/// half the mask's highest value (up to 1).
+pub fn plan_region(m: &Mask, w: f32, ang: f32, shift: f32, graded: bool, rng: &mut Rng) -> Vec<Vec<(f32, f32)>> {
     let f = m.f;
+    let cut = if graded { 0.5 * m.data.iter().fold(0.0f32, |a, &v| a.max(v)).min(1.0) } else { 0.5 };
+    if cut <= 0.0 {
+        return Vec::new();
+    }
     let (c, s) = (ang.cos(), ang.sin());
     // the mask's extent along (u) and across (v) the strokes
     let (mut umin, mut umax, mut vmin, mut vmax) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
     let stride = ((0.1 * w * f.scale) as usize).max(1);
     for py in (0..f.h).step_by(stride) {
         for px in (0..f.w).step_by(stride) {
-            if m.data[py * f.w + px] >= 0.5 {
+            if m.data[py * f.w + px] >= cut {
                 let (x, y) = (f.ux(px), f.uy(py));
                 let (u, v) = (x * c + y * s, -x * s + y * c);
                 umin = umin.min(u);
@@ -1128,7 +1150,7 @@ pub fn plan_region(m: &Mask, w: f32, ang: f32, shift: f32, rng: &mut Rng) -> Vec
         let mut u = umin - du;
         while u <= umax + du {
             let (x, y) = at(u, v);
-            let inside = m.sample(x, y) >= 0.5;
+            let inside = m.sample(x, y) >= cut;
             match (inside, start) {
                 (true, None) => start = Some(u),
                 (false, Some(a)) => {
@@ -1251,7 +1273,7 @@ mod rag_lift {
             let (f0, _) = film(&c, around);
             let (i0, _) = film(&c, inside);
             let mut r = Rag::new(60.0, 3);
-            c.rag_region(&mut r, &m, &RagPass { pressure: 0.6, angle: 0.0, passes: 1, refold: Some(0.5), seed: 5 });
+            c.rag_region(&mut r, &m, &RagPass { pressure: 0.6, angle: 0.0, passes: 1, refold: Some(0.5), seed: 5, graded: false });
             let (f1, _) = film(&c, around);
             let (i1, _) = film(&c, inside);
             let (w, s) = (((670.0 - 330.0) * c.f.scale) as usize, c.f.scale);
@@ -1273,6 +1295,37 @@ mod rag_lift {
 mod tests {
     use super::*;
     use crate::wet::OIL_VOLUME;
+
+    #[test]
+    fn a_rag_lifts_fluid_oil_first_from_a_retained_layer() {
+        let mut c = Canvas::new(2, 1.0, [0.3; 3]).with_engine(9).with_drain(true);
+        let base = crate::Paint::body([0.01; 3]);
+        let top = crate::Paint::body([1.0; 3]);
+        let mut below = base.prop();
+        below[4] = 0.4;
+        below[6] = 0.4;
+        below[7] = 1.0;
+        let mut above = top.prop();
+        above[4] = 0.7;
+        above[6] = 0.4;
+        above[7] = 0.5;
+        let (vol, lat, hide) = Latent::from_layers(vec![
+            crate::wet::Layer { share: 0.6, lat: base.latent(), hide: below },
+            crate::wet::Layer { share: 0.4, lat: top.latent(), hide: above },
+        ]);
+        c.wet.vol.fill(vol);
+        c.wet.lat.fill(lat);
+        c.wet.hide.fill(hide);
+        let mut rag = Rag::new(1000.0, 2);
+        let lifted = c.rag_contact(&mut rag, (0.0, 0.0, 1000.0, 1000.0), 0.5, Touch { secs: 1.0, slip_mm: 0.0 }, None, |_, _| (0.02, 1.0, 0.0, 0.0));
+        assert!(lifted > 0.0);
+        for i in 0..c.wet.vol.len() {
+            let take = vol - c.wet.vol[i];
+            assert!(take > 0.0 && take < 0.2, "lifted {take} coats");
+            assert!((c.wet.vol[i] * c.wet.hide[i][4] - (0.52 - take)).abs() < 1e-6);
+            assert!((c.wet.vol[i] * c.wet.hide[i][7] - 0.8).abs() < 1e-6);
+        }
+    }
 
     #[test]
     fn a_drained_rag_smear_conserves_integrated_scattering() {
@@ -1303,7 +1356,7 @@ mod tests {
                 if i % 240 < 120 {
                     c.wet.vol[i] = 0.8;
                     c.wet.hide[i] = [0.8, 0.6, 1.0, 0.0, 1.0, 0.7, 0.4, 0.0, OIL_VOLUME, 0.0];
-                    *c.wet.lat[i] = mixbox::linear_float_rgb_to_latent(&[0.3, 0.2, 0.1]);
+                    *c.wet.lat[i] = crate::mixer::encode(&[0.3, 0.2, 0.1]);
                     // (painted on before: its ground's pores are full)
                     c.absorb[i] = 0.0;
                 }

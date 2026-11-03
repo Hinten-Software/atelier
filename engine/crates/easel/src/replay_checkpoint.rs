@@ -6,9 +6,10 @@ use sha2::{Digest, Sha256};
 use std::cell::RefCell;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-const MAGIC: &[u8; 8] = b"EASLRP01";
+const MAGIC: &[u8; 8] = b"EASLRP04";
 
 #[derive(Serialize, Deserialize)]
 struct State {
@@ -46,7 +47,7 @@ impl State {
         if (brushes.len(), knives.len(), rags.len()) != (self.brushes.len(), self.knives.len(), self.rags.len()) {
             return Err("replay checkpoint: tool registry differs; refusing reconstruction".into());
         }
-        for (b, value) in brushes.iter().zip(self.brushes) { *b.borrow_mut() = value; }
+        for (b, value) in brushes.iter().zip(self.brushes) { *b.borrow_mut() = value.with_engine(s.tubes.engine); }
         for (b, value) in knives.iter().zip(self.knives) { *b.borrow_mut() = value; }
         for (b, value) in rags.iter().zip(self.rags) { *b.borrow_mut() = value; }
         s.seed = self.seed;
@@ -75,13 +76,104 @@ struct Event {
 enum Outcome { Value(Vec<u8>), RuntimeError(String) }
 
 #[derive(Default)]
+struct Events {
+    file: Option<RefCell<std::fs::File>>,
+    len: usize,
+    end: u64,
+    cursor: u64,
+}
+
+impl Events {
+    fn len(&self) -> usize { self.len }
+
+    fn push(&mut self, bytes: Vec<u8>) -> Result<(), String> {
+        if self.file.is_none() {
+            self.file = Some(RefCell::new(tempfile::tempfile().map_err(|e| e.to_string())?));
+        }
+        let file = self.file.as_mut().unwrap().get_mut();
+        file.seek(SeekFrom::Start(self.end)).map_err(|e| e.to_string())?;
+        file.write_all(&(bytes.len() as u64).to_le_bytes()).and_then(|_| file.write_all(&bytes)).map_err(|e| e.to_string())?;
+        self.end = file.stream_position().map_err(|e| e.to_string())?;
+        self.len += 1;
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<Option<Vec<u8>>, String> {
+        if self.cursor == self.end { return Ok(None); }
+        let file = self.file.as_mut().unwrap().get_mut();
+        file.seek(SeekFrom::Start(self.cursor)).map_err(|e| e.to_string())?;
+        let bytes = Self::read(file)?;
+        self.cursor = file.stream_position().map_err(|e| e.to_string())?;
+        Ok(Some(bytes))
+    }
+
+    fn read(file: &mut std::fs::File) -> Result<Vec<u8>, String> {
+        let mut length = [0; 8];
+        file.read_exact(&mut length).map_err(|e| e.to_string())?;
+        let length = u64::from_le_bytes(length);
+        if length > 4 << 30 { return Err("replay checkpoint: oversized effect event".into()); }
+        let mut bytes = vec![0; length as usize];
+        file.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+        Ok(bytes)
+    }
+
+    fn truncate(&mut self, len: usize, end: u64, cursor: u64) -> Result<(), String> {
+        if let Some(file) = &self.file {
+            file.borrow_mut().set_len(end).map_err(|e| e.to_string())?;
+        }
+        self.len = len;
+        self.end = end;
+        self.cursor = cursor;
+        Ok(())
+    }
+}
+
+impl Serialize for Events {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{Error, SerializeSeq};
+        let mut sequence = serializer.serialize_seq(Some(self.len))?;
+        if let Some(file) = &self.file {
+            let mut file = file.borrow_mut();
+            file.seek(SeekFrom::Start(0)).map_err(S::Error::custom)?;
+            for _ in 0..self.len {
+                let bytes = Self::read(&mut file).map_err(S::Error::custom)?;
+                sequence.serialize_element(&bytes)?;
+            }
+        }
+        sequence.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for Events {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Events;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result { f.write_str("replay effect events") }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut sequence: A) -> Result<Events, A::Error> {
+                use serde::de::Error;
+                let mut events = Events::default();
+                while let Some(bytes) = sequence.next_element::<Vec<u8>>()? {
+                    events.push(bytes).map_err(A::Error::custom)?;
+                }
+                Ok(events)
+            }
+        }
+        deserializer.deserialize_seq(Visitor)
+    }
+}
+
+#[derive(Default)]
 struct Trace {
     enabled: bool,
     playback: bool,
     nested: bool,
-    events: Vec<Vec<u8>>,
+    events: Events,
     at: usize,
     failure: Option<String>,
+    brushes: Vec<Rc<RefCell<paint::Held>>>,
+    knives: Vec<Rc<RefCell<paint::Knife>>>,
+    rags: Vec<Rc<RefCell<paint::rag::Rag>>>,
 }
 
 thread_local! {
@@ -109,8 +201,30 @@ pub fn check() -> mlua::Result<()> {
     })
 }
 
+pub fn chunk_end() {
+    TRACE.with(|t| {
+        let mut t = t.borrow_mut();
+        t.brushes.clear();
+        t.knives.clear();
+        t.rags.clear();
+    });
+}
+
+pub fn hold_tools(st: &S) {
+    TRACE.with(|t| {
+        let mut t = t.borrow_mut();
+        if !t.enabled { return; }
+        let mut s = st.borrow_mut();
+        t.brushes = s.live_brushes();
+        t.knives = s.live_knives();
+        t.rags = s.live_rags();
+    });
+}
+
 pub struct Mark {
     events: usize,
+    end: u64,
+    cursor: u64,
     at: usize,
     failure: Option<String>,
 }
@@ -118,16 +232,16 @@ pub struct Mark {
 pub fn mark() -> Mark {
     TRACE.with(|t| {
         let t = t.borrow();
-        Mark { events: t.events.len(), at: t.at, failure: t.failure.clone() }
+        Mark { events: t.events.len(), end: t.events.end, cursor: t.events.cursor, at: t.at, failure: t.failure.clone() }
     })
 }
 
 pub fn rollback(mark: Mark) {
     TRACE.with(|t| {
         let mut t = t.borrow_mut();
-        t.events.truncate(mark.events);
+        let failure = t.events.truncate(mark.events, mark.end, mark.cursor).err();
         t.at = mark.at;
-        t.failure = mark.failure;
+        t.failure = failure.or(mark.failure);
     });
 }
 
@@ -147,7 +261,7 @@ fn invoke<R: Serialize + DeserializeOwned>(st: Option<&S>, tag: &str, f: impl Fn
     let event = TRACE.with(|t| {
         let mut t = t.borrow_mut();
         if !t.playback { return Ok(None); }
-        let bytes = t.events.get(t.at).ok_or_else(|| "replay checkpoint: exhausted effect trace".to_string())?;
+        let bytes = t.events.next()?.ok_or_else(|| "replay checkpoint: exhausted effect trace".to_string())?;
         let raw = zstd::stream::decode_all(bytes.as_slice()).map_err(|e| format!("replay checkpoint trace: {e}"))?;
         let event: Event = decode(&raw)?;
         t.at += 1;
@@ -182,7 +296,7 @@ fn invoke<R: Serialize + DeserializeOwned>(st: Option<&S>, tag: &str, f: impl Fn
         state: st.map(State::capture), outcome,
     };
     let bytes = zstd::stream::encode_all(encode(&event).map_err(failed)?.as_slice(), 1).map_err(|e| failed(e.to_string()))?;
-    TRACE.with(|t| t.borrow_mut().events.push(bytes));
+    TRACE.with(|t| t.borrow_mut().events.push(bytes)).map_err(failed)?;
     value
 }
 
@@ -209,7 +323,7 @@ impl Identity {
 struct Saved {
     identity: Identity,
     done: usize,
-    events: Vec<Vec<u8>>,
+    events: Events,
     state: State,
     digests: Option<Vec<String>>,
 }
@@ -248,9 +362,10 @@ fn write_checkpoint(path: &Path, s: &Session, identity: &Identity, done: usize, 
         f.write_all(MAGIC).and_then(|_| f.write_all(&[0; 40])).map_err(|e| e.to_string())?;
         {
             let mut writer = zstd::stream::write::Encoder::new(&mut *f, 1).map_err(|e| e.to_string())?;
+            writer.write_all(&paint::mixer::film_identity().to_le_bytes()).map_err(|e| e.to_string())?;
             TRACE.with(|t| {
                 #[derive(Serialize)]
-                struct SavedRef<'a> { identity: &'a Identity, done: usize, events: &'a Vec<Vec<u8>>, state: &'a State, digests: &'a Option<Vec<String>> }
+                struct SavedRef<'a> { identity: &'a Identity, done: usize, events: &'a Events, state: &'a State, digests: &'a Option<Vec<String>> }
                 bincode::serialize_into(&mut writer, &SavedRef { identity, done, events: &t.borrow().events, state: &state, digests }).map_err(|e| e.to_string())
             })?;
             bincode::serialize_into(&mut writer, &s.canvas().is_some()).map_err(|e| e.to_string())?;
@@ -367,7 +482,7 @@ impl Live {
 
     pub fn completed(&mut self, path: &Path, s: &Session, source: &str, width: usize) -> Result<(), String> {
         let done = s.log.len();
-        if done == 0 || (done.saturating_sub(self.done) < 10 && self.written.elapsed() < Duration::from_secs(900)) {
+        if done == 0 || (self.done != 0 && done.saturating_sub(self.done) < 10 && self.written.elapsed() < Duration::from_secs(900)) {
             return Ok(());
         }
         let identity = self.identity(source, width)?;
@@ -380,6 +495,9 @@ impl Live {
 
 pub struct Batch {
     checkpoint: Option<PathBuf>,
+    /// The chunks after which the checkpoint is written (`--checkpoint-at`;
+    /// none: after every chunk).
+    at: Option<Vec<usize>>,
     progress: PathBuf,
     identity: Option<Identity>,
     pub done: usize,
@@ -398,22 +516,32 @@ impl Drop for Batch {
 impl Batch {
     pub fn open(args: &[String], source: &str, width: usize, s: &mut Session, chunks: &[String], out: &Path) -> Result<Self, String> {
         let checkpoint = crate::flag(args, "--replay-checkpoint").map(PathBuf::from);
+        let required = args.iter().any(|a| a == "--require-replay-checkpoint");
+        if required && checkpoint.is_none() { return Err("--require-replay-checkpoint requires --replay-checkpoint".into()); }
         let until = crate::flag(args, "--until-chunk").map(|n| n.parse::<usize>().map_err(|_| "--until-chunk needs a positive chunk number".to_string())).transpose()?.unwrap_or(chunks.len());
         if until == 0 || until > chunks.len() { return Err(format!("--until-chunk must be in 1..={}", chunks.len())); }
         let minutes = crate::flag(args, "--for-minutes").map(|v| v.parse::<f64>().map_err(|_| "--for-minutes needs a positive duration".to_string())).transpose()?;
         if minutes.is_some_and(|m| !m.is_finite() || m <= 0.0) { return Err("--for-minutes needs a positive finite duration".into()); }
         if checkpoint.is_none() && (until < chunks.len() || minutes.is_some()) { return Err("batch limits require --replay-checkpoint".into()); }
+        let at = crate::flag(args, "--checkpoint-at").map(|v| v.split(',').map(|n| n.trim().parse::<usize>().ok().filter(|n| (1..=chunks.len()).contains(n)).ok_or_else(|| format!("--checkpoint-at needs chunk numbers in 1..={}, comma-separated", chunks.len()))).collect::<Result<Vec<_>, _>>()).transpose()?;
+        if at.is_some() && checkpoint.is_none() { return Err("--checkpoint-at requires --replay-checkpoint".into()); }
         let progress = checkpoint.as_deref().unwrap_or(out).with_extension("replay-progress.json");
         let identity = (checkpoint.is_some() || crate::flag(args, "--frames-every").is_some()).then(|| Identity::new(source, width)).transpose()?;
-        let mut batch = Self { checkpoint, progress, identity, done: 0, total: chunks.len(), until, minutes, elapsed_before: 0.0, started: Instant::now(), digests: crate::flag(args, "--state-digest").map(|_| Vec::new()) };
-        if let Some(path) = batch.checkpoint.as_ref().filter(|p| p.exists()) {
+        let mut batch = Self { checkpoint, at, progress, identity, done: 0, total: chunks.len(), until, minutes, elapsed_before: 0.0, started: Instant::now(), digests: crate::flag(args, "--state-digest").map(|_| Vec::new()) };
+        if let Some(path) = batch.checkpoint.as_ref().filter(|p| required || p.exists()) {
             let (mut saved, canvas, elapsed_secs) = load(path)?;
-            if Some(&saved.identity) != batch.identity.as_ref() { return Err("replay checkpoint: source, executable, width or engine environment differs; refusing resume".into()); }
-            if saved.digests.is_some() != batch.digests.is_some() || saved.digests.as_ref().is_some_and(|d| d.len() != saved.done) {
-                return Err("replay checkpoint: --state-digest must be kept consistently across batches".into());
-            }
             if saved.done == 0 || saved.done > chunks.len() || saved.done > until || !elapsed_secs.is_finite() || elapsed_secs < 0.0 {
                 return Err("replay checkpoint: invalid chunk cursor or elapsed time".into());
+            }
+            if Some(&saved.identity) != batch.identity.as_ref() {
+                let mut prefix = batch.identity.as_ref().unwrap().clone();
+                prefix.source = Sha256::digest(source_prefix(source, saved.done)?.as_bytes()).into();
+                if !required || saved.identity != prefix {
+                    return Err("replay checkpoint: source, executable, width or engine environment differs; refusing resume".into());
+                }
+            }
+            if saved.digests.is_some() != batch.digests.is_some() || saved.digests.as_ref().is_some_and(|d| d.len() != saved.done) {
+                return Err("replay checkpoint: --state-digest must be kept consistently across batches".into());
             }
             reconstruct(s, chunks, &mut saved, canvas, &|_, _| {})?;
             batch.done = saved.done;
@@ -438,7 +566,9 @@ impl Batch {
 
     pub fn completed(&mut self, s: &Session, done: usize) -> Result<bool, String> {
         self.done = done;
-        if let Some(path) = &self.checkpoint {
+        if let Some(path) = &self.checkpoint
+            && self.at.as_ref().is_none_or(|at| at.contains(&done))
+        {
             write_checkpoint(path, s, self.identity.as_ref().unwrap(), done, &self.digests, self.elapsed())?;
         }
         let stop = done >= self.until || self.minutes.is_some_and(|m| self.started.elapsed().as_secs_f64() >= m * 60.0);
@@ -470,19 +600,39 @@ fn hash_reader(reader: &mut impl Read) -> Result<[u8; 32], String> {
     Ok(hash.finalize().into())
 }
 
+fn read_saved(reader: &mut impl Read, limit: u64) -> Result<Saved, String> {
+    let options = bincode::DefaultOptions::new().with_fixint_encoding().with_limit(limit);
+    let identity = options.deserialize_from(&mut *reader).map_err(|e| e.to_string())?;
+    let done = options.deserialize_from(&mut *reader).map_err(|e| e.to_string())?;
+    let count: usize = options.deserialize_from(&mut *reader).map_err(|e| e.to_string())?;
+    let mut events = Events::default();
+    for _ in 0..count {
+        events.push(options.deserialize_from(&mut *reader).map_err(|e| e.to_string())?)?;
+    }
+    let state = options.deserialize_from(&mut *reader).map_err(|e| e.to_string())?;
+    let digests = options.deserialize_from(reader).map_err(|e| e.to_string())?;
+    Ok(Saved { identity, done, events, state, digests })
+}
+
 fn load(path: &Path) -> Result<(Saved, Option<paint::Canvas>, f64), String> {
     let result = (|| {
         let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
         let mut magic = [0; 8];
         let mut digest = [0; 32];
         f.read_exact(&mut magic).and_then(|_| f.read_exact(&mut digest)).map_err(|e| e.to_string())?;
+        if matches!(&magic, b"EASLRP01" | b"EASLRP02" | b"EASLRP03") { return Err("replay checkpoint uses an obsolete pigment representation; recreate the checkpoint with this build".into()); }
         if &magic != MAGIC { return Err("not a resumable replay checkpoint (unsupported format)".into()); }
         if hash_reader(&mut f)? != digest { return Err("checkpoint checksum mismatch".into()); }
         f.seek(SeekFrom::Start(40)).map_err(|e| e.to_string())?;
         let mut elapsed = [0; 8];
         f.read_exact(&mut elapsed).map_err(|e| e.to_string())?;
         let mut reader = zstd::stream::read::Decoder::new(f).map_err(|e| e.to_string())?;
-        let saved = bincode::DefaultOptions::new().with_fixint_encoding().with_limit(4 << 30).deserialize_from(&mut reader).map_err(|e| e.to_string())?;
+        let mut mixer = [0; 8];
+        reader.read_exact(&mut mixer).map_err(|e| e.to_string())?;
+        if u64::from_le_bytes(mixer) != paint::mixer::film_identity() {
+            return Err("replay checkpoint uses an obsolete pigment representation; recreate the checkpoint with this build".into());
+        }
+        let saved = read_saved(&mut reader, 4 << 30)?;
         let has_canvas: bool = bincode::deserialize_from(&mut reader).map_err(|e| e.to_string())?;
         let (canvas, header) = if has_canvas {
             let (canvas, header) = paint::Canvas::read_state(&mut reader).map_err(|e| e.to_string())?;
@@ -578,6 +728,34 @@ print(counter,rand(),drying(300,300))
     }
 
     #[test]
+    fn checkpoint_budget_is_per_record_not_per_history() {
+        let limit = 64 << 10;
+        let mut saved = Saved {
+            identity: Identity { build: [1; 32], source: [2; 32], width: 64, environment: Vec::new() },
+            done: 20,
+            events: Events::default(),
+            state: State::capture(&session().st),
+            digests: Some(vec!["kept".into()]),
+        };
+        for _ in 0..20 { saved.events.push(vec![7; 8 << 10]).unwrap(); }
+        let mut bytes = encode(&saved).unwrap();
+        assert!(bytes.len() > limit as usize);
+        bytes.push(0);
+        let mut reader = bytes.as_slice();
+        let restored = read_saved(&mut reader, limit).unwrap();
+        assert_eq!(restored.identity, saved.identity);
+        assert_eq!(restored.done, saved.done);
+        assert_eq!(encode(&restored.events).unwrap(), encode(&saved.events).unwrap());
+        assert_eq!(encode(&restored.state).unwrap(), encode(&saved.state).unwrap());
+        assert_eq!(restored.digests, saved.digests);
+        assert_eq!(reader, [0]);
+
+        saved.events = Events::default();
+        saved.events.push(vec![0; limit as usize]).unwrap();
+        assert!(read_saved(&mut encode(&saved).unwrap().as_slice(), limit).err().unwrap().contains("size limit"));
+    }
+
+    #[test]
     fn batch_identity_is_only_built_for_checkpoints_or_frames() {
         let dir = Temp::new();
         let chunks = crate::session::parse_program(SOURCE);
@@ -615,6 +793,37 @@ print(counter,rand(),drying(300,300))
     }
 
     #[test]
+    fn drying_omission_footer_reconstructs_from_checkpoint() {
+        let dir = Temp::new();
+        let mut s = session();
+        let mut live = Live::new();
+        for chunk in [
+            r#"canvas{size=200,aspect=1.25,linen=15,seed=7,ground={{pile={{"lead white",1}},um=40,apply="knife"}}}
+                p=pile{{"lead white",6},{"smalt",1},medium=0.2}
+                m=rect(100,100,100,100); work(m,{pile=p,coverage=3,fill=true,clip=true,seed=1})
+                while drying(150,150)=="open" do wait(10) end"#,
+            "for i=1,4 do blend(m,{coverage=0,seed=i}) end",
+        ] {
+            live.with(|| s.run(chunk)).unwrap();
+        }
+        assert!(s.st.borrow().out.ends_with("(and 1 more passes on setting or tacky paint)\n"), "{}", s.st.borrow().out);
+        let source = s.program("live");
+        let chunks = crate::session::parse_program(&source);
+        let path = dir.0.join("live.ckpt");
+        live.written -= Duration::from_secs(900);
+        live.completed(&path, &s, &source, 64).unwrap();
+        let mut restored = session();
+        let mut resumed = Live::new();
+        assert_eq!(resumed.resume(&path, &source, 64, &mut restored, &chunks, "live", &|_, _| {}).unwrap(), 2);
+        assert_eq!(canvas(&restored), canvas(&s));
+        assert_eq!(encode(&State::capture(&restored.st)).unwrap(), encode(&State::capture(&s.st)).unwrap());
+        assert_eq!(encode(&resumed.trace.events).unwrap(), encode(&live.trace.events).unwrap());
+        let next = "for i=1,4 do blend(m,{coverage=0,seed=i}) end";
+        assert_eq!(resumed.with(|| restored.run(next)).unwrap().out, live.with(|| s.run(next)).unwrap().out);
+        assert_eq!(canvas(&restored), canvas(&s));
+    }
+
+    #[test]
     fn checkpoint_round_trip_reconstructs_closures_aliases_tools_rng_and_clock() {
         let dir = Temp::new();
         let chunks = crate::session::parse_program(SOURCE);
@@ -636,6 +845,7 @@ print(counter,rand(),drying(300,300))
         assert_eq!(encode(&State::capture(&s.st)).unwrap(), encode(&State::capture(&plain.st)).unwrap());
         assert_eq!(s.lua.globals().get::<usize>("counter").unwrap(), 5);
         assert_eq!(s.log.len(), chunks.len());
+        assert_eq!(s.log.iter().map(|c| c.mark_effects).collect::<Vec<_>>(), plain.log.iter().map(|c| c.mark_effects).collect::<Vec<_>>());
     }
 
     #[test]
@@ -665,6 +875,7 @@ print(counter,rand(),drying(300,300))
                 assert_eq!(encode(&State::capture(&s.st)).unwrap(), encode(&State::capture(&plain.st)).unwrap());
                 assert_eq!(s.held_stick("p").unwrap(), plain.held_stick("p").unwrap());
                 assert_eq!(s.program("pastel"), source);
+                assert_eq!(s.log.iter().map(|c| c.mark_effects).collect::<Vec<_>>(), plain.log.iter().map(|c| c.mark_effects).collect::<Vec<_>>());
             }
         }
     }
@@ -714,6 +925,37 @@ print(counter,rand(),drying(300,300))
         assert!(read()["current_chunk"].is_null());
     }
 
+    /// `--checkpoint-at` writes the replay checkpoint only after the chunks
+    /// it names (a benchmark replay whose checkpoint is the size of the
+    /// painting), the progress still at every chunk.
+    #[test]
+    fn checkpoint_at_writes_only_after_the_named_chunks() {
+        let dir = Temp::new();
+        let chunks = crate::session::parse_program(SOURCE);
+        let mut s = session();
+        let mut args = args(&dir.0, 3);
+        args.extend(["--checkpoint-at".into(), "2".into()]);
+        let mut batch = Batch::open(&args, SOURCE, 64, &mut s, &chunks, &dir.0.join("out.png")).unwrap();
+        let (checkpoint, progress) = (dir.0.join("replay.ckpt"), dir.0.join("replay.replay-progress.json"));
+        batch.begin().unwrap();
+        for (i, chunk) in chunks.iter().take(3).enumerate() {
+            batch.begin_chunk(i + 1).unwrap();
+            s.run(chunk).unwrap();
+            batch.completed(&s, i + 1).unwrap();
+            assert_eq!(checkpoint.exists(), i + 1 >= 2, "chunk {}", i + 1);
+            assert_eq!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(&progress).unwrap()).unwrap()["chunks_done"], i + 1);
+        }
+        assert_eq!(load(&checkpoint).unwrap().0.done, 2);
+        for bad in ["0", "9", "two", "2,"] {
+            let mut args = self::args(&dir.0, 3);
+            args.extend(["--checkpoint-at".into(), bad.into()]);
+            let e = Batch::open(&args, SOURCE, 64, &mut session(), &chunks, &dir.0.join("out.png")).err().unwrap();
+            assert!(e.contains("--checkpoint-at"), "{bad}: {e}");
+        }
+        let e = Batch::open(&["--checkpoint-at".into(), "2".into()], SOURCE, 64, &mut session(), &chunks, &dir.0.join("out.png")).err().unwrap();
+        assert!(e.contains("requires --replay-checkpoint"), "{e}");
+    }
+
     #[test]
     fn trace_failure_cannot_be_hidden_by_lua_pcall() {
         let mut s = session();
@@ -729,25 +971,40 @@ print(counter,rand(),drying(300,300))
         let path = dir.0.join("live.ckpt");
         let mut s = session();
         let mut live = Live::new();
-        for done in 1..=10 {
+        for done in 1..=11 {
             live.with(|| s.run("counter = (counter or 0) + 1")).unwrap();
             live.completed(&path, &s, &s.program("live"), 64).unwrap();
-            assert_eq!(path.exists(), done == 10);
+            assert_eq!(load(&path).unwrap().0.done, if done < 11 { 1 } else { 11 });
         }
-        assert_eq!(load(&path).unwrap().0.done, 10);
+        assert_eq!(load(&path).unwrap().0.done, 11);
         live.with(|| s.run("counter = (counter or 0) + 1")).unwrap();
         live.completed(&path, &s, &s.program("live"), 64).unwrap();
-        assert_eq!(load(&path).unwrap().0.done, 10);
+        assert_eq!(load(&path).unwrap().0.done, 11);
         live.written -= Duration::from_secs(900);
         let written = live.written;
         assert!(live.completed(&dir.0, &s, &s.program("live"), 64).is_err());
-        assert_eq!(live.done, 10);
-        assert_eq!(live.written, written);
-        assert_eq!(load(&path).unwrap().0.done, 10);
-        live.completed(&path, &s, &s.program("live"), 64).unwrap();
         assert_eq!(live.done, 11);
-        assert!(live.written > written);
+        assert_eq!(live.written, written);
         assert_eq!(load(&path).unwrap().0.done, 11);
+        live.completed(&path, &s, &s.program("live"), 64).unwrap();
+        assert_eq!(live.done, 12);
+        assert!(live.written > written);
+        assert_eq!(load(&path).unwrap().0.done, 12);
+    }
+
+    #[test]
+    fn the_first_checkpoint_is_retried_after_a_failed_write() {
+        let dir = Temp::new();
+        let path = dir.0.join("live.ckpt");
+        let mut s = session();
+        let mut live = Live::new();
+        live.with(|| s.run("counter = 1")).unwrap();
+        let written = live.written;
+        assert!(live.completed(&dir.0, &s, &s.program("live"), 64).is_err());
+        assert_eq!(live.done, 0);
+        assert_eq!(live.written, written);
+        live.completed(&path, &s, &s.program("live"), 64).unwrap();
+        assert_eq!(load(&path).unwrap().0.done, 1);
     }
 
     #[test]
@@ -778,11 +1035,36 @@ print(counter,rand(),drying(300,300))
         }
         assert_eq!(canvas(&restored), canvas(&s));
         assert_eq!(encode(&State::capture(&restored.st)).unwrap(), encode(&State::capture(&s.st)).unwrap());
-        assert_eq!(resumed.trace.events, live.trace.events);
+        assert_eq!(encode(&resumed.trace.events).unwrap(), encode(&live.trace.events).unwrap());
         assert!(!resumed.trace.playback);
         resumed.written -= Duration::from_secs(900);
         resumed.completed(&path, &restored, &source, 64).unwrap();
         assert_eq!(load(&path).unwrap().0.done, chunks.len());
+    }
+
+    #[test]
+    fn live_checkpoint_reconstructs_temporary_tools_across_gc_schedules() {
+        let dir = Temp::new();
+        let path = dir.0.join("replay.ckpt");
+        let mut s = session();
+        s.lua.gc_stop();
+        let mut live = Live::new();
+        for chunk in [
+            r#"canvas{size=100, aspect=1, linen=15, seed=3, ground={{pile={{"lead white",1}},um=20,apply="knife"}}}"#,
+            "for i=1,100 do local r=rag{width=7}; r:dip(1); r:wipe({{100,100},{101,101}}) end",
+        ] { live.with(|| s.run(chunk)).unwrap(); }
+        live.written -= Duration::from_secs(900);
+        let source = s.program("live");
+        live.completed(&path, &s, &source, 64).unwrap();
+        let mut restored = session();
+        restored.lua.gc_set_mode(mlua::state::GcMode::Incremental(mlua::state::GcIncParams::default().pause(100).step_multiplier(1000).step_size(1)));
+        restored.lua.gc_restart();
+        let mut resumed = Live::new();
+        let chunks = crate::session::parse_program(&source);
+        assert_eq!(resumed.resume(&path, &source, 64, &mut restored, &chunks, "live", &|_, _| {}).unwrap(), 2);
+        assert_eq!(canvas(&restored), canvas(&s));
+        assert!(s.st.borrow_mut().live_rags().is_empty());
+        assert!(restored.st.borrow_mut().live_rags().is_empty());
     }
 
     #[test]
@@ -843,6 +1125,35 @@ print(counter,rand(),drying(300,300))
     }
 
     #[test]
+    fn effect_history_does_not_accumulate_in_memory() {
+        const CHILD: &str = "EASEL_TEST_EFFECT_MEMORY";
+        if std::env::var_os(CHILD).is_some() {
+            let mut live = Live::new();
+            let mut rng = paint::Rng::new(73);
+            let mut payload = vec![0u8; 64 << 10];
+            live.with(|| {
+                for _ in 0..1024 {
+                    for bytes in payload.chunks_exact_mut(8) {
+                        bytes.copy_from_slice(&rng.next_u64().to_le_bytes());
+                    }
+                    read("memory", || Ok(payload.clone())).unwrap();
+                }
+            });
+            assert_eq!(live.trace.events.len(), 1024);
+            let output = std::process::Command::new(if cfg!(target_os = "macos") { "/bin/ps" } else { "ps" })
+                .args(["-o", "rss=", "-p", &std::process::id().to_string()]).output().unwrap();
+            assert!(output.status.success());
+            let rss: usize = std::str::from_utf8(&output.stdout).unwrap().trim().parse().unwrap();
+            assert!(rss < 48 << 10, "effect history retained {rss} KiB RSS for 64 MiB of payloads");
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "replay_checkpoint::tests::effect_history_does_not_accumulate_in_memory", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[test]
     fn trace_rollback_discards_failed_events_and_restores_failure() {
         let mut live = Live::new();
         live.with(|| {
@@ -885,10 +1196,45 @@ print(counter,rand(),drying(300,300))
             Identity::new(SOURCE, 64).unwrap();
             return;
         }
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "replay_checkpoint::tests::unrelated_non_utf8_environment_is_ignored"])
             .env("REPLAY_TEST_NON_UTF8", std::ffi::OsString::from_vec(vec![0xff]))
-            .status().unwrap();
-        assert!(status.success());
+            .output().unwrap();
+        assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+
+    #[test]
+    fn obsolete_tool_snapshot_representation_is_refused_explicitly() {
+        let dir = Temp::new();
+        let path = dir.0.join("obsolete.ck");
+        for magic in [b"EASLRP01", b"EASLRP02", b"EASLRP03"] {
+            let mut bytes = magic.to_vec();
+            bytes.extend_from_slice(&[0; 32]);
+            std::fs::write(&path, bytes).unwrap();
+            assert!(load(&path).err().unwrap().contains("obsolete pigment representation"));
+        }
+    }
+
+    #[test]
+    fn a_changed_mixer_refuses_canvas_free_tool_snapshots() {
+        let dir = Temp::new();
+        let path = dir.0.join("tools.ck");
+        let source = "b = brush{kind='round',width=2}";
+        let mut s = Session::new(64).unwrap();
+        s.run(source).unwrap();
+        let identity = Identity::new(source, 64).unwrap();
+        write_checkpoint(&path, &s, &identity, 1, &None, 0.0).unwrap();
+        let (saved, canvas, _) = load(&path).unwrap();
+        assert!(canvas.is_none());
+        assert_eq!(saved.state.brushes.len(), 1);
+        let bytes = std::fs::read(&path).unwrap();
+        let mut payload = zstd::stream::decode_all(&bytes[48..]).unwrap();
+        payload[..8].copy_from_slice(&(paint::mixer::identity() ^ 1).to_le_bytes());
+        let mut changed = bytes[..48].to_vec();
+        changed.extend(zstd::stream::encode_all(payload.as_slice(), 1).unwrap());
+        let digest = Sha256::digest(&changed[40..]);
+        changed[8..40].copy_from_slice(&digest);
+        std::fs::write(&path, changed).unwrap();
+        assert!(load(&path).err().unwrap().contains("obsolete pigment representation"));
     }
 }

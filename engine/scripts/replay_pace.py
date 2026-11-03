@@ -38,6 +38,7 @@ import argparse
 import hashlib
 import math
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -93,13 +94,22 @@ def changes(d: Path, ms):
         out.append(known[key][0])
         prev_f = f
     if new:
-        cache.write_text("".join(f"{a}\t{b}\t{c:.5f}\t{ha}\t{hb}\n" for (a, b), (c, ha, hb) in known.items()))
+        with tempfile.NamedTemporaryFile(mode="w", dir=d, delete=False) as target:
+            temporary = Path(target.name)
+            try:
+                target.write("".join(f"{a}\t{b}\t{c:.5f}\t{ha}\t{hb}\n" for (a, b), (c, ha, hb) in known.items()))
+                target.close()
+                temporary.replace(cache)
+            finally:
+                temporary.unlink(missing_ok=True)
     return np.array(out)
 
 
 def schedule(c, h, a):
     """Seconds per moment but the last, which the final hold shows."""
     n = len(c)
+    if n == 1 and a.painted_input:
+        return np.array([min(a.length - a.hold, a.max_hold)])
     cs = c.copy()
     cs[1:-1] = 0.25 * c[:-2] + 0.5 * c[1:-1] + 0.25 * c[2:]
     ch = cs[1:] ** a.gamma
@@ -107,6 +117,8 @@ def schedule(c, h, a):
     w = np.zeros(n)
     w[1:] = (1 - a.floor) * ch / max(ch.sum(), 1e-12) + a.floor * hand / max(hand.sum(), 1e-12)
     w[0] = 0.0  # the bare ground arrives with no change: its time comes from the next frame's
+    if a.painted_input:
+        w[0] = w[1]
     if a.ramp < 1:
         # speed up the opening: moments in the first --ramp-span of hand time get
         # their weight scaled from --ramp up to 1 (smoothstep), so the lay-in
@@ -114,6 +126,8 @@ def schedule(c, h, a):
         u = np.clip(h[: n] / max(h[-1], 1e-12) / max(a.ramp_span, 1e-6), 0, 1)
         w *= a.ramp + (1 - a.ramp) * (u * u * (3 - 2 * u))
     w = w[:-1]  # the last moment's time is the hold, not a share of the rest
+    if a.painted_input and not w.any():
+        w.fill(1)
     want = a.length - a.hold
     k = want / w.sum()
     for _ in range(50):
@@ -157,12 +171,13 @@ def evenness(c, secs):
     b = np.minimum((t * 10).astype(int), 9)
     s = np.sqrt(c)
     v = np.array([s[b == k].sum() for k in range(10)])
-    return 100 * v / v.sum()
+    return 100 * v / max(v.sum(), 1e-12)
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("dir", type=Path)
+    ap.add_argument("--out", type=Path)
     ap.add_argument("--length", type=float, default=50)
     ap.add_argument("--max-hold", type=float, default=1.0)
     ap.add_argument("--hold", type=float, default=3.0)
@@ -175,14 +190,18 @@ def main():
     ap.add_argument("--open-hold", type=float, default=0.0, help="seconds the bare canvas is shown first")
     ap.add_argument("--ramp-span", type=float, default=0.35, help="share of hand time over which the ramp eases to 1")
     ap.add_argument("--before", type=float, default=0.0, help="seconds of clip before this list, for the length message")
+    ap.add_argument("--painted-input", action="store_true", help="input already starts on paint, not bare ground")
     ap.add_argument("--eval", action="store_true", help="print evenness for this schedule and for plain --hand-pace")
     a = ap.parse_args()
     if a.length <= a.hold + a.open_hold:
         sys.exit(f"replay_pace: --length must exceed the {a.hold} s final hold plus the {a.open_hold} s opening hold")
     opening = round(a.open_hold * a.fps)
     ms = moments(a.dir)
-    h = np.array([x[1] for x in ms])
     c = changes(a.dir, ms)
+    if a.out:
+        ms = [(str(a.dir.resolve() / f), h) for f, h in ms]
+    process = ms[:-1] if len(ms) > 1 or not a.painted_input else ms
+    h = np.array([x[1] for x in ms])
     # the moments shown, each held at most --max-hold (in whole video frames),
     # may not fill --length
     m = int((schedule(c, h, a) > 0).sum())
@@ -213,7 +232,7 @@ def main():
     a.length = target
     lines, shown = [], 0
     # moment i is shown for fr[i] frames, the time its own arrival earned
-    for (f, _), n in zip(ms[:-1], fr):
+    for (f, _), n in zip(process, fr):
         if n > 0:
             lines.append(f"{entry(f)}duration {n / a.fps:.5f}\n")
             shown += 1
@@ -222,16 +241,16 @@ def main():
     # (less the two frames after it), then a one-frame repeat, then the frame
     # again (a frame)
     lines.append(f"{last}duration {a.hold - 2 / a.fps:.5f}\n{last}duration {1 / a.fps:.5f}\n{last}")
-    (a.dir / "concat.txt").write_text("".join(lines))
+    (a.out or a.dir / "concat.txt").write_text("".join(lines))
     total = sum(fr) / a.fps + a.hold
     print(f"{len(ms)} moments, {shown + 1} shown, {h[-1] / 60:.1f} min of hand time, pace dynamic (floor {a.floor}, gamma {a.gamma}): about {total:.1f} s of clip", file=sys.stderr)
     if a.eval:
-        secs = [n / a.fps for n in fr] + [0.0]
+        secs = [n / a.fps for n in fr] + [0.0] * (len(ms) - len(fr))
         e = evenness(c, secs)
         # the numeric --pace schedule: each frame held for the hand time to
         # the next, on the curve hand_time^pace
         hand = np.append(np.diff(h ** a.hand_pace), 0.0)
-        e2 = evenness(c, hand / hand.sum() * (a.length - a.hold))
+        e2 = evenness(c, hand / max(hand.sum(), 1e-12) * (a.length - a.hold))
         for name, v in (("dynamic", e), (f"hand^{a.hand_pace}", e2)):
             print(f"{name:10s} per tenth: {' '.join(f'{x:4.1f}' for x in v)}   min {v.min():.1f} max {v.max():.1f} sd {v.std():.1f}", file=sys.stderr)
 

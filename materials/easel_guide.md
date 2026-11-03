@@ -114,7 +114,11 @@ print(table.concat(tubes(), ", "))   -- the names in the box
 ```
 
 A pile is parts by volume of named tubes, plus `medium`: the share of oil
-medium mixed in (0, as from the tube, to 0.95). Medium makes the paint more
+medium mixed in (0, as from the tube, to 0.95). Only the parts'
+proportions count: `{{"<tube A>", 4}, {"<tube B>", 1}}` and
+`{{"<tube A>", 0.4}, {"<tube B>", 0.1}}` knife the same paint. To thin it,
+raise `medium`, `turps` or `thinner`; to lay less of it, lower the `load`.
+Medium makes the paint more
 transparent and more fluid, and slower to dry. It is added oil only. What a pile looks like is
 what its pigments make together, thick or thin, over what is already on
 the canvas; you find out by painting with it and looking. A pile mixed by
@@ -159,8 +163,10 @@ line, the paper draws the full share.) A pile takes either medium or blot.
 - `mix{{p1, <share>}, {p2, <share>}, ..., name=}` knifes heaps together into a
   new heap, as they are now.
 - `palette{scrape={p1, p2, ...}}` scrapes those piles off the board. A pile
-  scraped off is knifed fresh the next time it is used, if the palette has
-  room for it.
+  whose variable is gone goes by the name `palette()` lists it under:
+  `palette{scrape={"sky", "pile 7"}}` scrapes every heap listed as "sky" and
+  the one listed as "pile 7". A pile scraped off is knifed fresh the next
+  time it is used, if the palette has room for it.
 - `palette{set_out={"<tube>", ...}}` sets out only those tubes, a limited
   palette: a pile of any other is an error.
 - `palette{dirty=<0..1>}` keeps the board as dirty as a working palette gets. A brush
@@ -176,24 +182,24 @@ The tube box:
 
 | tube | pigment | hiding | stiffness | tinting strength | drying |
 |---|---|---|---|---|---|
-| lead white | basic lead carbonate | 0.82 | 0.8 | 1.0 | 2.0 |
+| lead white | basic lead carbonate | 0.82 | 0.8 | 0.6537508 | 2.0 |
 | smalt | cobalt potash glass, coarse | 0.3 | 0.55 | 0.45 | 1.6 |
 | pale smalt | a paler grade of smalt | 0.35 | 0.55 | 0.35 | 1.6 |
 | yellow ochre | hydrated iron oxide earth | 0.8 | 0.7 | 0.8 | 0.8 |
 | red earth | iron oxide earth | 0.85 | 0.7 | 0.9 | 1.0 |
-| vermilion | mercuric sulfide | 0.9 | 0.75 | 1.0 | 0.4 |
+| vermilion | mercuric sulfide | 0.9 | 0.75 | 0.989209 | 0.4 |
 | raw umber | iron and manganese oxide earth | 0.8 | 0.65 | 0.9 | 2.4 |
-| bone black | charred bone (carbon, calcium phosphate) | 0.9 | 0.7 | 1.1 | 0.9 |
-| cobalt blue | cobalt aluminate | 0.55 | 0.6 | 0.8 | 2.2 |
-| chrome yellow | lead chromate | 0.9 | 0.7 | 1.0 | 1.8 |
-| Prussian blue | iron ferrocyanide | 0.35 | 0.45 | 3.0 | 2.4 |
+| bone black | charred bone (carbon, calcium phosphate) | 0.9 | 0.7 | 1.0000027 | 0.9 |
+| cobalt blue | cobalt aluminate | 0.55 | 0.6 | 1.0028677 | 2.2 |
+| chrome yellow | lead chromate | 0.9 | 0.7 | 0.8445485 | 1.8 |
+| Prussian blue | iron ferrocyanide | 0.35 | 0.45 | 1.0 | 2.4 |
 | green earth | celadonite and glauconite clay | 0.2 | 0.35 | 0.3 | 0.8 |
 | Rinmann's green | cobalt-zinc oxide | 0.35 | 0.5 | 0.4 | 1.4 |
 | copper green | verdigris ground in oil | 0.25 | 0.4 | 1.0 | 1.6 |
 | zinc white | zinc oxide | 0.6 | 0.6 | 1.0 | 0.35 |
 | lead-tin yellow | lead-tin oxide | 0.85 | 0.75 | 0.6 | 2.0 |
 | Naples yellow | lead antimonate | 0.85 | 0.75 | 0.6 | 1.6 |
-| lemon chrome | pale lead chromate with lead sulfate | 0.8 | 0.7 | 0.8 | 1.8 |
+| lemon chrome | pale lead chromate with lead sulfate | 0.8 | 0.7 | 0.9998816 | 1.8 |
 | pale cadmium | cadmium sulfide, a pale grade | 0.85 | 0.7 | 1.1 | 0.9 |
 | deep cadmium | cadmium sulfide, a deep grade | 0.9 | 0.6 | 1.2 | 0.9 |
 | cadmium yellow | cadmium sulfide | 0.85 | 0.7 | 1.1 | 0.9 |
@@ -204,9 +210,9 @@ The tube box:
 | raw sienna | sienna earth, unroasted | 0.4 | 0.5 | 0.7 | 1.2 |
 | orange chrome | basic lead chromate | 0.88 | 0.75 | 0.9 | 1.8 |
 | Mars orange | synthetic iron oxide, an orange grade | 0.5 | 0.7 | 1.1 | 1.1 |
-| red lead | lead tetroxide | 0.85 | 0.8 | 0.8 | 2.2 |
-| orange vermilion | mercuric sulfide, a yellower grade | 0.9 | 0.75 | 1.0 | 0.4 |
-| Chinese vermilion | mercuric sulfide, a deeper grade | 0.9 | 0.75 | 1.0 | 0.4 |
+| red lead | lead tetroxide | 0.85 | 0.8 | 0.9766364 | 2.2 |
+| orange vermilion | mercuric sulfide, a yellower grade | 0.9 | 0.75 | 0.989209 | 0.4 |
+| Chinese vermilion | mercuric sulfide, a deeper grade | 0.9 | 0.75 | 0.989209 | 0.4 |
 | cadmium red | cadmium sulfoselenide | 0.9 | 0.7 | 1.1 | 0.9 |
 | Mars red | synthetic iron oxide | 0.9 | 0.7 | 1.2 | 1.1 |
 | Indian red | nearly pure ferric oxide | 0.92 | 0.7 | 1.2 | 1.0 |
@@ -218,25 +224,31 @@ The tube box:
 | bone brown | bone roasted until brown | 0.6 | 0.6 | 0.9 | 0.3 |
 | bitumen | asphaltum | 0.12 | 0.3 | 0.7 | 0.15 |
 | cerulean blue | cobalt stannate | 0.8 | 0.7 | 0.6 | 1.4 |
-| ultramarine blue | synthetic ultramarine | 0.3 | 0.5 | 1.1 | 0.95 |
+| ultramarine blue | synthetic ultramarine | 0.3 | 0.5 | 1.0021298 | 0.95 |
 | ultramarine ash | natural ultramarine, a pale last extraction | 0.15 | 0.5 | 0.3 | 0.95 |
 | Antwerp blue | Prussian blue on an alumina base | 0.4 | 0.45 | 1.6 | 1.6 |
-| viridian | hydrated chromium oxide | 0.3 | 0.5 | 0.9 | 1.0 |
-| emerald green | copper aceto-arsenite | 0.6 | 0.6 | 0.6 | 1.6 |
+| viridian | hydrated chromium oxide | 0.3 | 0.5 | 1.0000236 | 1.0 |
+| emerald green | copper aceto-arsenite | 0.6 | 0.6 | 1.0588969 | 1.6 |
 | cobalt violet | cobalt phosphate or arsenate | 0.35 | 0.55 | 0.35 | 1.4 |
 | strontium yellow | strontium chromate | 0.55 | 0.65 | 0.8 | 1.0 |
 | barium yellow | barium chromate (lemon yellow) | 0.45 | 0.7 | 0.9 | 1.0 |
 | zinc yellow | potassium zinc chromate | 0.4 | 0.6 | 0.65 | 0.8 |
-| carmine lake | carminic acid (cochineal) on alumina | 0.1 | 0.3 | 1.2 | 0.4 |
+| carmine lake | carminic acid (cochineal) on alumina | 0.1 | 0.3 | 1.0044435 | 0.4 |
 | yellow lake | flavonoid dye (weld, quercitron) on alumina and chalk | 0.08 | 0.35 | 0.5 | 0.4 |
 | vine black | charcoal of vine twigs | 0.75 | 0.45 | 0.6 | 0.9 |
 
-Hiding is how much one coat of the tube paint hides what is under it (0
-transparent, 1 opaque). Stiffness is the paint's body as it comes from the
-tube (0 fluid, 1 stiff). Tinting strength is relative to an average
-pigment. Drying is the rate relative to average paint (higher dries
-faster); a pile dries at its tubes' rates mixed by volume. These numbers
-are estimates from the pigment literature.
+Hiding is the tube's hiding as the pigment literature gives it (0
+transparent, 1 opaque); in a painting, how much a coat hides follows from
+what its pigments absorb and scatter, so a strong tube hides far more
+than its number. Stiffness is the paint's body as it comes from the tube
+(0 fluid, 1 stiff). Tinting strength is relative to an average pigment.
+Some tubes mix from measurements of real oil paint: for them the
+measurement carries the strength and this number is only a calibration
+weight, so a tube at 1.0 can tint white more than ten times as strongly as
+an earth at 0.8. Drying is the rate relative to average paint (higher dries
+faster); a pile dries at its tubes' rates mixed by volume. The other
+numbers, and the colors and strengths of the tubes not measured, are
+estimates from the pigment literature.
 
 ### Thinner
 
@@ -382,7 +394,7 @@ change:
 | `hatch` | round 2.6 | 5–12 units, nearly straight, side by side, clumped |
 | `glaze` | soft filbert 26 | 120–300 units, light pressure; a thin film (below) |
 | `scumble` | filbert 9 | 10–20 units, worked back and forth; a thin, broken veil (below) |
-| `blend` | badger 40 | a clean blender, crossing passes top to bottom, inside the mask. It is wiped clean as it goes, so it lifts paint as well as moving it: one pass takes up about 15% of a thin wet film, three passes about 40% |
+| `blend` | badger 40 | a clean blender, crossing passes top to bottom, inside the mask. It is wiped clean as it goes, so it lifts paint as well as moving it: one pass takes up about 15% of a thin wet film, three passes about 40%: paint taken off, not a set change in value; what the value does depends on what the lift uncovers |
 
 | option | meaning |
 |---|---|
@@ -412,7 +424,9 @@ valid ones.
 wherever its strokes reach. Where strokes overlap, the film gets no
 thicker. What shows through it depends on the pile: the more medium, the
 more transparent the film; transparent tubes tint what is under it, and
-white veils it. Each further pass adds another film. A `scumble` pass
+white veils it. How strong the paint is counts as much as its hiding: the
+strongest tubes lay a dark, nearly opaque film even with much medium.
+Each further pass adds another film. A `scumble` pass
 lays a thinner film, about 5 µm, as a broken veil; laid with body paint,
 it hides part of what it crosses. For both hands, `coverage` is the share
 of the mask the film reaches: 1 reaches all of it, 0.5 about half, and the
@@ -464,8 +478,10 @@ strokes.
 
 ## Masks and geometry
 
-Masks are coverage maps (0..1) of the whole canvas. Operations return new
-masks.
+Masks are maps of the whole canvas, and operations return new masks. Shapes
+and `mask(fn)` give coverage (0..1). `m:distance()` gives signed distance in
+units (positive inside the edge, negative outside), and `m:map(fn)` keeps
+whatever `fn` returns, so both can run past 0..1.
 
 ```lua
 everywhere()   rect(x, y, w, h)   ellipse(cx, cy, rx, ry)
@@ -479,6 +495,15 @@ m:roughen(units, period, seed, edge)   m:soften(units)   m:blur(units)
 m:grow(units)   m:shrink(units)   m:offset(units)   m:rim(width, soft)
 m:distance()   m:band(lo, hi, soft)   m:times(fn or mask)   m:map(function(v) return v * v end)
 m:at(x, y)   m:area()
+```
+
+To turn a field back into coverage, band it, clamp it or ramp it:
+
+```lua
+d = m:distance()
+d:band(0, 40, 4)                                       -- the 40 units just inside the edge
+d:map(function(v) return clamp(v / 40, 0, 1) end)      -- 0 at the edge, 1 from 40 units in
+d:map(function(v) return smoothstep(-20, 20, v) end)   -- a soft edge 40 units wide
 ```
 
 `m:soften(units)` gives a hard edge a ramp that many units wide and leaves
@@ -709,7 +734,9 @@ Every successful paint reply reports the current painting time, before
   `"open"` (workable: it blends and lifts), `"setting"` (stiff, barely
   blends), `"tacky"` (set; it grabs the brush) or `"dry"` (touch-dry).
   It reads the top film at that point: where no wet paint lies there (a
-  gap between strokes, a wiped spot), it reads the layer beneath.
+  gap between strokes, a wiped spot), it reads the layer beneath. It only
+  reports: a pass later in the same chunk runs whatever it returns, unless
+  your code tests the answer (`if drying(x, y) ~= "open" then ... end`).
 
 Each film dries at its own pace, set by its pigments, its thickness and
 its oil. It is open for the first 30% of its time to touch-dry, setting
@@ -842,3 +869,8 @@ stamped with the painting's time, such as `day 2, 09:40`. To revise what
 is already there, call `note` with `replaces`, the exact passage to
 change, and `text`, what takes its place. Writing a note doesn't advance
 painting time.
+
+The journal comes back to you as written, in later sittings and after a
+condensed conversation, so a lesson in it is only as good as what
+supports it. Keep what you saw apart from why you think it happened. When
+later evidence contradicts an entry, revise it; earlier versions are kept.

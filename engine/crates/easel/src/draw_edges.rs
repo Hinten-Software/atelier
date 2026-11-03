@@ -24,7 +24,7 @@ type Planned = (Vec<(f32, f32)>, (f32, f32), (f32, f32));
 const KEYS: &[&str] = &["pile", "where", "tool", "reach", "load", "pressure", "angle", "every", "seed"];
 
 fn lose(lua: &Lua, st: &S, m: Value, o: Option<Table>) -> Result<usize> {
-    let region = crate::api::mask_of(&m)?;
+    let region = crate::api::paint_mask_of(st, &m)?;
     let o = match o {
         Some(t) => t,
         None => lua.create_table()?,
@@ -32,7 +32,7 @@ fn lose(lua: &Lua, st: &S, m: Value, o: Option<Table>) -> Result<usize> {
     check_keys(&o, KEYS, "lose")?;
     let f = frame(st)?;
     let tool = match o.get::<Option<Value>>("tool")? {
-        Some(t) => tool_of(&t)?,
+        Some(t) => tool_of(st, &t)?,
         None => paint::Tool::filbert(4.0),
     };
     tool.validate().map_err(mlua::Error::runtime)?;
@@ -49,7 +49,7 @@ fn lose(lua: &Lua, st: &S, m: Value, o: Option<Table>) -> Result<usize> {
     }
     let load = num(&o, "load")?.unwrap_or(0.2).clamp(0.01, 1.0);
     let (p0, p1) = pair(&o, "pressure")?.unwrap_or((0.35, 0.02));
-    let every = o.get::<Option<f32>>("every")?.unwrap_or(1.2).max(0.2);
+    let every = num(&o, "every")?.unwrap_or(1.2).max(0.2);
     let fixed_angle = num(&o, "angle")?;
     let pile = crate::api::pile_now(st, &o.get::<Value>("pile")?, "lose", 0.5)?;
     let tubes = st.borrow().tubes.clone();
@@ -96,7 +96,7 @@ fn lose(lua: &Lua, st: &S, m: Value, o: Option<Table>) -> Result<usize> {
             plans.push((vec![start, mid, end], from, into));
         }
     }
-    let mut held = Held::new(tool, seed ^ 0x5EED);
+    let mut held = Held::new(tool, seed ^ 0x5EED).with_engine(tubes.engine);
     let n = plans.len();
     for (pts, _from, _into) in plans {
         // a light load from the pile (remixed a little: a pile knifed by hand is uneven)

@@ -103,9 +103,9 @@ fn friedrich_early(palette: Palette) -> Style {
         width_mm: 1714.0,
         linen: Linen { warp_per_cm: 12.0, weft_per_cm: 11.0, ..Linen::fine(1) },
         ground: vec![
-            Ground { color: hex("#b0583a"), hiding: 0.85, um: 110.0, stiff: 0.25, apply: Apply::Knife { texture: 0.35 }, absorbent: 0.0 },
-            Ground { color: hex("#c9ad8a"), hiding: 0.8, um: 70.0, stiff: 0.3, apply: Apply::Knife { texture: 0.3 }, absorbent: 0.0 },
-            Ground { color: hex("#d8c7ab"), hiding: 0.8, um: 30.0, stiff: 0.5, apply: Apply::Roller, absorbent: 0.0 },
+            Ground { paint: None, color: hex("#b0583a"), hiding: 0.85, um: 110.0, stiff: 0.25, apply: Apply::Knife { texture: 0.35 }, absorbent: 0.0 },
+            Ground { paint: None, color: hex("#c9ad8a"), hiding: 0.8, um: 70.0, stiff: 0.3, apply: Apply::Knife { texture: 0.3 }, absorbent: 0.0 },
+            Ground { paint: None, color: hex("#d8c7ab"), hiding: 0.8, um: 30.0, stiff: 0.5, apply: Apply::Roller, absorbent: 0.0 },
         ],
         ..friedrich(palette)
     }
@@ -506,6 +506,7 @@ fn install(lua: &Lua, st: &S) -> Result<()> {
             c.glaze(&pig, m.as_deref(), th);
             Ok(())
         })?;
+        st1.borrow_mut().mark_effects += 1;
         Ok(st1.borrow().clock)
     })?)?;
     // dry(): wait until all the paint is touch-dry

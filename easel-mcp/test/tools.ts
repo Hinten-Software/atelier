@@ -54,10 +54,14 @@ await check("toolkit is in the log", "log", {}, (t, e) => t.includes("function d
 for (const v of ["OUT", "Out/easel/painting", "OUT/easel/painting/server.log", "BIN", "Bin/easel", "out/easel/painting/lock"])
 	await check(`case variant ${v} refused`, "read", { path: v }, (t, e) => e);
 await check("log without chunk numbers", "log", {}, (t, e) => !e && t.includes("--@ chunk") && !/--@ chunk \d/.test(t));
-await check("log pages with offset", "log", { offset: 1, limit: 3 }, (t, e) => !e && /^\s+1\t/.test(t) && t.includes("more lines"));
+await check("log pages with offset", "log", { offset: 1, limit: 3 }, (t, e) => !e && /^\[painting\]\n\s+1\t/.test(t) && t.includes("more lines"));
 await check("NOTEBOOK writes the notebook", "write", { path: "NOTEBOOK", text: "case\n" }, (t, e) => !e);
 await check("the notebook has it", "read", { path: "notebook" }, (t, e) => t.includes("case"));
 await check("offset past the end", "read", { path: "notebook", offset: 99 }, (t, e) => !e && t.includes("ends before"));
+// since claude-paint 4bbbbec a revised journal is a link into out/: it still reads as the journal
+await check("note", "note", { text: "the sky is too warm" }, (t, e) => !e && t.includes("noted in journal"));
+await check("revise a note", "note", { replaces: "too warm", text: "cooler now" }, (t, e) => !e && t.includes("revised in journal"));
+await check("the revised journal reads", "read", { path: "journal" }, (t, e) => !e && t.includes("the sky is cooler now"));
 await check("long print is capped", "paint", { lua: 'for i=1,20000 do print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx") end' },
 	(t, e) => !e && t.length < 21_000 && t.includes("left out"));
 await client.close();

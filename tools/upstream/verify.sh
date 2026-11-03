@@ -21,16 +21,14 @@ one() {  # replays one work's log in a room of its own, then compares with the p
   cp "$pkg/painting.lua" "$w/paintings/lua/painting.lua"
   cp "$pkg/painting.lua" "$w/out/easel/painting/committed.lua"
   local t0=$SECONDS out
-  # the session is the log's own name, "painting", in a room of its own (EASEL_ROOT): since claude-paint 693f49f a
-  # session opened as "painting" is not found under another name, and a save that fails must say so, not "DIFFERS"
-  if ! out=$(cd "$w" && EASEL_ROOT="$w" EASEL_SESSION=painting nice -n 10 "$easel" open painting 2>&1); then
-    echo "FAIL    $id: the log doesn't reopen: $(echo "$out" | tail -1)"; return
-  fi
-  if ! out=$(cd "$w" && EASEL_ROOT="$w" EASEL_SESSION=painting "$easel" save "$w/replayed.png" 2>&1); then
-    echo "FAIL    $id: the replay couldn't be saved: $(echo "$out" | tail -1)"
+  # an offline replay (`easel run`): since claude-paint 4bbbbec an open refuses a log without a replay checkpoint
+  # instead of replaying it; a replay that fails, or writes no picture, must say so, not "DIFFERS"
+  if ! out=$(cd "$w" && EASEL_ROOT="$w" EASEL_SESSION=painting nice -n 10 "$easel" run "$w/paintings/lua/painting.lua" --out "$w/replayed.png" 2>&1); then
+    echo "FAIL    $id: the log doesn't replay: $(echo "$out" | tail -1)"
+  elif [ ! -f "$w/replayed.png" ]; then
+    echo "FAIL    $id: the replay wrote no picture: $(echo "$out" | tail -1)"
   elif cmp -s "$w/replayed.png" "$pkg/final.png"; then echo "same    $id ($((SECONDS - t0)) s)"
   else echo "DIFFERS $id ($((SECONDS - t0)) s)"; fi
-  (cd "$w" && EASEL_ROOT="$w" EASEL_SESSION=painting "$easel" close >/dev/null 2>&1)
 }
 export -f one; export DATA easel scratch
 

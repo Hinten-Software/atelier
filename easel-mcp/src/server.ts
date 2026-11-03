@@ -15,7 +15,8 @@
  * Nothing here counts the artist's work or times the machine (see upstream/easel-client.ts).
  *
  * Kept in step with upstream/easel-tools.ts (her current version, for reference): when it changes (tools/upstream),
- * the same change is made here, in MCP's terms. Last ported: claude-paint fea9aa6 (2026-10-21: look's mask and
+ * the same change is made here, in MCP's terms. Last ported: claude-paint 4bbbbec (2026-10-25: every reply labelled
+ * [painting] or [scratch canvas]; her critic's look and note publication are hers). Before that: fea9aa6 (look's mask and
  * scaled crops, compare of any studio image, value in the gallery light; log's find; status of a running chunk and of
  * a rebuild; the fresh scratch canvas and glaze coverage in paint's description; her client's timeouts that say what
  * landed). Not served (the owner, 2026-10-21): probe and look's edges mode (numbers and a computed map, not a
@@ -27,7 +28,7 @@ import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { reviseJournal } from "./upstream/journal.ts";
+import { JOURNAL, reviseJournal } from "./upstream/journal.ts";
 import {
 	atEasel, hideCounters, logFind, logReply, lookArgs, paintReply, renameLooks, statusReply, studioPath, tail, toolWords,
 } from "./upstream/easel-client.ts";
@@ -86,9 +87,11 @@ const scratch = z.boolean().optional().describe(
 	"true: work on a small trial canvas beside the painting, to try a mix or a mark first. It is primed like the painting's canvas and has its own palette, brushes, log and clock.",
 );
 const on = (p: { scratch?: boolean }) => (p.scratch ? ["--scratch"] : []);
-// (the easel says where the last scratch canvas's log went: a path in paintings/, which the studio doesn't name)
+// every reply says which canvas it is about (upstream's `label`, since 4bbbbec); the easel says where the last scratch
+// canvas's log went: a path in paintings/, which the studio doesn't name
+const label = (scratch?: boolean) => (scratch ? "[scratch canvas]" : "[painting]");
 const tag = (p: { scratch?: boolean }, t: string) =>
-	p.scratch ? `[scratch canvas]\n${t.replace(/ \(the last one's log is paintings\/lua\/scratch-\d+\.lua\)/, " (the last one is put aside)")}` : t;
+	`${label(p.scratch)}\n${p.scratch ? t.replace(/ \(the last one's log is paintings\/lua\/scratch-\d+\.lua\)/, " (the last one is put aside)") : t}`;
 // a survey's tiles in one reply, as many as a Claude Code tool result carries (upstream's surveyReply sizes this for
 // pi's context, and its words speak of a budget: this one says only what is shown and what is left to read)
 const SURVEY_TILES = 4;
@@ -195,7 +198,7 @@ server.registerTool("look", {
 	}
 	let paths: string[];
 	({ said, paths } = renameLooks(studio, said));
-	if (onScratch) said = `[scratch canvas]\n${said}`;
+	said = `${label(onScratch)}\n${said}`;
 	if (paths.length === 0) return fail(said);
 	// (a survey names several looks: each is shown, in order, within what one reply carries)
 	const images = paths.map((path) => ({ type: "image" as const, data: readFileSync(resolve(studio, path)).toString("base64"), mimeType: "image/png" }));
@@ -269,6 +272,14 @@ const hidden = (real: string) => {
 	const parts = inStudio(real).split(sep);
 	return HIDDEN.has(parts[0].toLowerCase()) || parts.some((x) => x.startsWith("."));
 };
+/** Where the journal really is: since claude-paint 4bbbbec a revised journal is a link into out/ (note-publication.ts). */
+const journalReal = () => {
+	try {
+		return realpathSync.native(resolve(studio, JOURNAL));
+	} catch {
+		return undefined;
+	}
+};
 /** Text, as far as a reader can tell: no NUL byte in the first 8 KB. */
 const isText = (buf: Buffer) => !buf.subarray(0, 8192).includes(0);
 
@@ -280,7 +291,7 @@ server.registerTool("read", {
 	const found = studioPath(studio, p.path);
 	if (!found || !existsSync(found)) return fail(found ? `${p.path}: no such file in the studio` : `${p.path} is outside the studio`);
 	const real = realpathSync.native(found); // the true case of the path
-	if (inStudio(real) !== "" && hidden(real)) return fail(`${p.path} is outside the studio`);
+	if (inStudio(real) !== "" && hidden(real) && real !== journalReal()) return fail(`${p.path} is outside the studio`);
 	let st;
 	try {
 		st = statSync(real);
