@@ -28,7 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import audit  # noqa: E402
 from config import (CLAUDE, CLAUDE_VERSION, DATA, EASEL_MCP, LOCAL_URL, MODEL, PAINTER_EASEL, REPO, ROOTS, TEXTS, TOOLS,  # noqa: E402
-                    artist_env, local_ready)
+                    artist_env, local_ready, model_id)
 from studio import Artist, close_easel, prepare  # noqa: E402
 from works import claude_cmd, last_result, messages, strip_profile, transcript_of  # noqa: E402
 
@@ -86,7 +86,7 @@ class Probe(Artist):
             (self.studio / f).touch()
 
 
-def run(name: str, config: Path | None, local: dict | None = None) -> list[str]:
+def run(name: str, config: Path | None, local: dict | None = None, model: str | None = None) -> list[str]:
     message, effort = PROBES[name]
     p = Probe(config)
     run_dir = p.root / ".run"
@@ -96,7 +96,7 @@ def run(name: str, config: Path | None, local: dict | None = None) -> list[str]:
         sid = str(uuid.uuid4())
         strip_profile(p.config)
         replies = run_dir / "replies.jsonl"
-        cmd = claude_cmd(p.studio, run_dir, message, sid, local["model"] if local else MODEL, effort, replies)
+        cmd = claude_cmd(p.studio, run_dir, message, sid, local["model"] if local else model or MODEL, effort, replies)
         stream = run_dir / "stream.jsonl"
         t0 = time.time()
         with open(stream, "w") as out:
@@ -151,6 +151,8 @@ def main():
     ap.add_argument("names", nargs="*", metavar="probe", help=f"some of: {', '.join(PROBES)} (default: all)")
     ap.add_argument("--local", metavar="MODEL", help="probe a local model in LM Studio")
     ap.add_argument("--local-url", default=LOCAL_URL)
+    ap.add_argument("--model", help="probe another of Claude's models before a work is given it (atelier now --model); "
+                                    "no pass is recorded: a birth needs the suite on the painters' own model")
     args = ap.parse_args()
     local = {"url": args.local_url, "model": args.local} if args.local else None
     config = Path(os.environ["ATELIER_CONFIG_DIR"]) if os.environ.get("ATELIER_TEST") == "1" and os.environ.get("ATELIER_CONFIG_DIR") else None
@@ -166,10 +168,10 @@ def main():
     results = {}
     for n in names:
         print(f"probe {n} ...", flush=True)
-        problems = run(n, config, local)
+        problems = run(n, config, local, model_id(args.model) if args.model else None)
         results[n] = problems
         print(f"  {'ok' if not problems else 'FAILED'}", *[f"  - {x}" for x in problems], sep="\n" if problems else "", flush=True)
-    if all(not v for v in results.values()) and set(names) == set(PROBES):
+    if all(not v for v in results.values()) and set(names) == set(PROBES) and not args.model:
         out = probe_ok(local)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps({"claude_code": CLAUDE_VERSION, "fingerprint": harness_fingerprint(), "at": time.strftime("%F %T"),

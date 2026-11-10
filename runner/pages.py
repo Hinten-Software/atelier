@@ -13,7 +13,8 @@ from pathlib import Path
 
 SITE_URL = "https://notart.fyi"
 ROMAN = {"i": "I", "ii": "II", "iii": "III"}
-MODELS = {"claude-opus-5-5": "Claude Opus 5.5", "claude-sonnet-5-5": "Claude Sonnet 5.5", "claude-fable-5-1": "Claude Fable 5.1"}
+MODELS = {"claude-opus-5-5": "Claude Opus 5.5", "claude-sonnet-5-5": "Claude Sonnet 5.5", "claude-fable-5-1": "Claude Fable 5.1",
+          "claude-fable-5-2": "Claude Fable 5.2"}
 STATES = {"sitting": ("painting now", True), "resumed": ("painting now", True), "prepared": ("about to paint", False),
           "between": ("resting between sittings", False), "closed": ("resting", False), "limit-wait": ("resting", False),
           "crash-wait": ("resting", False), "interrupted": ("resting", False), "finishing": ("finishing", False)}

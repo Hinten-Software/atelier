@@ -12,7 +12,7 @@ WORK = Path(os.environ.get("ATELIER_WORK", DATA))
 # artists' roots live here, outside every home folder, so no account name is in any path an artist sees (ENG-7)
 ROOTS = Path("/Users/Shared")
 
-CLAUDE_VERSION = "2.1.288"
+CLAUDE_VERSION = "2.1.322"  # 2.1.288 until 2026-11-10 (the owner: the latest, for Claude Fable 5.2)
 # pinned copy, never the auto-updating install (RUN-15); ATELIER_CLAUDE: tests only (tests/fake_claude.py)
 CLAUDE = Path(os.environ.get("ATELIER_CLAUDE", DATA / "bin" / f"claude-{CLAUDE_VERSION}"))
 # secrets live outside the store: the store is backed up to the NAS, a secret never is
@@ -44,6 +44,15 @@ PRIVATE_WORDS = Path(os.environ.get("ATELIER_PRIVATE_WORDS", Path.home() / ".ate
 
 MODEL = "claude-opus-5-5"
 EFFORT = "high"
+# a work may be given another model and effort than its painter was born with (the owner, 2026-11-10:
+# atelier now / paint --model --effort); the work's record says which
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
+def model_id(name: str) -> str:
+    """A model as the owner writes it ("fable-5.2", "Opus 5.5", "claude-sonnet-5-5") as Claude's id for it."""
+    s = "-".join(name.strip().lower().replace(".", "-").split())
+    return s if s.startswith("claude-") else f"claude-{s}"
 TOOLS = ["paint", "look", "note", "status", "log", "read", "write", "edit"]
 
 CONTEXT_LIMIT = 600_000          # tokens: a sitting ends after the tool result that passes it (RUN-7)

@@ -76,6 +76,24 @@ def main():
         left.write_text("0\n")
         check("run done: nothing starts, the night window and the cap again", tick() == [] and not opened.exists()
               and budget.window() == "23-7" and budget.daily_cap() == budget.DAILY_USD, budget.window())
+        # the owner's manual run (atelier now): the open flag names its work, and goes when that work has ended
+        import json
+        st = DATA / "run" / "ii-012" / "state.json"
+        st.parent.mkdir(parents=True)
+        st.write_text(json.dumps({"state": "sitting"}))
+        opened.write_text("ii-012\n")
+        atelier.close_run()
+        check("a manual run's work is painting: the studios stay open", opened.exists() and budget.window() == "always")
+        st.write_text(json.dumps({"state": "finished"}))
+        left.write_text("0\n")
+        check("... and it has ended: the night window and the cap again, nothing starts", tick() == [] and not opened.exists()
+              and budget.window() == "23-7")
+        left.unlink()
+        check("a model as the owner writes it", [atelier.model_id(x) for x in ("fable-5.2", "Opus 5.5", "claude-sonnet-5-5")]
+              == ["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5"])
+        check("... with its effort", atelier.given(argparse.Namespace(model="fable-5.2", effort="medium"))
+              == ("claude-fable-5-2", "medium"))
+        left.write_text("0\n")
         budget.WINDOW = "always"
         (DATA / "run" / "until").write_text("2000-01-01T00:00:00+00:00\n")
         opened.touch()

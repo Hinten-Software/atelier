@@ -4,7 +4,11 @@
     atelier birth                              a new artist (after the probe suite has passed: RUN-16)
     atelier birth --local MODEL                a painter on a local model in LM Studio, in a private store
                                                (tools/local.sh birth --local MODEL: never pushed to the NAS)
-    atelier paint <artist> [--theme TEXT] --by owner|operator
+    atelier now [studio] [--model M] [--effort E] [--theme TEXT] [--box BOX]
+                                               the owner's manual run: one work now, at any hour and outside the daily
+                                               cap, for the studio named or the next in the lineup; on the painter's
+                                               own model and effort unless given (e.g. --model fable-5.2 --effort medium)
+    atelier paint <artist> [--theme TEXT] [--model M] [--effort E] --by owner|operator
                                                start a work; the runner continues in the background
     atelier status                             the artists, and the open work and its state
     atelier resume [--clear REASON]            continue an interrupted work (a person, after a reboot or a crash);
@@ -28,7 +32,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config import CLAUDE, DATA, LOCAL_URL, REPO  # noqa: E402
+from config import CLAUDE, DATA, EFFORTS, LOCAL_URL, REPO, model_id  # noqa: E402
 from studio import Artist, birth, close_easel, registry  # noqa: E402
 from works import CURRENT, EXPORT_FAILED, RUN, STANDING, STARTS_LEFT, TERMINAL, Work, event, export_now, log  # noqa: E402
 
@@ -108,8 +112,54 @@ def cmd_paint(a):
     box = getattr(a, "box", None) or DEFAULT_BOX  # (the tick gives no box: the default)
     if box not in boxes():
         raise SystemExit(f"no box {box!r}; the boxes: {', '.join(boxes())} (tools/build-engine.sh builds them)")
-    w = Work.create(Artist(a.artist), a.theme, a.by, box)
+    w = Work.create(Artist(a.artist), a.theme, a.by, box, *given(a))
     detach(w)
+    return w
+
+
+def given(a) -> tuple[str | None, str | None]:
+    """The model and effort the owner gave for this work (None: the painter's own)."""
+    model, effort = getattr(a, "model", None), getattr(a, "effort", None)
+    if effort and effort not in EFFORTS:
+        raise SystemExit(f"no effort {effort!r}; the efforts: {', '.join(EFFORTS)}")
+    return (model_id(model) if model else None), effort
+
+
+def cmd_now(a):
+    """The owner's manual run (2026-11-10): one work now, at any hour and outside the daily cap (DATA/run/open, which
+    names the work; the tick removes it once that work has ended), for the studio named or the next in the lineup.
+    The weekly nights are unchanged, but a studio that painted in the last 5 days skips its night (started_lately)."""
+    import budget
+    if w := open_work():
+        raise SystemExit(f"a work is open: {w.id} (atelier status)")
+    if budget.OPEN.exists():
+        raise SystemExit(f"the studios are already open for a run ({budget.OPEN}); atelier status")
+    id = a.studio or lineup()[0][1]
+    if id not in registry():
+        raise SystemExit(f"no studio {id!r}; the studios: {', '.join(registry())}")
+    if not CLAUDE.exists():
+        raise SystemExit(f"no pinned Claude Code at {CLAUDE} (RUN-15)")
+    from config import DEFAULT_BOX, boxes
+    box = a.box or DEFAULT_BOX
+    if box not in boxes():
+        raise SystemExit(f"no box {box!r}; the boxes: {', '.join(boxes())} (tools/build-engine.sh builds them)")
+    w = Work.create(Artist(id), a.theme, "owner", box, *given(a))
+    budget.OPEN.write_text(w.id + "\n")
+    event(f"the owner's run: {w.id} for {w.artist.name} now, on {w.model()}, effort {w.effort()}, at any hour and outside "
+          f"the daily cap (run/open); the open flag is removed when it ends and the weekly schedule is unchanged")
+    detach(w)
+    print(f"{w.id} started for {w.artist.name} on {w.model()}, effort {w.effort()} (atelier status)")
+
+
+def close_run():
+    """The work the studios were opened for (atelier now) has ended: the night window and the daily cap again."""
+    import budget
+    id = budget.OPEN.read_text().strip() if budget.OPEN.exists() else ""
+    st = RUN / id / "state.json"
+    if id and (not st.exists() or json.loads(st.read_text())["state"] in TERMINAL):
+        budget.OPEN.unlink()
+        event(f"the owner's run is done ({id}): painting window {budget.WINDOW} and ${budget.DAILY_USD:.0f} a day again; "
+              f"the weekly nights unchanged")
 
 
 def cmd_run(a):
@@ -202,6 +252,7 @@ def cmd_tick(a):
     import budget
     if EXPORT_FAILED.exists() and not ((w := open_work()) and runner_alive(w)):  # a running work exports on its own
         export_now()
+    close_run()
     if not STANDING.exists() or datetime.now().astimezone() >= datetime.fromisoformat(STANDING.read_text().strip()):
         if budget.OPEN.exists():  # the go the studios were opened for has ended: the night window and the cap again
             budget.OPEN.unlink()
@@ -362,20 +413,29 @@ def cmd_boxes(a):
 
 def cmd_next(a):
     """Each studio's next night (NIGHTS): its weekday, and not within 5 days of its last start (started_lately)."""
+    tonight = this_evening()
+    for night, id in lineup():
+        when = "tonight" if night.date() == tonight else f"{night:%A} night, {night:%-d %B}"
+        print(f"{Artist(id).name}: {when} ({len(Artist(id).works())} works so far)")
+
+
+def this_evening():
+    t = datetime.now()
+    return ((t - timedelta(hours=12)) if t.hour < 12 else t).date()
+
+
+def lineup() -> list[tuple[datetime, str]]:
+    """The studios in the order of their next nights: (the night's 23:00, the studio)."""
     reg = registry()
     if not reg:
         raise SystemExit("no artists yet")
-    t = datetime.now()
-    tonight = ((t - timedelta(hours=12)) if t.hour < 12 else t).date()
-    nights = []
+    tonight, nights = this_evening(), []
     for id in (x for x in reg if x in NIGHTS):
         night = datetime.combine(tonight + timedelta(days=(NIGHTS[id] - tonight.weekday()) % 7), datetime.min.time()).replace(hour=23).astimezone()
         while started_lately(id, night):  # painted this week: its night next week
             night += timedelta(days=7)
         nights.append((night, id))
-    for night, id in sorted(nights):
-        when = "tonight" if night.date() == tonight else f"{night:%A} night, {night:%-d %B}"
-        print(f"{Artist(id).name}: {when} ({len(Artist(id).works())} works so far)")
+    return sorted(nights)
 
 
 def main():
@@ -394,6 +454,13 @@ def main():
     pp.add_argument("--theme")
     pp.add_argument("--box", help="the tube box this work is painted from (default: every; `atelier boxes` lists them)")
     pp.add_argument("--by", required=True, choices=["owner", "operator"])
+    nw = sub.add_parser("now")
+    nw.add_argument("studio", nargs="?", help="i, ii or iii (default: the next in the lineup, `atelier next`)")
+    nw.add_argument("--theme")
+    nw.add_argument("--box", help="the tube box this work is painted from (default: every)")
+    for x in (pp, nw):
+        x.add_argument("--model", help="this work's model, e.g. fable-5.2, opus-5.5, sonnet-5.5 (default: the painter's own)")
+        x.add_argument("--effort", choices=EFFORTS, help="this work's effort (default: the painter's own)")
     r = sub.add_parser("run")
     r.add_argument("work")
     sub.add_parser("status")

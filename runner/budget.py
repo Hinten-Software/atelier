@@ -37,6 +37,7 @@ PRICES = {
     "claude-opus-5-5": (4.0, 20.0, 0.20, 5.0, 8.0),
     "claude-sonnet-5-5": (2.0, 10.0, 0.20, 2.5, 4.0),
     "claude-fable-5-1": (10.0, 50.0, 0.25, 12.5, 20.0),
+    "claude-fable-5-2": (8.0, 40.0, 0.20, 10.0, 16.0),
 }
 UNKNOWN = PRICES["claude-fable-5-1"]  # an unknown model is priced high, never low
 

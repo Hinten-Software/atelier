@@ -140,7 +140,8 @@ class Work:
         self.artist = Artist(self.state["artist"])
 
     @classmethod
-    def create(cls, artist: Artist, theme: str | None, started_by: str, box: str = DEFAULT_BOX) -> "Work":
+    def create(cls, artist: Artist, theme: str | None, started_by: str, box: str = DEFAULT_BOX,
+               model: str | None = None, effort: str | None = None) -> "Work":
         if CURRENT.exists():
             raise SystemExit(f"a work is open: {CURRENT.read_text().strip()} (atelier status)")
         number = len(artist.works()) + 1
@@ -176,12 +177,21 @@ class Work:
         state = {"id": id, "artist": artist.id, "number": number, "theme": theme, "box": box, "mode": "themed" if theme else "free",
                  "started_by": started_by, "created": now(), "state": "prepared", "sittings": [], "crashes": 0,
                  "involuntary": 0, "limit_since": None, "pauses": [], "hashes": hashes, "hits": []}
+        # this work's own model and effort, if the owner gave them: else the painter's, from their birth record
+        state |= {k: v for k, v in (("model", model), ("effort", effort)) if v}
         (run / "state.json").write_text(json.dumps(state, indent=1))
         CURRENT.write_text(id)
         log(f"{id}: prepared for {artist.name} ({state['mode']}), started by {started_by}")
         event(f"work {id} started for {artist.name} ({state['mode']}{': ' + theme if theme else ''}"
-              f"{'' if box == DEFAULT_BOX else ', the box ' + box}), by {started_by}")
+              f"{'' if box == DEFAULT_BOX else ', the box ' + box}), by {started_by}"
+              + (f"; this work on {model or a_model(artist)}, effort {effort or a_effort(artist)}" if model or effort else ""))
         return cls(id)
+
+    def model(self) -> str:
+        return self.state.get("model") or a_model(self.artist)
+
+    def effort(self) -> str:
+        return self.state.get("effort") or a_effort(self.artist)
 
     # -- state ------------------------------------------------------------------------------------------------
     def save(self):
@@ -309,7 +319,7 @@ class Work:
             if (a.studio / f).exists():
                 (snap / Path(f).name).write_bytes((a.studio / f).read_bytes())
         replies = self.run / f"{sid}.replies.jsonl"
-        cmd = claude_cmd(a.studio, self.run, message, sid, a_model(a), a_effort(a), replies)
+        cmd = claude_cmd(a.studio, self.run, message, sid, self.model(), self.effort(), replies)
         strip_profile(a.config)
         transcript = transcript_of(a.config, a.studio, sid)
         rec = {"n": n, "session": sid, "message": message, "start": now(), "end": None, "how": None,
@@ -473,7 +483,7 @@ class Work:
             "started_by": self.state["started_by"],
             "start": self.state["created"], "end": now(), "pauses": self.state.get("pauses", []),
             "sittings": [{k: r.get(k) for k in ("n", "start", "end", "how", "date_shown", "message")} for r in self.state["sittings"]],
-            "model": a_model(a), "model_seen": model_seen(self.state["sittings"]), "effort": a_effort(a),
+            "model": self.model(), "model_seen": model_seen(self.state["sittings"]), "effort": self.effort(),
             "claude_code": CLAUDE_VERSION, "hashes": self.state["hashes"], "audit_hits": self.state["hits"],
             "contaminated": bool(self.state.get("contaminated")), "restarted": self.state.get("restarted", []), "replay": self.state.get("verdict"),
             "replay_verified": self.state.get("verified", False),  # a record (REC-4), not what hangs it
