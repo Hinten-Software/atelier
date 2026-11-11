@@ -131,6 +131,128 @@ def replay_env(h: str | None, target: Path) -> tuple[dict, str | None]:
     return {"CARGO_TARGET_DIR": str(target)}, now_h
 
 
+# The replay check runs after the work hangs (the owner, 2026-11-11: ii-012's replay held the painting and the
+# studios for six hours, at 60 GB on a 24 GB machine), and within limits: so long, and so much memory, and it is set
+# aside when the next work starts. A check that stops is recorded as not run to the end; the canvas hangs all the same.
+CHECK_MAX_S = float(os.environ.get("ATELIER_CHECK_MAX_H", "6")) * 3600
+CHECK_POLL_S = 15 * float(os.environ.get("ATELIER_WAIT_SCALE", "1"))  # (tests: shorter waits)
+CHECK_RUNNING = RUN / "check.json"   # the check running now: its work, its process group, the runner's pid
+CHECK_STOP = RUN / "check-stop"      # why it was stopped from outside (stop_check)
+
+
+def check_max_gb() -> float:
+    """The most memory a replay may take: ATELIER_CHECK_MAX_GB, else one and a half times the machine's own."""
+    if os.environ.get("ATELIER_CHECK_MAX_GB"):
+        return float(os.environ["ATELIER_CHECK_MAX_GB"])
+    r = subprocess.run(["/usr/sbin/sysctl", "-n", "hw.memsize"], capture_output=True, text=True).stdout.strip()
+    return 1.5 * int(r) / 2**30 if r.isdigit() else 36.0
+
+
+def footprint_gb(pgid: int) -> float:
+    """The memory a process group holds, in GB, as Activity Monitor counts it (compressed and swapped pages too:
+    a replay that has outgrown the machine shows little resident memory). 0 if it can't be told."""
+    pids = subprocess.run(["/usr/bin/pgrep", "-g", str(pgid)], capture_output=True, text=True).stdout.split()
+    if not pids:
+        return 0.0
+    r = subprocess.run(["/usr/bin/top", "-l", "1", "-stats", "pid,mem", *[x for p in pids for x in ("-pid", p)]],
+                       capture_output=True, text=True).stdout
+    unit = {"B": 2**-30, "K": 2**-20, "M": 2**-10, "G": 1.0, "T": 1024.0}
+    return sum(float(m[2]) * unit[m[3]] for m in re.finditer(r"^(\d+)\s+([\d.]+)([BKMGT])[+-]?\s*$", r, re.M) if m[1] in pids)
+
+
+def run_check(cmd: list[str], env: dict, work: str) -> tuple[str, str | None]:
+    """check_painting within the limits: its output, and why it was stopped (a verdict line) if it was."""
+    out = RUN / work / "check.out"
+    CHECK_STOP.unlink(missing_ok=True)
+    with open(out, "w") as f:
+        p = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, env=env, start_new_session=True)
+    CHECK_RUNNING.write_text(json.dumps({"work": work, "pgid": p.pid, "runner": os.getpid(), "boot": boot_time()}))
+    t0, stopped, polls = time.time(), None, 0
+    try:
+        while True:
+            try:
+                p.wait(timeout=CHECK_POLL_S)
+                break
+            except subprocess.TimeoutExpired:
+                polls += 1
+            if time.time() - t0 > CHECK_MAX_S:
+                stopped = f"check: not run to the end: stopped after {CHECK_MAX_S / 3600:.0f} h (the limit)"
+            elif polls % 4 == 0 and (gb := footprint_gb(p.pid)) > check_max_gb():
+                stopped = (f"check: not run to the end: the replay held {gb:.0f} GB of memory after "
+                           f"{(time.time() - t0) / 3600:.1f} h, more than the {check_max_gb():.0f} GB it may here")
+            if stopped:
+                end_check(p.pid)
+                p.wait()
+                break
+        if not stopped and CHECK_STOP.exists():
+            stopped = f"check: not run to the end: {CHECK_STOP.read_text().strip()}"
+    finally:
+        CHECK_RUNNING.unlink(missing_ok=True)
+        CHECK_STOP.unlink(missing_ok=True)
+    text = out.read_text(errors="replace")
+    out.unlink(missing_ok=True)
+    return text, stopped
+
+
+def end_check(pgid: int):
+    """SIGTERM to the check's process group, SIGKILL after KILL_GRACE. A group of which only an unreaped process is
+    left answers "not permitted" on macOS: it is gone."""
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+        for _ in range(KILL_GRACE * 4):
+            time.sleep(0.25)
+            os.killpg(pgid, 0)
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def stop_check(why: str):
+    """Set a running replay check aside (a new work is starting: two easels at once outgrow the machine)."""
+    if not CHECK_RUNNING.exists():
+        return
+    rec = json.loads(CHECK_RUNNING.read_text())
+    CHECK_STOP.write_text(why + "\n")
+    log(f"{rec['work']}: its replay check is set aside: {why}")
+    end_check(rec["pgid"])
+
+
+def settle_check():
+    """A replay check whose runner is gone (a restart, a killed runner): recorded as not run to the end (the tick)."""
+    if not CHECK_RUNNING.exists():
+        return
+    rec = json.loads(CHECK_RUNNING.read_text())
+    try:
+        os.kill(rec["runner"], 0)
+        if rec.get("boot") == boot_time():
+            return
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        return
+    try:
+        os.killpg(rec["pgid"], signal.SIGKILL) if rec.get("boot") == boot_time() else None
+    except (ProcessLookupError, PermissionError):
+        pass
+    CHECK_RUNNING.unlink(missing_ok=True)
+    if (RUN / rec["work"] / "state.json").exists():
+        w = Work(rec["work"])
+        w.record_check("check: not run to the end: its runner stopped (a restart?)", "")
+        shutil.rmtree(w.run / "check", ignore_errors=True)
+        event(f"work {w.id}: replay {w.state['verdict']}")
+
+
+def canvas_setup(studio: Path) -> str | None:
+    """The canvas the painter set up ("size=600, aspect=0.8, linen={14, 12}, seed=41"), from the save the easel wrote
+    at close: what check_painting reads from the replay's (runner/export.py canvas_of shows it on the site)."""
+    ckpt = studio / "out" / "easel" / "painting" / "live.ckpt"
+    if not ckpt.exists():
+        return None
+    with open(ckpt, "rb") as f:
+        m = re.search(rb"^setup=(.*)$", f.read(1 << 20), re.M)
+    return m[1].decode(errors="replace").strip() if m else None
+
+
 class Work:
     def __init__(self, id: str):
         self.id = id
@@ -144,6 +266,7 @@ class Work:
                model: str | None = None, effort: str | None = None) -> "Work":
         if CURRENT.exists():
             raise SystemExit(f"a work is open: {CURRENT.read_text().strip()} (atelier status)")
+        stop_check("set aside for the next work")
         number = len(artist.works()) + 1
         id = f"{artist.id}-{number:03d}"
         run, pkg = RUN / id, DATA / "works" / id
@@ -401,46 +524,34 @@ class Work:
 
     # -- finishing ----------------------------------------------------------------------------------------------
     def finish(self):
-        """Close the easel, check the replay, write the work package, hang it (REC-1, REC-4, ART-10). Safe to run
+        """Close the easel, write the work package, hang it, then check the replay (REC-1, REC-4, ART-10). Safe to run
         again after a failure midway (QA Q8): every step either repeats harmlessly or is skipped once done.
         What hangs is the painter's own canvas as it was when the easel closed (the owner, 2026-10-21): whatever
         happened in the room is part of it. The replay check is a record kept with the work, not a condition for
-        hanging; the work's easels are archived (archive_engines), so it can be painted again on its own engine."""
+        hanging, so it runs after the work hangs and within limits (the owner, 2026-11-11; run_check); only a work
+        whose canvas wasn't saved whole waits for it, since its picture is the replay's. The work's easels are
+        archived (archive_engines), so it can be painted again on its own engine."""
         a, pkg, s = self.artist, self.pkg, self.artist.studio
         done = self.state.setdefault("finish_done", [])
-        if "check" not in done:
+        if "canvas" not in done and "check" not in done:
             close_easel(s, a.root)
-            check = self.run / "check"
-            shutil.rmtree(check, ignore_errors=True)
-            h = self.state["hashes"].get("replay_easel")
-            try:
-                env, swapped = replay_env(h, self.run / "replay-target")
-            except RuntimeError as e:  # no copy of the work's replay easel: no check, and the canvas hangs all the same
-                verdict, swapped = f"check: not run: {e}", None
-                (self.run / "check.txt").write_text(verdict + "\n")
-            else:
-                r = subprocess.run([str(CHECK_PAINTING), str(s), str(check)], capture_output=True, text=True,
-                                   env=os.environ | {"EASEL_NO_BUILD": "1", "PATH": f"/opt/homebrew/opt/rustup/bin:{os.environ.get('PATH', '')}"} | env)
-                shutil.rmtree(self.run / "replay-target", ignore_errors=True)
-                verdict = next((l for l in reversed(r.stdout.splitlines()) if l.startswith("check:")), "check: no verdict")
-                note = f"replay easel: {REPLAY_EASEL} is {swapped}, not {h} as at the work's start; checked with the archived {h}\n"
-                (self.run / "check.txt").write_text((note if swapped else "") + r.stdout + r.stderr)
-            if swapped:
-                self.state["replay_easel_swapped"] = swapped
-            self.state.update(verdict=verdict, verified=verdict.startswith("check: ok"))
             # the painter's canvas, saved when the easel closed, if it holds every chunk of the log (a close that never
-            # came leaves an earlier one's); else the canvas painted again from the log
+            # came leaves an earlier one's)
             live = s / "out" / "easel" / "painting" / "live.png"
             log = s / "paintings" / "lua" / "painting.lua"
             held = re.search(r"^chunks (\d+)$", (live.with_suffix(".txt").read_text() if live.with_suffix(".txt").exists() else ""), re.M)
-            whole = held and log.exists() and int(held[1]) == len(re.findall(r"^--@ chunk", log.read_text(), re.M))
-            for src, origin in ((live if whole else None, "live"), (check / "replayed.png", "replay")):
-                if src and src.exists():
-                    shutil.copy2(src, pkg / "final.png")
-                    self.state["final_from"] = origin
-                    break
-            done.append("check")
+            if held and log.exists() and int(held[1]) == len(re.findall(r"^--@ chunk", log.read_text(), re.M)) and live.exists():
+                shutil.copy2(live, pkg / "final.png")
+                self.state["final_from"] = "live"
+            self.state["canvas_setup"] = canvas_setup(s)
+            done.append("canvas")
             self.save()
+        if "check" not in done and not self.state.get("final_from"):
+            self.check()  # no canvas of the painter's: the picture is the canvas painted again from the log
+            if (self.run / "check" / "replayed.png").exists():
+                shutil.copy2(self.run / "check" / "replayed.png", pkg / "final.png")
+                self.state["final_from"] = "replay"
+                self.save()
         if "package" not in done:
             copies = {"paintings/lua/painting.lua": "painting.lua", JOURNAL: "journal.md",
                       "out/easel/journal-revisions.jsonl": "journal-revisions.jsonl",
@@ -485,7 +596,7 @@ class Work:
             "sittings": [{k: r.get(k) for k in ("n", "start", "end", "how", "date_shown", "message")} for r in self.state["sittings"]],
             "model": self.model(), "model_seen": model_seen(self.state["sittings"]), "effort": self.effort(),
             "claude_code": CLAUDE_VERSION, "hashes": self.state["hashes"], "audit_hits": self.state["hits"],
-            "contaminated": bool(self.state.get("contaminated")), "restarted": self.state.get("restarted", []), "replay": self.state.get("verdict"),
+            "contaminated": bool(self.state.get("contaminated")), "restarted": self.state.get("restarted", []), "replay": self.state.get("verdict") or "check: not yet run (it follows the hanging)",
             "replay_verified": self.state.get("verified", False),  # a record (REC-4), not what hangs it
             "final_from": self.state.get("final_from"),
             "wall": self.state.get("wall"),  # its number on the painter's walls (after any hung at their birth)  # "live": the painter's canvas at close; "replay": from the log
@@ -501,11 +612,62 @@ class Work:
         tmp.replace(pkg / "manifest.json")
         CURRENT.unlink(missing_ok=True)
         export_now()  # the finished work on the site at once; tools/push.sh takes it to the NAS (OPS-2, OPS-9)
-        event(f"work {self.id} {'finished' if finished else 'ended unfinished'}: {title or 'untitled'} ({self.state.get('verdict')})")
+        event(f"work {self.id} {'finished' if finished else 'ended unfinished'}: {title or 'untitled'} "
+              f"({self.state.get('verdict') or 'the replay check follows'})")
         if finished:
             self.set("finished")
         else:
             self.set("not-finished", why=why)
+        if "check" not in done:  # the work hangs and the studios are free: now the record of its replay
+            self.check()
+            export_now()
+            event(f"work {self.id}: replay {self.state['verdict']}")
+
+    def check(self):
+        """The replay check (engine/scripts/check_painting), within the limits; its verdict and report kept with the work."""
+        check = self.run / "check"
+        shutil.rmtree(check, ignore_errors=True)
+        h = self.state["hashes"].get("replay_easel")
+        try:
+            env, swapped = replay_env(h, self.run / "replay-target")
+        except RuntimeError as e:  # no copy of the work's replay easel: no check, and the canvas hangs all the same
+            verdict, swapped, text = f"check: not run: {e}", None, ""
+        else:
+            out, stopped = run_check([str(CHECK_PAINTING), str(self.artist.studio), str(check)],
+                                     os.environ | {"EASEL_NO_BUILD": "1", "PATH": f"/opt/homebrew/opt/rustup/bin:{os.environ.get('PATH', '')}"} | env,
+                                     self.id)
+            shutil.rmtree(self.run / "replay-target", ignore_errors=True)
+            verdict = stopped or next((l for l in reversed(out.splitlines()) if l.startswith("check:")), "check: no verdict")
+            note = f"replay easel: {REPLAY_EASEL} is {swapped}, not {h} as at the work's start; checked with the archived {h}\n"
+            text = (note if swapped else "") + out
+            if stopped:
+                shutil.rmtree(check, ignore_errors=True)  # a replay cut off leaves gigabytes of a save half written
+        if swapped:
+            self.state["replay_easel_swapped"] = swapped
+        self.record_check(verdict, text)
+        self.state.setdefault("finish_done", []).append("check")
+        self.save()
+
+    def record_check(self, verdict: str, text: str):
+        """The check's verdict in the work's state, its report (check.txt) in the run folder and the package, and
+        the manifest, if the work already has one (a check that ran after the work hung)."""
+        if not text.rstrip().endswith(verdict):
+            text = text.rstrip("\n") + ("\n" if text.strip() else "") + verdict + "\n"
+        if "\nreplayed: " not in "\n" + text and self.state.get("canvas_setup"):  # the site's size caption (canvas_of)
+            text = f"the painter's canvas at close · {self.state['canvas_setup']}\n" + text
+        self.state.update(verdict=verdict, verified=verdict.startswith("check: ok"))
+        self.save()
+        (self.run / "check.txt").write_text(text)
+        man = self.pkg / "manifest.json"
+        if man.exists():
+            shutil.copy2(self.run / "check.txt", self.pkg / "check.txt")  # kept with the work (REC-4)
+            m = json.loads(man.read_text())
+            m |= {"replay": verdict, "replay_verified": self.state["verified"]}
+            if "replay_easel_swapped" in self.state:
+                m["replay_easel_at_finish"] = self.state["replay_easel_swapped"]
+            tmp = self.pkg / "manifest.json.tmp"
+            tmp.write_text(json.dumps(m, indent=1))
+            tmp.replace(man)
 
 
 def unfinished_why(state: dict, voluntary: bool) -> str:

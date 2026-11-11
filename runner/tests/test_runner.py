@@ -238,6 +238,21 @@ def main():
               and m["replay_easel_at_finish"] != m["hashes"]["replay_easel"], m.get("replay_easel_at_finish"))
         check("check.txt says so", "checked with the archived" in (DATA / "run/i-010/check.txt").read_text())
 
+        # 11. a replay check that outgrows its limits is stopped; the painter's canvas hangs all the same, and it hung
+        # before the check began (the owner, 2026-11-11: ii-012's replay held the painting for six hours)
+        modes(root, "voluntary")
+        atelier("paint", "i", "--by", "operator", env={"ATELIER_CHECK_MAX_H": "0"})
+        s = wait("i-011")
+        m = json.loads((DATA / "works/i-011/manifest.json").read_text())
+        kept = (DATA / "works/i-011/check.txt").read_text()
+        check("a check past its limit: the work hangs", s["state"] == "finished" and m["finished"] and m["final_from"] == "live", s["state"])
+        check("... recorded as not run to the end", "not run to the end" in m["replay"] and not m["replay_verified"]
+              and "not run to the end" in kept, m["replay"])
+        check("... with the canvas the painter set up, for the site", "· size=" in kept, kept)
+        check("... and nothing of it is left", not (DATA / "run/check.json").exists() and not (DATA / "run/i-011/check").exists())
+        hist = (DATA / "history.md").read_text()
+        check("the work hangs first, then its check is told", hist.index("work i-011 finished") < hist.index("work i-011: replay check: not run"), hist[-400:])
+
         # 8. limit reset times (QA Q10)
         sys.path.insert(0, str(HERE.parent))
         os.environ["ATELIER_DATA"] = str(DATA)

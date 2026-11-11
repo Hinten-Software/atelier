@@ -178,12 +178,16 @@ def guide_for(box: str) -> str:
     return "".join(lines[:start]) + table + "".join(lines[end:])
 
 
+CLOSE_S = 30 * 60
+
+
 def close_easel(studio: Path, home: Path):
     """Close the studio's easel, if it has one (its session saves; nothing if none is serving): the one way the runner,
     the probes and prepare() close it, as a painter's process would, with only PATH and HOME (the root it paints from)."""
     easel = studio / "bin" / "easel"
     if easel.exists():
-        subprocess.run([str(easel), "close"], cwd=studio, capture_output=True, timeout=120,
+        # a large canvas takes minutes to put aside (ii-012, 2026-11-11: 299 s; 120 s then, and the runner fell)
+        subprocess.run([str(easel), "close"], cwd=studio, capture_output=True, timeout=CLOSE_S,
                        env={"PATH": "/usr/bin:/bin", "HOME": str(home)})
 
 

@@ -34,7 +34,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import CLAUDE, DATA, EFFORTS, LOCAL_URL, REPO, model_id  # noqa: E402
 from studio import Artist, birth, close_easel, registry  # noqa: E402
-from works import CURRENT, EXPORT_FAILED, RUN, STANDING, STARTS_LEFT, TERMINAL, Work, event, export_now, log  # noqa: E402
+from works import (CURRENT, EXPORT_FAILED, RUN, STANDING, STARTS_LEFT, TERMINAL, Work, event, export_now, log,  # noqa: E402
+                   settle_check)
 
 
 def alive(pid: int) -> bool:
@@ -253,6 +254,7 @@ def cmd_tick(a):
     if EXPORT_FAILED.exists() and not ((w := open_work()) and runner_alive(w)):  # a running work exports on its own
         export_now()
     close_run()
+    settle_check()
     if not STANDING.exists() or datetime.now().astimezone() >= datetime.fromisoformat(STANDING.read_text().strip()):
         if budget.OPEN.exists():  # the go the studios were opened for has ended: the night window and the cap again
             budget.OPEN.unlink()
