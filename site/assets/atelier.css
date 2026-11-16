@@ -72,6 +72,8 @@ footer nav a { margin-right: 16px; }
 .note-form .count { margin-left: auto; font: 12px var(--sans); color: var(--muted); }
 .note-form button, .more { font: 14px var(--sans); background: var(--fg); color: var(--bg); border: 0; padding: 8px 18px; cursor: pointer; }
 .more { background: none; color: var(--fg); border: 1px solid var(--line); margin: 2vh 0 6vh; }
+.note-form button:active { opacity: .7; transform: translateY(1px); }
+.note-form button:disabled { opacity: .45; cursor: default; transform: none; }
 .note-form .said { font: 14px var(--sans); color: var(--muted); min-height: 1.4em; }
 .note-list { max-width: 38rem; }
 .note { border-top: 1px solid var(--line); padding: 18px 0; }

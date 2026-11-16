@@ -378,7 +378,7 @@ async function notes(box) {
   form.onsubmit = async (e) => {
     e.preventDefault();
     if (!token) { said.textContent = "Please complete the check first."; return; }
-    send.disabled = true; said.textContent = "";
+    send.disabled = true; send.textContent = "Leaving it…"; said.textContent = "Sending your note…";  // seen at once: the check and the save take a moment
     try {
       const r = await fetch(NOTES_API, { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: text.value, work: null, token }) });
@@ -387,8 +387,9 @@ async function notes(box) {
       list.querySelector(".empty")?.remove();
       show({ id: d.id, at: d.at, text: text.value.trim() }, true);  // the wall's copy is 30 s behind
       text.value = ""; count.textContent = "500"; said.textContent = "Your note is on the wall.";
+    } catch { said.textContent = "Your note could not be sent. Please try again.";
     } finally {
-      send.disabled = false;
+      send.disabled = false; send.textContent = "Leave it";
       if (SITE_KEY !== "preview") { token = null; if (widget != null) window.turnstile.reset(widget); }
     }
   };
