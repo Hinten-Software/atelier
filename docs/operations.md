@@ -24,6 +24,16 @@ The same rule as the owner's other repositories.
 
 Everything below runs on the painter host (the Mac). `atelier` is `python3 runner/atelier.py`.
 
+**The runner's Python:** the LaunchAgents (deploy/mac/) run Homebrew's `python@3.13`,
+`/opt/homebrew/opt/python@3.13/libexec/bin/python3`. The runner needs one module beyond the standard library:
+Pillow, for the export (runner/export.py). Install it into that Python itself, not with Homebrew's `pillow` formula:
+`/opt/homebrew/opt/python@3.13/libexec/bin/python3 -m pip install --break-system-packages pillow`. The formula ships
+only for the Python versions Homebrew currently favours: on 2026-11-15 a `brew upgrade` took it to 13.0.0 (3.14 and
+3.15 only), Pillow left 3.13, and i-013 was painted and verified that night but not exported until the next morning.
+**After any Homebrew upgrade**, check: `/opt/homebrew/opt/python@3.13/libexec/bin/python3 -c "import PIL"` (silent
+when well), `tail ~/atelier-data/run/tick.log` (no traceback) and no `~/atelier-data/run/export-failed`. Node
+(`/opt/homebrew/bin/node`, the easel's MCP server) is Homebrew's too; the easels and the pinned Claude Code are not.
+
 **Once, before the first artist (and after any harness change):**
 1. `tools/build-engine.sh`: both easels, no local paths inside.
 2. `~/atelier-data/bin/claude-<version>`: a copy of the Claude Code version the atelier pins
@@ -121,4 +131,7 @@ The essays are never in a studio: the white room holds for the owner's words too
 work, the standing go's end, the spend, the site sync and the backup. It ends with "Needs a person": nothing, or a
 short list (an untitled or unverified painting, a set-aside to judge, a stop waiting, a failing export or NAS copy,
 a go about to end). It is saved as DATA/run/reports/<date>.md and shown as a macOS notification. On demand:
-`python3 runner/report.py`.
+`python3 runner/report.py`. If no report came (no DATA/run/reports/<today>.md), the agent did not start:
+`launchctl print gui/$(id -u)/atelier.report` shows why, and `launchctl kickstart gui/$(id -u)/atelier.report` runs it
+now (2026-11-16: it did not start at 07:30, "OS_REASON_CODESIGNING", the morning after Homebrew replaced the Python;
+started by hand at 08:23 it ran; the cause was not found).
