@@ -84,9 +84,11 @@ footer nav a { margin-right: 16px; }
 /* whole: as large as the window allows, and on a zoomed page no smaller than 600 px, so browser zoom enlarges it too */
 .lightbox img { max-width: max(100%, 600px); max-height: max(calc(100vh - 110px), 600px); object-fit: contain; display: block; }
 .lightbox { overflow: auto; overscroll-behavior: contain; }
-/* full size: every pixel of the painting, moved about in by scrolling; the caption and arrows wait */
-.lightbox.full { display: block; padding: 0; }
-.lightbox.full img { max-width: none; max-height: none; height: auto; margin: 0 auto; }
+/* close: the painting placed and sized by the script (wheel, pinch, drag); the caption and arrows wait */
+.lightbox img { cursor: zoom-in; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-user-drag: none; }
+.lightbox.full { display: block; padding: 0; overflow: hidden; touch-action: none; cursor: grab; }
+.lightbox.full img { position: absolute; max-width: none; max-height: none; margin: 0; cursor: grab; }
+.lightbox.full.held, .lightbox.full.held img { cursor: grabbing; }
 .lightbox.full .cap, .lightbox.full .nav { display: none; }
 .lightbox .cap { color: #e9e5dc; font: 15px var(--serif); margin: 14px 0 0; text-align: center; }
 .lightbox .cap .state { color: #8f897e; }

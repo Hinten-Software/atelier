@@ -53,53 +53,146 @@ function crumbs(...steps) {  // steps: [text, href] or [text]
   for (const [text, href] of steps) top.append(el("span", { class: "sep", textContent: "/" }), href ? el("a", { href, textContent: text }) : el("span", { textContent: text }));
 }
 
-// ---- a painting, close up: click to open; click the painting again to see it at full size, every pixel of it, and
-// move about in it (scroll, drag on a phone); click once more to see it whole. A click beside it, or Esc, closes.
-// Arrows (and swipe) when there are several. Nothing more to find: no buttons, no links.
-function lightbox(items, start) {  // items: [{src, srcset, full, title, href}]
+// ---- a painting, close up: click to open. Then come as near as you like: the wheel or a pinch brings the painting
+// closer, toward where the pointer is, and a drag moves it in every direction, as museums show theirs. A click on the
+// painting goes to full size (every pixel of it) and back to whole. Nothing here is counted in screen pixels, so the
+// browser's own zoom enlarges it further still. A click beside it, or Esc, closes. Arrows (and swipe) when there are
+// several; when close, the arrows move the painting. Nothing more to find: no buttons, no links.
+function lightbox(items, start) {  // items: [{src, srcset, full, px, title, href}]
   let i = start;
-  const img = el("img", { alt: "" }), cap = el("p", { class: "cap" });
+  const img = el("img", { alt: "", draggable: false }), cap = el("p", { class: "cap" });
   const box = el("div", { class: "lightbox", role: "dialog", "aria-modal": "true", tabIndex: -1 }, img, cap);
   const prev = el("button", { class: "nav prev", type: "button", "aria-label": "Previous painting", textContent: "‹" });
   const next = el("button", { class: "nav next", type: "button", "aria-label": "Next painting", textContent: "›" });
   if (items.length > 1) box.append(prev, next);
+  // close: the painting's place and size in the window (CSS pixels), null while it is shown whole
+  let z = null, fit = 0, shown = 0;
+  const near = () => z !== null;
   const show = () => {
     const it = items[i];
-    box.classList.remove("full"); img.style.width = img.style.height = ""; box.scrollTop = box.scrollLeft = 0;
+    z = null; shown++;
+    box.classList.remove("full", "held"); img.style.cssText = ""; box.scrollTop = box.scrollLeft = 0;
     img.srcset = it.srcset || ""; img.sizes = it.srcset ? "(max-width: 640px) 100vw, 1600px" : "";  // as large as it may be shown: browser zoom enlarges it
     img.src = it.src; img.alt = it.title || "";
-    img.style.cursor = it.full ? "zoom-in" : "zoom-out";
     cap.replaceChildren(it.href ? el("a", { href: it.href, textContent: it.title || "Untitled" }) : it.title || "");
     if (it.measure) cap.append(el("span", { class: "state", textContent: ` · ${it.measure}` }));
     if (items.length > 1) cap.append(el("span", { class: "state", textContent: `  ${i + 1} of ${items.length}` }));
   };
   const go = (d) => { i = (i + d + items.length) % items.length; show(); };
-  const close = () => { box.remove(); document.removeEventListener("keydown", key); document.body.style.overflow = ""; };
   const whole = () => show();
-  const fullSize = (e) => {  // where the click fell stays under the pointer: that is where they wanted to look
-    const it = items[i], r = img.getBoundingClientRect(), b = box.getBoundingClientRect();
-    const fx = (e.clientX - r.left) / r.width, fy = (e.clientY - r.top) / r.height;
-    const w = it.px / (window.devicePixelRatio || 1), h = w * r.height / r.width;  // one painting pixel, one screen pixel
-    box.classList.add("full");
-    img.removeAttribute("srcset"); img.removeAttribute("sizes");
-    img.src = it.full; img.style.width = `${w}px`; img.style.height = `${h}px`; img.style.cursor = "zoom-out";
-    box.scrollLeft = fx * w - (e.clientX - b.left);
-    box.scrollTop = fy * h - (e.clientY - b.top);
+  const pixels = () => items[i].px || img.naturalWidth || 0;  // the painting's own width
+  const most = () => Math.max(fit, 2 * pixels());  // as near as it comes: a painting pixel two CSS pixels wide
+  const place = () => {  // never off the window: an edge stops at the window's edge, a smaller side stays in the middle
+    const vw = box.clientWidth, vh = box.clientHeight;
+    z.x = z.w <= vw ? (vw - z.w) / 2 : Math.min(0, Math.max(vw - z.w, z.x));
+    z.y = z.h <= vh ? (vh - z.h) / 2 : Math.min(0, Math.max(vh - z.h, z.y));
+    img.style.left = `${z.x}px`; img.style.top = `${z.y}px`; img.style.width = `${z.w}px`; img.style.height = `${z.h}px`;
   };
+  const comeNear = () => {  // from whole to close, without a jump: the painting stays where it is
+    const it = items[i], r = img.getBoundingClientRect(), b = box.getBoundingClientRect();
+    if (!r.width || !r.height) return false;  // not loaded yet
+    fit = r.width;
+    z = { x: r.left - b.left, y: r.top - b.top, w: r.width, h: r.height, ratio: r.height / r.width };
+    box.classList.add("full"); box.scrollTop = box.scrollLeft = 0;
+    if (it.full && img.getAttribute("src") !== it.full) {  // every pixel, once it has arrived: until then the copy at hand, enlarged
+      const n = shown, f = new Image();
+      f.onload = () => { if (n === shown && near()) { img.removeAttribute("srcset"); img.removeAttribute("sizes"); img.src = it.full; } };
+      f.src = it.full;
+    }
+    return true;
+  };
+  const zoomTo = (cx, cy, w, stay) => {  // (cx, cy) in the window keeps the same spot of the painting under it
+    w = Math.min(most(), Math.max(fit, w));
+    if (w <= fit * 1.001 && !stay) return whole();
+    const b = box.getBoundingClientRect(), px = cx - b.left, py = cy - b.top;
+    const fx = (px - z.x) / z.w, fy = (py - z.y) / z.h;
+    z.w = w; z.h = w * z.ratio; z.x = px - fx * z.w; z.y = py - fy * z.h;
+    place();
+  };
+  const by = (cx, cy, factor, stay) => {
+    if (!near()) { if (factor <= 1 || !comeNear()) return; }
+    zoomTo(cx, cy, z.w * factor, stay);
+  };
+  const centre = () => { const b = box.getBoundingClientRect(); return [b.left + b.width / 2, b.top + b.height / 2]; };
+  const close = () => {
+    box.remove(); document.body.style.overflow = "";
+    document.removeEventListener("keydown", key); window.removeEventListener("resize", resized);
+    for (const t of ["pointermove", "pointerup", "pointercancel"]) window.removeEventListener(t, moves[t]);
+  };
+  let dragged = false;  // a drag or a pinch just ended: the click that follows it is not a click
   img.onclick = (e) => {
     e.stopPropagation();
-    if (box.classList.contains("full")) whole();
-    else if (items[i].full && items[i].px) fullSize(e);
-    else close();
+    if (dragged) return;
+    if (near()) return whole();
+    if (!comeNear()) return close();
+    const one = pixels() / (window.devicePixelRatio || 1);  // one painting pixel, one screen pixel
+    const w = one > fit * 1.05 ? one : Math.min(most(), fit * 2);
+    if (w <= fit * 1.001) return items[i].full ? whole() : close();
+    zoomTo(e.clientX, e.clientY, w);  // where the click fell stays under the pointer: that is where they wanted to look
   };
-  const key = (e) => { if (e.key === "Escape") box.classList.contains("full") ? whole() : close(); else if (items.length > 1 && e.key === "ArrowLeft") go(-1); else if (items.length > 1 && e.key === "ArrowRight") go(1); };
+  box.onclick = (e) => { if (dragged) return; if (!e.target.closest("a")) close(); };
+  box.addEventListener("wheel", (e) => {
+    if (e.target.closest("a, button")) return;
+    if (!near() && e.deltaY >= 0 && !e.ctrlKey) return;  // whole: scrolling on stays the window's (a zoomed page scrolls)
+    e.preventDefault();
+    const d = e.deltaY * (e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 300 : 1);  // lines and pages, as pixels
+    by(e.clientX, e.clientY, Math.exp(-Math.max(-300, Math.min(300, d)) * (e.ctrlKey ? 0.01 : 0.0015)));  // ctrl: a trackpad's pinch
+  }, { passive: false });
+  // one pointer moves the painting, two bring it nearer or farther about the point between them
+  const held = new Map();
+  const span = () => { const [a, b] = [...held.values()]; return { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; };
+  let last = null;
+  box.onpointerdown = (e) => {
+    if (e.target.closest("a, button") || (e.pointerType === "mouse" && e.button !== 0)) return;
+    if (!held.size) dragged = false;
+    held.set(e.pointerId, { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY });
+    last = held.size === 2 ? span() : null;
+    if (near() && e.pointerType === "mouse") e.preventDefault();  // no text selection, no image drag
+  };
+  const moves = {
+    pointermove: (e) => {
+      const p = held.get(e.pointerId);
+      if (!p) return;
+      const dx = e.clientX - p.x, dy = e.clientY - p.y;
+      p.x = e.clientX; p.y = e.clientY;
+      if (Math.hypot(p.x - p.x0, p.y - p.y0) > 5) dragged = true;
+      if (held.size === 2) {
+        const s = span();
+        if (last) {
+          dragged = true;
+          by(s.x, s.y, s.d / last.d, true);
+          if (near()) { z.x += s.x - last.x; z.y += s.y - last.y; place(); }
+        }
+        last = s;
+      } else if (held.size === 1 && near() && dragged) { z.x += dx; z.y += dy; place(); box.classList.add("held"); }
+    },
+    pointerup: (e) => {
+      if (!held.delete(e.pointerId)) return;
+      last = null; box.classList.remove("held");
+      if (!held.size && near() && z.w <= fit * 1.001) whole();
+      if (dragged) setTimeout(() => (dragged = false));  // after the click this release may bring
+    },
+  };
+  moves.pointercancel = moves.pointerup;
+  for (const t of ["pointermove", "pointerup", "pointercancel"]) window.addEventListener(t, moves[t]);
+  const resized = () => { if (near()) place(); };  // the window, or the browser's zoom, changed
+  const key = (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;  // the browser's own: its zoom above all
+    const arrows = { ArrowLeft: [1, 0], ArrowRight: [-1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] }[e.key];
+    if (e.key === "Escape") near() ? whole() : close();
+    else if (e.key === "+" || e.key === "=") by(...centre(), 1.5);
+    else if (e.key === "-" || e.key === "_") by(...centre(), 1 / 1.5);
+    else if (e.key === "0") { if (near()) whole(); }
+    else if (arrows && near()) { e.preventDefault(); z.x += arrows[0] * 120; z.y += arrows[1] * 120; place(); }
+    else if (items.length > 1 && e.key === "ArrowLeft") go(-1);
+    else if (items.length > 1 && e.key === "ArrowRight") go(1);
+  };
   prev.onclick = (e) => { e.stopPropagation(); go(-1); };
   next.onclick = (e) => { e.stopPropagation(); go(1); };
-  box.onclick = (e) => { if (!e.target.closest("a")) close(); };
   let x0 = null;
-  box.ontouchstart = (e) => (x0 = e.touches[0].clientX);
-  box.ontouchend = (e) => { if (x0 == null || items.length < 2 || box.classList.contains("full")) return; const dx = e.changedTouches[0].clientX - x0; x0 = null; if (Math.abs(dx) > 50) { e.preventDefault(); go(dx > 0 ? -1 : 1); } };
-  document.addEventListener("keydown", key);
+  box.ontouchstart = (e) => (x0 = e.touches.length === 1 ? e.touches[0].clientX : null);
+  box.ontouchend = (e) => { if (x0 == null || items.length < 2 || near() || e.touches.length) return; const dx = e.changedTouches[0].clientX - x0; x0 = null; if (Math.abs(dx) > 50) { e.preventDefault(); go(dx > 0 ? -1 : 1); } };
+  document.addEventListener("keydown", key); window.addEventListener("resize", resized);
   document.body.style.overflow = "hidden";
   document.body.append(box); box.focus(); show();
 }
