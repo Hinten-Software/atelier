@@ -153,6 +153,28 @@ def main():
         (DATA / "run" / "export-failed").unlink()
         tick()
         check("... and not when the last one went well", exported == [1])
+        # a run that waits for the open work to end (atelier now --after, 2026-11-23)
+        ran, real_now, opened = [], atelier.cmd_now, [object()]
+        atelier.open_work = lambda: opened[0] if opened else None
+        atelier.runner_alive = lambda w: True
+        atelier.registry = lambda: {"i": {}, "iv": {}}
+        ns = lambda **k: argparse.Namespace(**({"studio": "iv", "theme": None, "box": None, "commission": None, "model": None, "effort": None, "after": True} | k))
+        real_now(ns())
+        check("now --after: the run waits", '"studio": "iv"' in atelier.AFTER.read_text())
+        try:
+            real_now(ns()); again = ""
+        except SystemExit as e:
+            again = str(e)
+        check("... and a second one is refused", "already waiting" in again, again)
+        atelier.cmd_now = lambda a: ran.append((a.studio, a.after))
+        tick()
+        check("while the work is open nothing starts", ran == [] and atelier.AFTER.exists())
+        opened.clear()
+        tick()
+        check("once it has ended the tick starts the run, as the owner's own", ran == [("iv", False)] and not atelier.AFTER.exists(), ran)
+        tick()
+        check("... once", ran == [("iv", False)])
+        atelier.cmd_now = real_now
     finally:
         shutil.rmtree(DATA, ignore_errors=True)
     print("all passed" if not failed else f"{failed} failed")

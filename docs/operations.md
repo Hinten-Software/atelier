@@ -153,6 +153,8 @@ then the words the painter reads. Headings such as Theme, Subject, After and Tec
     atelier birth --studio iv --commission     once (after runner/probes.py, as every birth)
     atelier commissions                        the standing settings and what is waiting
     atelier now iv                             the next commission now (or --commission NAME, or --theme "words")
+    atelier now iv --after                     ... once the open work has ended: the tick starts it then, at any hour
+                                               and outside the daily cap (run/after; remove the file to drop it)
 
 Its night is Saturday (NIGHTS in runner/atelier.py), so a picture is there on Sunday morning. A night with nothing
 waiting is painted free, in the standing shape and with the standing requirements.

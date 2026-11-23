@@ -9,6 +9,7 @@
                                                the owner's manual run: one work now, at any hour and outside the daily
                                                cap, for the studio named or the next in the lineup; on the painter's
                                                own model and effort unless given (e.g. --model fable-5.2 --effort medium)
+    atelier now <studio> --after               ... once the open work has ended (run/after; the tick starts it)
     atelier paint <artist> [--theme TEXT] [--model M] [--effort E] --by owner|operator
                                                start a work; the runner continues in the background
     atelier commissions [studio]               what a commission studio will paint next (DATA/commissions/<studio>/;
@@ -140,8 +141,22 @@ def cmd_now(a):
     names the work; the tick removes it once that work has ended), for the studio named or the next in the lineup.
     The weekly nights are unchanged, but a studio that painted in the last 5 days skips its night (started_lately)."""
     import budget
+    if a.after:
+        # ... once the open work has ended (the owner, 2026-11-23: Studio IV's first, behind i-014): the tick starts it
+        if not open_work() and not budget.OPEN.exists():
+            raise SystemExit("no work is open: atelier now, without --after")
+        if AFTER.exists():
+            raise SystemExit(f"a run is already waiting for the open work to end ({AFTER}: {AFTER.read_text().strip()}); remove the file to drop it")
+        if a.studio not in registry():
+            raise SystemExit(f"--after takes a studio; the studios: {', '.join(registry())}")
+        given(a)
+        AFTER.write_text(json.dumps({k: getattr(a, k) for k in ("studio", "theme", "box", "commission", "model", "effort")}) + "\n")
+        event(f"the owner's run for {Artist(a.studio).name} waits for the open work to end (run/after); then it starts at any "
+              f"hour and outside the daily cap")
+        print(f"{Artist(a.studio).name} starts once the open work has ended ({AFTER})")
+        return
     if w := open_work():
-        raise SystemExit(f"a work is open: {w.id} (atelier status)")
+        raise SystemExit(f"a work is open: {w.id} (atelier status; --after: start once it has ended)")
     if budget.OPEN.exists():
         raise SystemExit(f"the studios are already open for a run ({budget.OPEN}); atelier status")
     id = a.studio or lineup()[0][1]
@@ -159,6 +174,25 @@ def cmd_now(a):
           f"the daily cap (run/open); the open flag is removed when it ends and the weekly schedule is unchanged")
     detach(w)
     print(f"{w.id} started for {w.artist.name} on {w.model()}, effort {w.effort()} (atelier status)")
+
+
+AFTER = RUN / "after"  # the owner's run that waits for the open work to end (atelier now --after)
+
+
+def start_after() -> bool:
+    """The run that waited (atelier now --after), once no work is open. Used up before the start, so one that fails
+    is not tried every 10 minutes: the log names why."""
+    import budget
+    if not AFTER.exists() or open_work() or budget.OPEN.exists():
+        return False
+    a = argparse.Namespace(**json.loads(AFTER.read_text()), after=False)
+    AFTER.unlink()
+    log(f"tick: the open work has ended; starting the owner's run that waited for it ({a.studio})")
+    try:
+        cmd_now(a)
+    except SystemExit as e:
+        event(f"the owner's run that waited ({a.studio}) did not start: {e}")
+    return True
 
 
 def close_run():
@@ -264,6 +298,8 @@ def cmd_tick(a):
         export_now()
     close_run()
     settle_check()
+    if start_after():
+        return
     if not STANDING.exists() or datetime.now().astimezone() >= datetime.fromisoformat(STANDING.read_text().strip()):
         if budget.OPEN.exists():  # the go the studios were opened for has ended: the night window and the cap again
             budget.OPEN.unlink()
@@ -482,6 +518,7 @@ def main():
     nw = sub.add_parser("now")
     nw.add_argument("studio", nargs="?", help="i, ii or iii (default: the next in the lineup, `atelier next`)")
     nw.add_argument("--theme")
+    nw.add_argument("--after", action="store_true", help="start once the open work has ended (the tick does), not now")
     nw.add_argument("--box", help="the tube box this work is painted from (default: every)")
     for x in (pp, nw):
         x.add_argument("--commission", metavar="NAME", help="a commission studio: this file of DATA/commissions/<studio>/, out of turn")
