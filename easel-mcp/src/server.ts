@@ -164,7 +164,7 @@ server.registerTool("look", {
 		"grid: true, or a spacing in canvas units. " +
 		"survey: true surveys the whole canvas at full detail, as several tiles (with mode, not crop or size); a partial reply gives the crop of each tile it doesn't show, to look at in separate turns. " +
 		"compare: the path of an image in this studio, usually an earlier look, resized to the current view's height and shown left of it; to compare an earlier look, supply matching crop, mode and light options explicitly. " +
-		"hold: the name of a knife (what is on it) or a pile (a fresh load), with at: \"x,y\" (canvas units): the loaded knife held up to the canvas there, its paint thick on the blade (crop sets the passage). Supports mode value, squint, relief or gallery, light and mask; size, grid and mirror are unavailable with hold. It shows the paint on the knife, not how it would look laid. " +
+		"hold: the name of a knife (what is on it) or a pile (a fresh load), with at: \"x,y\" (canvas units): the loaded knife held up to the canvas there, the blade's end at the point and the blade to its right (near the right edge it is cut off: hold it further left), its paint thick on the blade (crop sets the passage). Supports mode value, squint, relief or gallery, light and mask; size, grid and mirror are unavailable with hold. It shows the paint on the knife, not how it would look laid. " +
 		"palette: true shows the palette board instead: each pile knifed out thick and smeared thin across a black stripe.",
 	inputSchema: {
 		scratch,
