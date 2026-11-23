@@ -44,6 +44,7 @@ def harness_fingerprint() -> str:
     for f in sorted(TEXTS.glob("*")) + [EASEL_MCP, REPO / "easel-mcp/src/upstream/easel-client.ts",
                                         REPO / "easel-mcp/src/upstream/journal.ts", PAINTER_EASEL,
                                         PAINTER_EASEL.with_name("studio"), PAINTER_EASEL.with_name("width"),
+                                        *(f for f in [PAINTER_EASEL.with_name("scratch-width")] if f.exists()),
                                         REPO / "materials/easel_guide.md", REPO / "runner/config.py",
                                         REPO / "runner/works.py"]:
         h.update(f.name.encode() + f.read_bytes())

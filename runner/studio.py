@@ -229,8 +229,13 @@ def prepare(artist: Artist, theme: str | None, box: str = DEFAULT_BOX, com: dict
     close_easel(s, artist.root)  # a work that ended outside finish() (its ceiling, a killed runner) left it serving
     # beside it, first: `studio` makes it a painter's easel for this box, `width` a new painting's width (4800 px);
     # an easel without `studio` would be a developer's
-    for f in ("studio", "width"):
-        shutil.copy2(painter_easel(box).with_name(f), s / "bin" / f)
+    # `scratch-width` a new scratch canvas's (2400 px: trials at a quarter of the cost, the owner 2026-11-23)
+    # (an easel built before 2026-11-23 has none: its scratch canvas is the painting's width, as it was)
+    for f in ("studio", "width", "scratch-width"):
+        if (src := painter_easel(box).with_name(f)).exists() or f != "scratch-width":
+            shutil.copy2(src, s / "bin" / f)
+        else:
+            (s / "bin" / f).unlink(missing_ok=True)
     # a commission's canvas: the shape the easel's tools hold a new canvas to (bin/canvas, read by
     # easel-mcp/src/canvas-rule.ts; bin/ is out of the painter's reach). Its pixels are every painting's: 4800 wide
     rule = None

@@ -2,7 +2,7 @@
 # Build the replay easel and a painter's easel per box, with no account name or local path inside them (requirements ENG-7):
 # rustc's panic locations and the Lua C sources' __FILE__ name the build machine's paths otherwise.
 #   tools/build-engine.sh        -> engine/target/release/easel (the replay easel: the operator's, never in a studio)
-#                                   engine/target/painter/boxes/<box>/{easel,studio,width,tubes.md}, a studio's bin/ per box
+#                                   engine/target/painter/boxes/<box>/{easel,studio,width,scratch-width,tubes.md}, a studio's bin/ per box
 # Since claude-paint fea9aa6 the easel is one binary for every box; a file `studio` beside it ("painter <box>") makes
 # it a painter's easel for that box, and `width` (4800) sets a new painting's width. The painter's binary is built with
 # `--cfg atelier_painter`, which leaves out the one build path the replay easel keeps (ENG-7). The runner gives a
@@ -37,6 +37,7 @@ for box in $boxes; do
   cp target/painter/release/easel "target/painter/boxes/$box/easel"
   echo "painter $box" > "target/painter/boxes/$box/studio"
   echo 4800 > "target/painter/boxes/$box/width"
+  echo 2400 > "target/painter/boxes/$box/scratch-width"  # a new scratch canvas: half the painting's width (main.rs scratch_width)
   "target/painter/boxes/$box/easel" tubes --markdown > "target/painter/boxes/$box/tubes.md"
 done
 # (grep -q would end the pipe early, and with pipefail a broken pipe reads as "no match": count instead)

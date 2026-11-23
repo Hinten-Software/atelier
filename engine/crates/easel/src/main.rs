@@ -88,6 +88,30 @@ fn configured_width() -> Result<usize, String> {
     new_width(from_file.as_ref().map(|(t, p)| (t.as_str(), p.as_str())), std::env::var("EASEL_WIDTH").ok().as_deref())
 }
 
+/// The atelier: a new scratch canvas's width beside a painting of `painting` px. A file `scratch-width` next to this
+/// executable (tools/build-engine.sh writes 2400) names it; without the file, or in claude-paint's own build, the
+/// painting's. Trials on a full 4800 px scratch canvas took more of a night than the painting did (i-014, 2026-11-23:
+/// 4.5 of 8 hours); at 2400 px a pass costs about a quarter. The scratch canvas's log names its own width as any
+/// log does (`session::WIDTH_MARK`, none at 2400), so one begun at the painting's width goes on at that.
+fn scratch_width(painting: usize) -> Result<usize, String> {
+    if !ATELIER {
+        return Ok(painting);
+    }
+    let file = std::env::current_exe().ok().and_then(|e| e.canonicalize().ok()).and_then(|e| e.parent().map(|d| d.join("scratch-width")));
+    match file {
+        // named without its folder: the painter reads this
+        Some(f) if f.exists() => scratch_width_from(&std::fs::read_to_string(&f).map_err(|e| format!("scratch-width: {e}"))?, "scratch-width", painting),
+        _ => Ok(painting),
+    }
+}
+
+/// `scratch_width` from what the file says: one of `session::WIDTHS`, and never wider than the painting.
+fn scratch_width_from(text: &str, path: &str, painting: usize) -> Result<usize, String> {
+    let w = text.trim().parse::<usize>().ok().filter(|w| session::WIDTHS.contains(w))
+        .ok_or_else(|| format!("{path} says width {:?}: want one of {:?}", text.trim(), session::WIDTHS))?;
+    Ok(w.min(painting))
+}
+
 /// `configured_width` from what the file (its text and path) and `EASEL_WIDTH` say.
 fn new_width(file: Option<(&str, &str)>, env: Option<&str>) -> Result<usize, String> {
     let parse = |v: &str, from: &str| {
@@ -1353,7 +1377,8 @@ impl Server {
     }
 
     /// `resume`; a new session's box and width are `like`'s when given (the scratch canvas
-    /// takes the painting's), else the configured box and the name's width.
+    /// takes the painting's; in the atelier's build its width may be less, `scratch_width`), else the configured
+    /// box and the name's width.
     fn resume_as(name: String, like: Option<&Session>, display: Option<std::rc::Rc<display::Pool>>, progress: &dyn Fn(usize, usize)) -> Result<Self, String> {
         let lp = log_path(&name);
         #[cfg(feature = "state-store")]
@@ -1383,7 +1408,7 @@ impl Server {
         // an existing painting goes on with the box its log names; a new one takes the
         // configured box (session::box_for)
         let (tubes, width) = match (like, &text) {
-            (Some(l), None) => ((*l.st.borrow().tubes).clone(), l.st.borrow().width),
+            (Some(l), None) => ((*l.st.borrow().tubes).clone(), scratch_width(l.st.borrow().width)?),
             _ => (session::box_for(text.as_deref())?, width_for(&name, text.as_deref())?),
         };
         // the state store's budgets are a 2400 px painting's (a 4800 px state is about four times as large)
@@ -2113,6 +2138,7 @@ impl Server {
             "the scratch canvas is set up as a copy of the painting's canvas, and the painting has none yet: its first chunk is canvas{...}",
         )?;
         let name = scratch_name(&self.name);
+        scratch_width(self.s.st.borrow().width)?; // before the last one is put aside: a file that says no width leaves it
         self.scratch = None;
         let aside = put_aside(&name)?;
         let mut sc = Server::resume_as(name, Some(&self.s), self.display.clone(), &|_, _| {})?;
@@ -2835,6 +2861,16 @@ mod tests {
         assert_eq!(back.dimensions(), (16, 12));
     }
     use super::*;
+
+    /// The atelier's scratch canvas (`scratch_width`): the width its file names, never wider than the painting.
+    #[test]
+    fn a_scratch_canvas_takes_the_width_its_file_names() {
+        assert_eq!(scratch_width_from("2400\n", "scratch-width", 4800), Ok(2400));
+        assert_eq!(scratch_width_from("4800", "scratch-width", 4800), Ok(4800));
+        assert_eq!(scratch_width_from("4800", "scratch-width", 2400), Ok(2400));
+        assert!(scratch_width_from("1200", "scratch-width", 4800).unwrap_err().contains("want one of"));
+        assert!(scratch_width_from("", "scratch-width", 4800).is_err());
+    }
 
     #[test]
     fn palette_and_held_knife_previews_keep_the_paintings_film_optics() {

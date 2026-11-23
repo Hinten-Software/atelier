@@ -121,6 +121,14 @@ She develops actively; this is routine. In a worktree of its own (the runner pai
 - `tools/upstream/import.sh`: the cache's fetch takes tags she moved (`--force`).
 - `tools/build-engine.sh`, since 4bbbbec: `SOURCE_DATE_EPOCH=0`, since her mimalloc stamps its C build's date and time
   into the easel; without it two builds of one commit differ in those bytes.
+- `engine/crates/easel/src/main.rs` `scratch_width` (the owner, 2026-11-23): in the atelier's build a new scratch
+  canvas is as wide as a file `scratch-width` beside the easel says (2400; tools/build-engine.sh writes it,
+  runner/studio.py copies it, the probes' fingerprint holds it), not the painting's 4800. Trials had grown to more
+  than half a night (i-014: 4.5 of 8 hours, four whole-canvas grounds at 30 minutes each); measured 2026-11-23, the
+  same trial took 859 s on a 4800 px painting and 120 s on the 2400 px scratch canvas (both beside a running work).
+  A look shows both at 2.4 px to a unit, so the painter sees the same size; a trial there is not the painting at a
+  smaller size, though (the kernels' radii are in mm, main.rs at `replay`): bristle and grain come out coarser, the
+  marks of the same character. A file that names no width fails a new scratch canvas before the last one is put aside. Without the file, and in her build, the scratch canvas is the painting's width as before.
 
 Known, hers, at 4bbbbec (they fail the same on her files alone, built apart from ours):
 `session_integrity::an_interrupted_note_leaves_the_journal_whole` (the note succeeds under `ulimit -f`) and
