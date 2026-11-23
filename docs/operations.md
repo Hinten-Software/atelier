@@ -70,6 +70,9 @@ any change is an atelier event (history.md).
 - *Crash:* nothing to do; the runner retries after 90 s, 3, 5, 10, 15, 20 min, then stops the
   work as not finished.
 - *Reboot or runner crash:* `atelier status` says `interrupted`; `atelier resume` continues it.
+- *The window closes during a sitting:* nothing to do; the runner ends the sitting once every call the painter sent
+  has its answer, and the work goes on in the next window. (Until 2026-11-23 a look sent along with a paint could be
+  cut off, and Claude Code's "Connection closed" for it stopped the work as an audit hit: i-014.)
 - *White-room audit stop:* `atelier status` lists the hits. Read the transcript in the work's run
   folder. Fix the cause (it is ours, not the artist's), log it, then either
   `atelier resume --clear "what was found and fixed"` (the work stays contaminated: not hung, not
@@ -100,7 +103,7 @@ every); the painter is never told a box's name.
 `atelier tick` (deploy/mac/atelier.tick.plist, a LaunchAgent, every 10 minutes and at login) carries the owner's
 standing go: until the time in DATA/run/until, it resumes a work a reboot cut off, and otherwise starts the next
 studio's work when it is that studio's night (one a week: Studio I Sunday, II Tuesday, III Thursday night, so a new
-painting hangs Monday, Wednesday and Friday morning; NIGHTS in runner/atelier.py; the owner, 2026-10-13) and the night
+painting hangs Monday, Wednesday and Friday morning; Studio IV, the commission studio, Saturday night; NIGHTS in runner/atelier.py; the owner, 2026-10-13) and the night
 window is open and today's budget allows. A studio that began a work in the last 5 days waits for its next night; a
 work set aside leaves the night free for another start. `atelier next` lists the nights. If Claude's safety classifier stopped a work's
 first reply before any paint was laid, the same work starts afresh in a new session (twice at most; then it is set
@@ -113,6 +116,46 @@ A painting on demand, at any hour: `touch DATA/run/open`, then `atelier paint <s
 `--theme "..."` or `--box <box>`). While DATA/run/open is there the studios paint at any hour and without the daily cap
 (each work's own cap stays; runner/budget.py OPEN); the tick removes it once the standing go's count of new works is
 used up and nothing is open, or delete it yourself to return to the night window.
+
+## Studio IV: commissions for the Frame (the owner, 2026-11-23)
+
+A fourth studio that paints what the owner asks for, for the Frame (the 31.5" six-ink e-paper panel;
+docs/frame-picture-specs.md). The same easel, engine and runner as Studios I-III; four rules differ
+(runner/commission.py):
+
+- **Art direction reaches the painter.** Theme, subject, a painter of the past and their way of working, technical
+  wishes: whatever the owner writes, as written, and it may speak of composition. Studios I-III stay as they are.
+- **The canvas's shape is given** (16:9), and its size if the owner sets one. The easel's tools refuse any other
+  `canvas{}` before it reaches the easel (studio/bin/canvas, easel-mcp/src/canvas-rule.ts), so nothing is lost. At
+  4800 pixels wide a 16:9 canvas is 4800 × 2700, the panel's shape at 1.9 times its pixels.
+- **The brief is held to the private words only**, not the white room's word list: the owner's words may speak of
+  screens, viewers and painters. The live audit of every sitting is unchanged.
+- **Private.** Nothing of the studio is exported (`private` in its birth record; export.py). Each finished picture
+  is also written whole to DATA/frame/<work>.jpg (JPEG, quality 92), which the backup carries to the NAS.
+
+The owner writes in DATA/commissions/iv/:
+
+- `standing.md`: for every picture of the studio: the shape, and what the panel does to a painting (the inks, what
+  carries, what is lost, contrast). Seeded from deploy/commissions/standing.md; edit it freely.
+- `direction.md`: the art direction in force. Every work is painted under it until the owner changes or removes
+  the file; the brief tells the painter it holds for more than one picture and to let each differ from the last.
+- one file per commission, any name ending in `.md` (deploy/commissions/example.md is one to write from), for one
+  work in place of the direction. The next work takes the first by name; once the work exists the file moves to
+  `done/` under the work's id.
+
+The painter's notebook, toolkit and journal are the studio's and go on from work to work, also when the direction
+changes: nothing is reset, and what to keep is the painter's own. The brief of each work (run/<work>/) keeps the
+direction it was painted under.
+
+A file may open with settings, one a line (`aspect: 16:9`, `size: 700` for the canvas's width in mm, `box: <box>`),
+then the words the painter reads. Headings such as Theme, Subject, After and Technical are a habit, not a format.
+
+    atelier birth --studio iv --commission     once (after runner/probes.py, as every birth)
+    atelier commissions                        the standing settings and what is waiting
+    atelier now iv                             the next commission now (or --commission NAME, or --theme "words")
+
+Its night is Saturday (NIGHTS in runner/atelier.py), so a picture is there on Sunday morning. A night with nothing
+waiting is painted free, in the standing shape and with the standing requirements.
 
 ## The owner's essays
 

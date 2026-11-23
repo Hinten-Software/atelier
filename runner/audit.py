@@ -131,6 +131,22 @@ OWN_ARGUMENT_ERROR = re.compile(r"MCP error -32602: Input validation error: Inva
 # carries only the name the painter wrote, so nothing from outside. The exact form, a plain tool name; anything else
 # in a tool_use_error is still a hit.
 NO_SUCH_TOOL = re.compile(r"<tool_use_error>Error: No such tool available: [A-Za-z0-9_-]{1,64}</tool_use_error>")
+# Claude Code's answer to a tool call still waiting when the runner ends the sitting (the window closed, a budget ran
+# out, the context is full): it closes the easel's connection as it stops and writes this as the call's result. The
+# model never reads it (the next sitting is a fresh session), and it holds nothing from outside. Accepted only after
+# the runner's own planned stop (works.py Watcher); at any other time it is a hit (i-014, 2026-11-23: the painter had
+# sent a look along with a paint; the window closed during the paint; the look's answer stopped the work)
+CLOSED_AS_WE_STOPPED = "Connection closed"
+
+
+def closed_as_we_stopped(d: dict) -> bool:
+    """A transcript line that is nothing but tool results saying CLOSED_AS_WE_STOPPED, each an error."""
+    content = (d.get("message") or {}).get("content") if d.get("type") == "user" else None
+    return (isinstance(content, list) and bool(content)
+            and all(isinstance(x, dict) and x.get("type") == "tool_result" and x.get("is_error") is True
+                    and x.get("content") == CLOSED_AS_WE_STOPPED for x in content))
+
+
 IMAGE_NOTE = "[Image: source: "  # Claude Code's note of where it saved an image
 # what Claude Code itself says to a local model that gave an empty reply (iv-003, 2026-10-22): its own words, nothing
 # from outside, so for a painter on a local model it is accepted as the runner's messages are (the owner: their errors

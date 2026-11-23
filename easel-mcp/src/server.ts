@@ -29,6 +29,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { JOURNAL, reviseJournal } from "./upstream/journal.ts";
+import { canvasRefused, canvasRule } from "./canvas-rule.ts";
 import {
 	atEasel, hideCounters, logFind, logReply, lookArgs, paintReply, renameLooks, statusReply, studioPath, tail, toolWords,
 } from "./upstream/easel-client.ts";
@@ -142,6 +143,10 @@ server.registerTool("paint", {
 		if (!existsSync(path)) return fail(`paint: there is no ${TOOLKIT} yet`);
 		lua = readFileSync(path, "utf8"); // it runs, and is logged, as an ordinary chunk
 	}
+	// a studio whose canvas is given (canvas-rule.ts): the painting's canvas only, never the scratch canvas
+	const rule = p.scratch ? undefined : canvasRule(studio);
+	const refused = rule && canvasRefused(lua!, rule);
+	if (refused) return fail(refused);
 	try {
 		return say(tag(p, capped(paintReply(await atEasel(studio, ["do", "-", ...on(p), ...(p.new_scratch ? ["--new"] : [])], lua!)))));
 	} catch (e) {

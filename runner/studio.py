@@ -67,6 +67,17 @@ class Artist:
     def name(self) -> str:
         return self.rec["studio_name"]
 
+    @property
+    def born(self) -> dict:
+        """The birth record (empty before it is written)."""
+        f = self.home / "birth.json"
+        return json.loads(f.read_text()) if f.exists() else {}
+
+    @property
+    def commissioned(self) -> bool:
+        """A studio that paints what the owner asks for (runner/commission.py), by its birth record."""
+        return bool(self.born.get("commission"))
+
     def works(self) -> list[Path]:
         return sorted(p for p in (DATA / "works").glob(f"{self.id}-*") if p.is_dir())
 
@@ -76,14 +87,17 @@ class Artist:
 
 
 def birth(model: str = MODEL, effort: str = EFFORT, studio: str | None = None, walls: Path | None = None,
-          temperament: str | None = None, temperament_note: str | None = None, local: dict | None = None) -> Artist:
+          temperament: str | None = None, temperament_note: str | None = None, local: dict | None = None,
+          commission: bool = False) -> Artist:
     """A new artist: a neutral root, an empty studio, its own Claude config, and a public birth record (ART-2).
     studio: which studio ("iii"); default the first one not yet born. walls: a folder of paintings to hang before the
     artist first wakes (named 1, 2, ...: the walls' standard), without cards; the painter is told nothing of them.
     temperament: the owner's text, the notebook's first page at birth, unsigned; the painter is told nothing of it
     and may keep, revise or outgrow it. The public record holds it (temperament_text) and the owner's note for
     visitors (temperament_note); a copy is kept as DATA/artists/<id>/temperament-at-birth.
-    local: {"url", "model"}: a painter on a local model (config.artist_env), the model given as `model` too."""
+    local: {"url", "model"}: a painter on a local model (config.artist_env), the model given as `model` too.
+    commission: a studio that paints what the owner asks for (runner/commission.py); private: nothing of it is
+    exported (the owner, 2026-11-23)."""
     reg = registry()
     id = (studio or next(r.lower() for r in ROMAN if r.lower() not in reg)).lower()
     if id in reg or id.upper() not in ROMAN:
@@ -110,7 +124,11 @@ def birth(model: str = MODEL, effort: str = EFFORT, studio: str | None = None, w
         "temperament_note": (temperament_note.strip() if temperament_note else TEMPERAMENT_NOTE) if temperament else None,
         "temperament_text": temperament.strip() if temperament else None,
         **({"local": local} if local else {}),
+        **({"commission": True, "private": True} if commission else {}),
     }, indent=1))
+    if commission:
+        import commission as com
+        com.seed(id)
     first_page = temperament.strip() + "\n" if temperament else ""
     if temperament:
         (a.home / "temperament-at-birth").write_text(first_page)
@@ -156,12 +174,19 @@ def next_wall_number(artist: Artist) -> int:
     return len(list((artist.home / "walls").glob("*.json"))) + 1
 
 
-def brief_text(artist: Artist, theme: str | None) -> str:
+def brief_text(artist: Artist, theme: str | None, com: dict | None = None) -> str:
+    """The work's brief. com: its commission (commission.take), in a studio that paints what the owner asks for."""
     msgs = json.loads((TEXTS / "messages.json").read_text())
-    direction = msgs["direction_themed"].replace("{THEME}", theme.strip().rstrip(".")) if theme else msgs["direction_free"]
+    if com is not None:
+        import commission
+        direction = commission.direction(com, msgs)
+    else:
+        direction = msgs["direction_themed"].replace("{THEME}", theme.strip().rstrip(".")) if theme else msgs["direction_free"]
+    decisions = msgs["decisions_commission"] if com and com["words"] else msgs["decisions_free"]
     # the walls are mentioned once anything hangs there, painted here or hung at birth, in words that claim neither
     notebook = msgs["notebook_later"] if any((artist.home / "walls").glob("*.json")) else msgs["notebook_first"]
-    text = (TEXTS / "brief.md").read_text().replace("{DIRECTION}", direction).replace("{NOTEBOOK}", notebook)
+    text = ((TEXTS / "brief.md").read_text().replace("{DIRECTION}", direction).replace("{NOTEBOOK}", notebook)
+            .replace("{DECISIONS}", decisions))
     # a painter on a local model ends their brief with a go (the owner, 2026-10-22: gemma read it, then waited)
     local = json.loads((artist.home / "birth.json").read_text()).get("local") if (artist.home / "birth.json").exists() else None
     return text.rstrip("\n") + "\n\nNow paint.\n" if local else text
@@ -191,7 +216,7 @@ def close_easel(studio: Path, home: Path):
                        env={"PATH": "/usr/bin:/bin", "HOME": str(home)})
 
 
-def prepare(artist: Artist, theme: str | None, box: str = DEFAULT_BOX) -> dict:
+def prepare(artist: Artist, theme: str | None, box: str = DEFAULT_BOX, com: dict | None = None) -> dict:
     """Set the studio up for a new work (RUN-4): the easel, the two texts, this work's brief, an empty journal and
     easel. The notebook, toolkit and walls stay as the artist left them. Returns hashes for the manifest.
     The studio names things as a painter would: brief, notebook, toolkit, journal, easel guide, notes on oil paint,
@@ -206,6 +231,15 @@ def prepare(artist: Artist, theme: str | None, box: str = DEFAULT_BOX) -> dict:
     # an easel without `studio` would be a developer's
     for f in ("studio", "width"):
         shutil.copy2(painter_easel(box).with_name(f), s / "bin" / f)
+    # a commission's canvas: the shape the easel's tools hold a new canvas to (bin/canvas, read by
+    # easel-mcp/src/canvas-rule.ts; bin/ is out of the painter's reach). Its pixels are every painting's: 4800 wide
+    rule = None
+    if com is not None:
+        import commission
+        rule = commission.canvas_rule(com)
+    (s / "bin" / "canvas").unlink(missing_ok=True)
+    if rule:
+        (s / "bin" / "canvas").write_text(json.dumps(rule))
     # a new file, not the old one written over: macOS kills every exec of a binary changed in place while it runs
     tmp = easel.with_name("easel.new")
     shutil.copy2(painter_easel(box), tmp)
@@ -218,7 +252,7 @@ def prepare(artist: Artist, theme: str | None, box: str = DEFAULT_BOX) -> dict:
     for leftover in (s / "paintings" / "lua").glob("*"):
         leftover.unlink()
     shutil.rmtree(s / "out", ignore_errors=True)
-    (s / BRIEF).write_text(brief_text(artist, theme))
+    (s / BRIEF).write_text(brief_text(artist, theme, com))
     for f in (NOTEBOOK, TOOLKIT):
         (s / f).touch()
     write_walls_list(artist)

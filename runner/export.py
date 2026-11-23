@@ -49,9 +49,10 @@ IP_RE = re.compile(r"\b(?:10|192\.168|172\.(?:1[6-9]|2\d|3[01]))(?:\.\d{1,3}){2,
 def private_artists() -> set[str]:
     """Painters on a local model (the owner, 2026-10-22: tried in private first), in a store pushed to the NAS: none
     of theirs is exported there. They belong in a store of their own (tools/local.sh), whose export stays on the Mac."""
-    if not (DATA / "nas.json").exists():
-        return set()
-    return {p.parent.name for p in (DATA / "artists").glob("*/birth.json") if json.loads(p.read_text()).get("local")}
+    births = {p.parent.name: json.loads(p.read_text()) for p in (DATA / "artists").glob("*/birth.json")}
+    # ... and a studio born private (a commission studio, the owner 2026-11-23): never exported, with or without a NAS
+    nas = (DATA / "nas.json").exists()
+    return {id for id, b in births.items() if b.get("private") or (nas and b.get("local"))}
 
 
 def hidden(rel: Path) -> bool:

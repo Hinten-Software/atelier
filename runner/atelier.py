@@ -2,6 +2,7 @@
 """The atelier's runner (requirements 5.10). Started by a person (Q1); carries a work through its sittings.
 
     atelier birth                              a new artist (after the probe suite has passed: RUN-16)
+    atelier birth --commission                 ... who paints what the owner asks for, in private (commission.py)
     atelier birth --local MODEL                a painter on a local model in LM Studio, in a private store
                                                (tools/local.sh birth --local MODEL: never pushed to the NAS)
     atelier now [studio] [--model M] [--effort E] [--theme TEXT] [--box BOX]
@@ -10,6 +11,9 @@
                                                own model and effort unless given (e.g. --model fable-5.2 --effort medium)
     atelier paint <artist> [--theme TEXT] [--model M] [--effort E] --by owner|operator
                                                start a work; the runner continues in the background
+    atelier commissions [studio]               what a commission studio will paint next (DATA/commissions/<studio>/;
+                                               runner/commission.py); `now` and `paint` take --commission NAME for one
+                                               out of turn, or --theme "words" for one written on the spot
     atelier status                             the artists, and the open work and its state
     atelier resume [--clear REASON]            continue an interrupted work (a person, after a reboot or a crash);
                                                --clear: continue a work the white-room audit stopped (logged)
@@ -95,14 +99,19 @@ def cmd_birth(a):
     note = Path(a.temperament_note).expanduser().read_text() if a.temperament_note else None
     if note is not None and not temperament:
         raise SystemExit("--temperament-note goes with --temperament")
+    if a.commission and local:
+        raise SystemExit("--commission is for a painter in this store; a local painter's store is private already")
     artist = birth(studio=a.studio, walls=walls, temperament=temperament, temperament_note=note, local=local,
+                   commission=a.commission,
                    **({"model": a.local} if local else {}))
     rec = json.loads((artist.home / "birth.json").read_text())
     hung = rec["walls_at_birth"]
     event(f"{artist.name} born ({artist.id}), model and effort in the birth record"
           + (f"; {hung} paintings hung before their first work (the owner's, recreated from recollection)" if hung else "")
           + ("; given a temperament by the owner, the first page of their notebook" if rec.get("temperament_note") else "")
-          + (f"; on the local model {a.local}" if local else ""))
+          + (f"; on the local model {a.local}" if local else "")
+          + ("; a commission studio: it paints what the owner asks for (DATA/commissions), its canvas's shape is given, "
+             "its brief is held to the private words only, and nothing of it is exported" if a.commission else ""))
     print(f"{artist.name} ({artist.id}) is born")
 
 
@@ -113,7 +122,7 @@ def cmd_paint(a):
     box = getattr(a, "box", None) or DEFAULT_BOX  # (the tick gives no box: the default)
     if box not in boxes():
         raise SystemExit(f"no box {box!r}; the boxes: {', '.join(boxes())} (tools/build-engine.sh builds them)")
-    w = Work.create(Artist(a.artist), a.theme, a.by, box, *given(a))
+    w = Work.create(Artist(a.artist), a.theme, a.by, box, *given(a), commission_name=getattr(a, "commission", None))
     detach(w)
     return w
 
@@ -144,7 +153,7 @@ def cmd_now(a):
     box = a.box or DEFAULT_BOX
     if box not in boxes():
         raise SystemExit(f"no box {box!r}; the boxes: {', '.join(boxes())} (tools/build-engine.sh builds them)")
-    w = Work.create(Artist(id), a.theme, "owner", box, *given(a))
+    w = Work.create(Artist(id), a.theme, "owner", box, *given(a), commission_name=a.commission)
     budget.OPEN.write_text(w.id + "\n")
     event(f"the owner's run: {w.id} for {w.artist.name} now, on {w.model()}, effort {w.effort()}, at any hour and outside "
           f"the daily cap (run/open); the open flag is removed when it ends and the weekly schedule is unchanged")
@@ -326,7 +335,8 @@ def classifier_misfire(w: Work) -> bool:
 # night of the week, so a new painting hangs on three mornings: Monday (I), Wednesday (II) and Friday (III). Python's
 # weekdays, Monday 0, of the evening the night begins. A work not finished in its night goes on the next nights, as
 # before; a work set aside leaves its studio's night free for another start.
-NIGHTS = {"i": 6, "ii": 1, "iii": 3}
+# Studio IV, the commission studio (2026-11-23): Saturday night, so its picture is there on Sunday morning.
+NIGHTS = {"i": 6, "ii": 1, "iii": 3, "iv": 5}
 
 
 def tonights_studio(t: datetime | None = None) -> str | None:
@@ -413,6 +423,17 @@ def cmd_boxes(a):
         print(f"{b}: {n} tubes{' (default)' if b == DEFAULT_BOX else ''}")
 
 
+def cmd_commissions(a):
+    import commission
+    ids = [a.studio] if a.studio else [id for id in registry() if Artist(id).commissioned]
+    if not ids:
+        raise SystemExit("no commission studio yet (atelier birth --commission)")
+    for id in ids:
+        if not Artist(id).commissioned:
+            raise SystemExit(f"{Artist(id).name} takes no commissions")
+        print(f"{Artist(id).name}: {commission.listing(id)}")
+
+
 def cmd_next(a):
     """Each studio's next night (NIGHTS): its weekday, and not within 5 days of its last start (started_lately)."""
     tonight = this_evening()
@@ -446,6 +467,8 @@ def main():
     b = sub.add_parser("birth")
     b.add_argument("--without-probes", action="store_true", help=argparse.SUPPRESS)
     b.add_argument("--studio", help="which studio to birth (i, ii, iii); default the first not yet born")
+    b.add_argument("--commission", action="store_true",
+                   help="a studio that paints what the owner asks for, in private (runner/commission.py)")
     b.add_argument("--walls", help="a folder of paintings named 1, 2, ... to hang before the first work")
     b.add_argument("--temperament", help="a text file: the owner's temperament for the painter, their notebook's first page")
     b.add_argument("--temperament-note", help="a text file: what visitors read about the temperament (first line: its heading)")
@@ -460,6 +483,10 @@ def main():
     nw.add_argument("studio", nargs="?", help="i, ii or iii (default: the next in the lineup, `atelier next`)")
     nw.add_argument("--theme")
     nw.add_argument("--box", help="the tube box this work is painted from (default: every)")
+    for x in (pp, nw):
+        x.add_argument("--commission", metavar="NAME", help="a commission studio: this file of DATA/commissions/<studio>/, out of turn")
+    cm = sub.add_parser("commissions")
+    cm.add_argument("studio", nargs="?")
     for x in (pp, nw):
         x.add_argument("--model", help="this work's model, e.g. fable-5.2, opus-5.5, sonnet-5.5 (default: the painter's own)")
         x.add_argument("--effort", choices=EFFORTS, help="this work's effort (default: the painter's own)")

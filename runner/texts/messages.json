@@ -4,5 +4,10 @@
   "direction_free": "The subject and composition are yours.",
   "direction_themed": "{THEME}. Within it, everything is yours to decide.",
   "notebook_first": "The notebook is yours. It stays in this studio from one painting to the next.",
-  "notebook_later": "The notebook is yours. It stays in this studio from one painting to the next.\nThe walls hold finished paintings; walls/list names them."
+  "notebook_later": "The notebook is yours. It stays in this studio from one painting to the next.\nThe walls hold finished paintings; walls/list names them.",
+  "decisions_free": "You make every artistic decision.",
+  "decisions_commission": "Within the commission, every artistic decision is yours.",
+  "direction_commission": "This picture is a commission. What is asked for:\n\n{COMMISSION}",
+  "direction_standing": "This studio paints under its owner's direction. For this picture, as for the others painted under it:\n\n{COMMISSION}\n\nWhat this picture is, within that, is yours to choose. Let it differ from the ones you painted before.",
+  "canvas_given": "## The canvas\nThe canvas's shape is given: {SHAPE}. In `canvas{}`, write {FIELDS}; the easel takes no other here. The rest of the canvas, its ground too, is yours to choose."
 }

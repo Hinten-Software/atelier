@@ -20,6 +20,7 @@ from pathlib import Path
 
 import audit
 import budget
+import commission
 from config import (CHECK_PAINTING, CLAUDE, CLAUDE_VERSION, CONTEXT_LIMIT, CRASH_WAITS, DATA, EASEL_MCP, LIMIT_GIVE_UP_S,
                     LIMIT_RETRY_S, LOCAL_MAX_SITTINGS, LOCAL_UNPAINTED, LOCAL_NOT_READY_RETRY_S, MAX_INVOLUNTARY, NODE, DEFAULT_BOX,
                     REPLAY_EASEL, REPO, TEXTS, TOOLS, artist_env, local_context_limit, local_ready, painter_easel)
@@ -263,9 +264,19 @@ class Work:
 
     @classmethod
     def create(cls, artist: Artist, theme: str | None, started_by: str, box: str = DEFAULT_BOX,
-               model: str | None = None, effort: str | None = None) -> "Work":
+               model: str | None = None, effort: str | None = None, commission_name: str | None = None) -> "Work":
         if CURRENT.exists():
             raise SystemExit(f"a work is open: {CURRENT.read_text().strip()} (atelier status)")
+        # a studio that paints what the owner asks for: the commission named, the words given (--theme), the first
+        # one waiting, or none (runner/commission.py); in any other studio a commission is refused
+        com = None
+        if artist.commissioned:
+            com = commission.take(artist.id, theme, commission_name)
+            theme, box = None, com.get("box") or box
+        elif commission_name:
+            raise SystemExit(f"{artist.name} takes no commissions (a studio born with `atelier birth --commission` does)")
+        if not painter_easel(box).exists():
+            raise SystemExit(f"no painter's easel for the box {box!r} (tools/build-engine.sh builds one per box)")
         stop_check("set aside for the next work")
         number = len(artist.works()) + 1
         id = f"{artist.id}-{number:03d}"
@@ -276,9 +287,7 @@ class Work:
         for f in (NOTEBOOK, TOOLKIT):  # as they were before this work (ART-7)
             src = artist.studio / f
             befores[f] = src.read_bytes() if src.exists() else b""
-        if not painter_easel(box).exists():
-            raise SystemExit(f"no painter's easel for the box {box!r} (tools/build-engine.sh builds one per box)")
-        hashes = prepare(artist, theme, box)
+        hashes = prepare(artist, theme, box, com)
         mcp = {"mcpServers": {"easel": {"command": str(NODE), "args": [str(EASEL_MCP), "<studio>", "<reply log>"]}}}
         hashes |= {"system_prompt": sha256(TEXTS / "system_prompt.md"), "settings": sha256(TEXTS / "settings.json"),
                    "messages": sha256(TEXTS / "messages.json"), "brief_template": sha256(TEXTS / "brief.md"),
@@ -297,15 +306,21 @@ class Work:
             name = PACKAGE_NAMES[f]
             (pkg / f"{Path(name).stem}.before{Path(name).suffix}").write_bytes(data)
         shutil.copy2(artist.studio / BRIEF, pkg / "brief.md")
-        state = {"id": id, "artist": artist.id, "number": number, "theme": theme, "box": box, "mode": "themed" if theme else "free",
+        mode = ("commission" if com["words"] else "free") if com else "themed" if theme else "free"
+        state = {"id": id, "artist": artist.id, "number": number, "theme": theme, "box": box, "mode": mode,
                  "started_by": started_by, "created": now(), "state": "prepared", "sittings": [], "crashes": 0,
                  "involuntary": 0, "limit_since": None, "pauses": [], "hashes": hashes, "hits": []}
         # this work's own model and effort, if the owner gave them: else the painter's, from their birth record
         state |= {k: v for k, v in (("model", model), ("effort", effort)) if v}
+        if com:
+            state["commission"] = commission.record(com)
         (run / "state.json").write_text(json.dumps(state, indent=1))
         CURRENT.write_text(id)
+        if com:
+            commission.done(artist.id, com, id)
         log(f"{id}: prepared for {artist.name} ({state['mode']}), started by {started_by}")
         event(f"work {id} started for {artist.name} ({state['mode']}{': ' + theme if theme else ''}"
+              f"{': ' + com['file'] if com and com['file'] else ''}"
               f"{'' if box == DEFAULT_BOX else ', the box ' + box}), by {started_by}"
               + (f"; this work on {model or a_model(artist)}, effort {effort or a_effort(artist)}" if model or effort else ""))
         return cls(id)
@@ -601,6 +616,7 @@ class Work:
             "final_from": self.state.get("final_from"),
             "wall": self.state.get("wall"),  # its number on the painter's walls (after any hung at their birth)  # "live": the painter's canvas at close; "replay": from the log
             "final_sha256": sha256(pkg / "final.png") if (pkg / "final.png").exists() else None,
+            **({"commission": self.state["commission"]} if "commission" in self.state else {}),
             "finished": finished,  # written last: only once it hangs (QA Q8)
         }
         if "replay_easel_swapped" in self.state:  # checked with hashes.replay_easel, the archived copy (replay_env)
@@ -611,6 +627,8 @@ class Work:
         tmp.write_text(json.dumps(manifest, indent=1))
         tmp.replace(pkg / "manifest.json")
         CURRENT.unlink(missing_ok=True)
+        if finished and a.commissioned:
+            frame_copy(pkg, self.id)
         export_now()  # the finished work on the site at once; tools/push.sh takes it to the NAS (OPS-2, OPS-9)
         event(f"work {self.id} {'finished' if finished else 'ended unfinished'}: {title or 'untitled'} "
               f"({self.state.get('verdict') or 'the replay check follows'})")
@@ -702,6 +720,17 @@ def write_timeline(pkg: Path, transcripts: list[Path]):
 
 
 EXPORT_EVERY = 120  # seconds (OPS-4, REC-3)
+FRAME = DATA / "frame"  # a commission studio's finished pictures, for the Frame to collect: never on the site
+
+
+def frame_copy(pkg: Path, id: str):
+    """A finished commission as the Frame takes it: the whole canvas as a JPEG (quality 92, sRGB), in DATA/frame/.
+    The studio is private, so the site's final-f.jpg is never made for it; the backup carries this folder to the NAS."""
+    FRAME.mkdir(exist_ok=True)
+    r = subprocess.run(["/usr/bin/sips", "-s", "format", "jpeg", "-s", "formatOptions", "92", str(pkg / "final.png"),
+                        "--out", str(FRAME / f"{id}.jpg")], capture_output=True, text=True)
+    if r.returncode:
+        log(f"{id}: no copy for the Frame: {(r.stderr or r.stdout).strip()[:300]}")
 
 
 def export_now():
@@ -750,6 +779,8 @@ class Watcher(threading.Thread):
         self.started = time.time()
         self._stop = threading.Event()
         self._over = False
+        self.pending: set[str] = set()  # tool calls the model has sent that have no result yet
+        self._ending = False            # the runner has ended the sitting itself (window, budget or context)
 
     def stop(self):
         self._stop.set()
@@ -786,12 +817,24 @@ class Watcher(threading.Thread):
         for line in data[: end + 1].splitlines():  # every line is checked, even after a reason to stop (QA Q6)
             if not line.strip():
                 continue
+            if self._ending:  # Claude Code's own answer to a call our stop cut off: not from outside
+                try:
+                    if audit.closed_as_we_stopped(json.loads(line)):
+                        continue
+                except ValueError:
+                    pass
             hits = audit.check_entry(line, self.messages, self.config, self.replies)
             if hits:
                 self.hits += hits
                 stop = True
                 continue
             d = json.loads(line)
+            content = (d.get("message") or {}).get("content")
+            for x in content if isinstance(content, list) else []:
+                if isinstance(x, dict) and d.get("type") == "assistant" and x.get("type") == "tool_use":
+                    self.pending.add(x.get("id"))
+                elif isinstance(x, dict) and d.get("type") == "user" and x.get("type") == "tool_result":
+                    self.pending.discard(x.get("tool_use_id"))
             if d.get("type") == "attachment" and (d.get("attachment") or {}).get("type") == "date":
                 m = re.search(r"\d{4}-\d{2}-\d{2}", "".join(x.get("content", "") for x in d.get("rendered") or []))
                 self.date_shown = m.group(0) if m else None
@@ -802,9 +845,11 @@ class Watcher(threading.Thread):
             if usage:
                 ctx = sum(usage.get(k) or 0 for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
                 self._over = self._over or ctx > self.limit
-            if (self._over or self.budget_end) and d.get("type") == "user":  # right after a tool result: nothing half done
+            # right after a tool result, and only once every call the model sent has its result (it may send a paint
+            # and a look together: the look waits for the paint): nothing half done
+            if (self._over or self.budget_end) and d.get("type") == "user" and not self.pending:
                 self.context_end = self._over and not self.budget_end
-                stop = True
+                stop = self._ending = True
         if stop:
             self.kill()
 
@@ -848,6 +893,11 @@ def whiteroom(artist: Artist) -> list[str]:
     """NFR-9: the prepared studio, the messages and the system prompt. Our texts get the full word list; the
     artist's own (notebook, toolkit, its wall cards and the index made from its titles) only private words (QA Q5)."""
     ours = {BRIEF, JOURNAL, *NOTES.values()}
+    if artist.commissioned:
+        # the owner's own words to this painter may speak of screens, viewers and painters of the past: a commission
+        # studio's brief is held to the private words only (the owner, 2026-11-23). What we wrote of it (texts/) is
+        # checked with the full list by tools/whiteroom.py, as every text is
+        ours -= {BRIEF}
     hits = audit.scan_studio(artist.studio, ours)
     for name, text in messages().items():
         hits += audit.scan_text(f"messages.{name}", text, True)

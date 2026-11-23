@@ -33,7 +33,7 @@
 The easel guide, and the notes on oil paint as needed.
 
 ## Working
-- You make every artistic decision.
+- {DECISIONS}
 - Look at your painting often, whole and close up.
 - Keep a working journal with `note` as you go: your own working notes.
   You can revise them.

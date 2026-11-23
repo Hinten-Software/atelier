@@ -199,6 +199,7 @@ Priority: **M** must (M1, M2), **S** should (M3), **C** could (later).
 | ID | Requirement | P |
 |---|---|---|
 | DIR-1 | Modes: **Free** ("The subject and composition are yours."), **Themed** (the owner's prompt), Recreation (later). | M |
+| DIR-1a | **New (the owner, 2026-11-23): Commission**, in a studio born for it only (Studio IV, private, for the Frame): the owner's art direction as written, composition included (DIR-3 does not hold there), a given canvas shape, standing requirements in every brief, and a brief checked for the private words only (NFR-9's word list does not hold for it; NFR-10 does). Studios I-III are unchanged. docs/operations.md, runner/commission.py. | M |
 | DIR-2 | A brief file: front matter for us (mode, theme id, tags) and prose for the artist. | M |
 | DIR-3 | Free between the owner's prompts. A themed prompt is intent or mood, never composition, in the same impersonal voice as free briefs; checked by NFR-9 and reviewed before issue (EXP-10). | M |
 | DIR-4 | A themed prompt can go to several artists, same words. | M |
