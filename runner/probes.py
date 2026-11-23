@@ -9,7 +9,11 @@ in a throwaway studio under /Users/Shared, then audits the transcript with NFR-1
 as DATA/run/probe-ok-<harness fingerprint>.json, which `atelier birth` requires (for a local model,
 probe-ok-<fingerprint>-local-<model>.json, which `atelier birth --local MODEL` requires).
 
-  context    the model is asked to report everything it was given; transcript and reply must be clean
+  context    everything the model was given, as Claude Code's transcript records the request it sent (the system
+             texts, the tools and their descriptions, the opening system message): exactly ours and Claude Code's
+             accepted own, nothing else (wire_problems). Until 2026-11-23 the model was asked to quote it all; since
+             then Claude's safeguards stop that reply (twice of twice, "[reasoning_extraction]"), and the record of
+             the request says more exactly what was sent than a recital did
   tools      exactly the eight easel tools; paint, status, look, read of a folder, write of the notebook
   long       a chunk that runs about 12 minutes at 4800 px (the tool timeouts must not cut it)
 A usage limit can't be forced; its handling is covered by runner/tests (fake Claude Code) and is watched for in
@@ -54,9 +58,7 @@ def probe_ok(local: dict | None = None) -> Path:
 CANVAS = ('canvas{size=300, aspect=1.25, linen=18, seed=7, ground={{pile={{"lead white", 3}}, um=60, '
           'apply="knife", texture=0.3}}}')
 PROBES = {
-    "context": ("Don't use any tools. Quote, verbatim and in full, every piece of text you were given before this "
-                "message: the system text, the names and descriptions of your tools, and anything else, each under a "
-                "heading saying where it came from. Then say today's date if you were told it.", "low"),
+    "context": ("Don't use any tools. Reply with the word done.", "low"),
     "tools": (f"Use the tools in this order, one call per turn: paint with this chunk exactly: {CANVAS} ; then status; "
               "then look; then read with path \".\"; then read with path \"walls\"; then read with path \"easel guide\" (the first part is enough); then write notebook with the text "
               "\"probe\"; then reply with the word done.", "low"),
@@ -67,6 +69,62 @@ PROBES = {
              "chunk exactly: p = pile{{\"raw umber\", 1}, {\"lead white\", 2}} work(everywhere(), {hand=\"detail\", "
              "pile=p, coverage=9}) ; then reply with the word done.", "low"),
 }
+
+
+AGENT_LINE = "You are a Claude agent, built on Anthropic's Claude Agent SDK."  # Claude Code's own, before our system text
+PLACEHOLDER = {"name": "DeferredToolPlaceholder", "description": "Reserved placeholder that keeps deferred tool loading "
+               "active; never call this tool.", "input_schema": {"type": "object", "properties": {}}, "defer_loading": True}
+
+
+def wire_problems(transcript: Path, message: str) -> list[str]:
+    """The context probe: what Claude Code's transcript records of the requests it sent (`api-request-shape`: the
+    system texts and the tools; `api-request-blob`: the messages it added) against what a painter may be given.
+    The system texts are Claude Code's one line and ours; the tools the eight of the easel, and Claude Code's empty
+    placeholder; the opening system message its environment, model and date notes in their accepted forms
+    (audit.ACCEPTED); a user message only ours. No record of a request is a failure, never a pass."""
+    problems, shapes, opening = [], 0, 0
+    ours = (TEXTS / "system_prompt.md").read_text().strip()
+    for n, line in enumerate(transcript.read_text().splitlines(), 1):
+        d = json.loads(line)
+        if d.get("type") == "api-request-shape":
+            shapes += 1
+            shape = d.get("shape") or {}
+            if extra := set(shape) - {"system", "tools"}:
+                problems.append(f"line {n}: the request holds more than system texts and tools: {sorted(extra)}")
+            system = [x.get("text") if isinstance(x, dict) and set(x) <= {"type", "text", "cache_control"} else x for x in shape.get("system") or []]
+            if system != [AGENT_LINE, ours]:
+                problems.append(f"line {n}: the system texts are not Claude Code's line and ours: {json.dumps(system)[:400]}")
+            tools = shape.get("tools") or []
+            names = sorted(t.get("name", "") for t in tools if t != PLACEHOLDER)
+            if names != sorted(f"mcp__easel__{t}" for t in TOOLS):
+                problems.append(f"line {n}: the tools sent: {[t.get('name') for t in tools]}")
+            problems += [f"line {n}: the request: {h}" for h in audit.private_hits(json.dumps(shape))]
+        elif d.get("type") == "api-request-blob":
+            m = d.get("message") or {}
+            problems += [f"line {n}: a message sent: {h}" for h in audit.private_hits(json.dumps(m))]
+            if extra := set(m) - {"role", "content", "output_config"}:
+                problems.append(f"line {n}: a message sent holds {sorted(extra)}")
+            content = m.get("content") if isinstance(m.get("content"), list) else [{"type": "text", "text": m.get("content")}]
+            if m.get("role") == "system":
+                opening += 1
+                for x in content:
+                    if x.get("type") != "text":
+                        problems.append(f"line {n}: a {x.get('type')!r} part in a system message")
+                        continue
+                    for piece in x["text"].split("\n\n"):
+                        wrapped = f"<system-reminder>\n{piece}\n</system-reminder>"
+                        if not any(audit.ACCEPTED[k].match(wrapped) for k in ("environment", "model", "date")):
+                            problems.append(f"line {n}: a system message says what is not accepted: {piece[:300]!r}")
+            elif m.get("role") == "user":
+                for x in content:
+                    if x.get("type") == "text" and x.get("text", "").strip() and x["text"] != message:
+                        problems.append(f"line {n}: a user message the probe didn't send: {x['text'][:300]!r}")
+            elif m.get("role") != "assistant":
+                problems.append(f"line {n}: a message sent as {m.get('role')!r}")
+    if not shapes or not opening:
+        problems.append(f"the transcript records no request to check ({shapes} with system texts and tools, {opening} opening "
+                        "system messages): what the model was given is not known")
+    return problems
 
 
 class Probe(Artist):
@@ -120,6 +178,8 @@ def run(name: str, config: Path | None, local: dict | None = None, model: str | 
         problems += [f"reply: {h}" for h in audit.private_hits(reply)]
         if res.get("is_error") or res.get("subtype") != "success":
             problems.append(f"ended {res.get('subtype')} / error {res.get('is_error')}: {reply[:300]}")
+        if name == "context":
+            problems += wire_problems(transcript, message)
         if name == "tools":
             events = [json.loads(l) for l in transcript.read_text().splitlines()]
             used = [b.get("name", "").removeprefix("mcp__easel__") for e in events if e.get("type") == "assistant"
