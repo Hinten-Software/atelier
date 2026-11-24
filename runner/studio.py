@@ -78,6 +78,12 @@ class Artist:
         """A studio that paints what the owner asks for (runner/commission.py), by its birth record."""
         return bool(self.born.get("commission"))
 
+    @property
+    def paused(self) -> bool:
+        """On pause (the owner, 2026-11-24, Studio IV): the file DATA/artists/<id>/paused, whose text says why. No
+        work starts for a paused studio, on its night or by `atelier now`; removing the file ends the pause."""
+        return (self.home / "paused").exists()
+
     def works(self) -> list[Path]:
         return sorted(p for p in (DATA / "works").glob(f"{self.id}-*") if p.is_dir())
 

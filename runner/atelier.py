@@ -149,6 +149,8 @@ def cmd_now(a):
             raise SystemExit(f"a run is already waiting for the open work to end ({AFTER}: {AFTER.read_text().strip()}); remove the file to drop it")
         if a.studio not in registry():
             raise SystemExit(f"--after takes a studio; the studios: {', '.join(registry())}")
+        if Artist(a.studio).paused:
+            raise SystemExit(f"{Artist(a.studio).name} is on pause ({Artist(a.studio).home / 'paused'}); remove the file to end it")
         given(a)
         AFTER.write_text(json.dumps({k: getattr(a, k) for k in ("studio", "theme", "box", "commission", "model", "effort")}) + "\n")
         event(f"the owner's run for {Artist(a.studio).name} waits for the open work to end (run/after); then it starts at any "
@@ -162,6 +164,8 @@ def cmd_now(a):
     id = a.studio or lineup()[0][1]
     if id not in registry():
         raise SystemExit(f"no studio {id!r}; the studios: {', '.join(registry())}")
+    if Artist(id).paused:
+        raise SystemExit(f"{Artist(id).name} is on pause ({Artist(id).home / 'paused'}); remove the file to end it")
     if not CLAUDE.exists():
         raise SystemExit(f"no pinned Claude Code at {CLAUDE} (RUN-15)")
     from config import DEFAULT_BOX, boxes
@@ -349,7 +353,7 @@ def cmd_tick(a):
         if 0 < left < 90 * 60:
             return
     id = tonights_studio()
-    if id is None or id not in registry() or started_lately(id):
+    if id is None or id not in registry() or Artist(id).paused or started_lately(id):
         return
     n = len(Artist(id).works())
     log(f"tick: starting {Artist(id).name}'s work {n + 1} (the owner's standing go until {STANDING.read_text().strip()}"
@@ -476,6 +480,8 @@ def cmd_next(a):
     for night, id in lineup():
         when = "tonight" if night.date() == tonight else f"{night:%A} night, {night:%-d %B}"
         print(f"{Artist(id).name}: {when} ({len(Artist(id).works())} works so far)")
+    for id in (x for x in registry() if Artist(x).paused):
+        print(f"{Artist(id).name}: on pause")
 
 
 def this_evening():
@@ -489,7 +495,7 @@ def lineup() -> list[tuple[datetime, str]]:
     if not reg:
         raise SystemExit("no artists yet")
     tonight, nights = this_evening(), []
-    for id in (x for x in reg if x in NIGHTS):
+    for id in (x for x in reg if x in NIGHTS and not Artist(x).paused):
         night = datetime.combine(tonight + timedelta(days=(NIGHTS[id] - tonight.weekday()) % 7), datetime.min.time()).replace(hour=23).astimezone()
         while started_lately(id, night):  # painted this week: its night next week
             night += timedelta(days=7)

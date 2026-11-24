@@ -27,6 +27,7 @@ def check(what, cond, detail=""):
 class FakeArtist:
     def __init__(self, id):
         self.name = f"Studio {id}"
+        self.paused = False
 
     def works(self):
         return []
