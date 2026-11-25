@@ -295,8 +295,10 @@ def cmd_backup(a):
 def cmd_tick(a):
     """The owner's standing go (2026-10-07; since 2026-10-13 one studio a night, NIGHTS: within the budget, until the
     time in DATA/run/until). Run every 10 minutes by launchd (deploy/mac/): resumes a work a reboot cut off, else starts the
-    next studio's work when the window is open and today's budget allows. An audit stop is never cleared: in the
-    window it is set aside (withdrawn) so the night goes on, else it waits for a person. A failed export is tried again."""
+    next studio's work when the window is open and today's budget allows. A work under way that the audit stopped
+    for something of the harness's own goes on by itself (carry_on, twice at most); any other audit stop is not cleared:
+    in the window it is set aside (withdrawn) so the night goes on, else it waits for a person. No new work starts on
+    less than START_USD of the day's budget. A failed export is tried again."""
     import budget
     if EXPORT_FAILED.exists() and not ((w := open_work()) and runner_alive(w)):  # a running work exports on its own
         export_now()
@@ -327,6 +329,9 @@ def cmd_tick(a):
                 cmd_withdraw(argparse.Namespace(why="auto: Claude's safety classifier stopped the painter's first reply, "
                                                     "before any paint was laid"))
                 return
+            if under_way(w) and not leak(new_hits(w)) and len(w.state.get("continued") or []) < CONTINUES:
+                carry_on(w)
+                return
             if budget.in_window() and auto_withdrawn_today() < 3:
                 # any other stop, once the night's painting time has come: set aside (withdrawn, never public) so the
                 # night goes on with the next studio; the morning report names it (the owner, 2026-10-11, after ii-007
@@ -347,6 +352,10 @@ def cmd_tick(a):
         return
     if not budget.in_window() or budget.spent_today() >= budget.daily_cap():
         return
+    if budget.daily_cap() - budget.spent_today() < START_USD:
+        # no new work on what is left of a day's budget when it can't carry one (ii-015, 2026-11-25: started at 02:36
+        # on $10.38 after ii-014 was set aside, closed unfinished at the cap); the open work, if any, goes on regardless
+        return
     if budget.window() != "always":  # no new work in a night's last 90 minutes: it would straddle into the next night
         now, end = datetime.now(), int(budget.window().split("-")[1])
         left = (now.replace(hour=end, minute=0, second=0, microsecond=0) - now).total_seconds()
@@ -361,6 +370,47 @@ def cmd_tick(a):
     if starts is not None:
         STARTS_LEFT.write_text(f"{starts - 1}\n")  # used up before the start: a start that fails is not retried forever
     cmd_paint(argparse.Namespace(artist=id, theme=None, by="owner"))
+
+
+# what a new work needs left of the day's budget to start: about what one costs (2026-11: $9.36 to $16.51)
+START_USD = float(os.environ.get("ATELIER_START_USD", "12"))
+# a work under way that the audit stopped goes on by itself, this often at most; then it is set aside as before
+CONTINUES = 2
+
+
+def under_way(w: Work) -> bool:
+    """Whether paint has been laid: the painting's log holds a chunk."""
+    painted = w.artist.studio / "paintings" / "lua" / "painting.lua"
+    return painted.exists() and "--@ chunk" in painted.read_text()
+
+
+def new_hits(w: Work) -> list[str]:
+    """The hits of the stop that holds the work now: those since the tick last let it go on."""
+    done = (w.state.get("continued") or [{}])[-1].get("hits", 0)
+    return (w.state.get("hits") or [])[done:]
+
+
+def leak(hits: list[str]) -> bool:
+    """Whether a hit says something of the owner's reached the painter (audit.private_hits: a private word, an email
+    address, a home path). Those wait for a person or are set aside, as every stop did before."""
+    return not hits or any(k in h for h in hits for k in ("private word", "an email address", "a home path"))
+
+
+def carry_on(w: Work):
+    """A work under way that the audit stopped for something of the harness's own (a text or tool result the audit
+    doesn't know; nothing of the owner's, see leak) goes on in a new sitting, by itself, and may hang (the owner,
+    2026-11-25, after ii-014 was set aside 3 h in for a notice of Claude Code's: "the process should be resilient
+    enough to finish", getting it done before purity). The new sitting is a fresh session: what the stopped one was
+    shown is not in it, and its writes to the notebook, toolkit and journal were rolled back. The hits stay in the
+    work's record (state, manifest) and in history.md."""
+    s = w.state
+    hit = new_hits(w)[0]
+    s.setdefault("continued", []).append({"at": datetime.now().astimezone().isoformat(timespec="seconds"), "hits": len(s["hits"])})
+    s["contaminated"] = False
+    event(f"work {w.id} goes on by the tick after an audit stop ({len(s['continued'])} of {CONTINUES}); it was under way "
+          f"and the stop was the harness's own: {hit[:200]}")
+    w.set("resumed")
+    detach(w)
 
 
 def classifier_misfire(w: Work) -> bool:

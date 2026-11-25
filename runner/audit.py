@@ -154,6 +154,14 @@ IMAGE_NOTE = "[Image: source: "  # Claude Code's note of where it saved an image
 LOCAL_NUDGES = {"[Your previous response had no visible output. Please continue and produce a user-visible response.]"}
 
 
+# what Claude Code itself says to the model when the API's stream breaks off in the middle of a reply (ii-014,
+# 2026-11-25: 3 h into the painting; the stop cost the work and, with the start that followed, the night). Its own
+# words, nothing from outside. This sentence exactly; any other text is still a hit (the owner, 2026-11-25: a work
+# should get done; requirements 3.2)
+HARNESS_NOTES = {"Your response above was cut off mid-stream. Resume directly from where it stops \u2014 no apology, no "
+                 "recap. If none of it survived, answer the request from the start."}
+
+
 def foreign_image(text: str, config_dir) -> str | None:
     """A hit for an image note that points outside the artist's config folder; None for one inside it."""
     return None if text.startswith(f"{IMAGE_NOTE}{config_dir}/") else f"image note outside the artist's config: {text[:200]!r}"
@@ -219,7 +227,7 @@ def check_line(d: dict, messages: set[str], config_dir: Path, replies: Replies |
                         hits.append(hit)
                 elif text.startswith("Your response above was stopped by a safety classifier"):
                     hits.append(f"a safety classifier's notice reached the model: {text[:200]!r}")
-                elif text.strip() and text not in messages:
+                elif text.strip() and text not in messages and text not in HARNESS_NOTES:
                     hits.append(f"text the runner didn't send: {text[:300]!r}")
             elif x.get("type") == "tool_result":
                 hits += _tool_result(x, config_dir, replies)

@@ -127,8 +127,13 @@ So the atelier gives the artist places for thought and never says what to put th
 | the first message and the brief arrive as a "user" turn; "Your brief", "Your reply" | Claude Code `-p`; our brief | something must start the work | wording impersonal and constant (Appendix A) |
 | "the log is the painting ... replaying it paints the same canvas" | easel guide | the guide describes the tool | accepted: a painter's own record |
 | harness boilerplate (parallel tool calls, deferred tools) | Claude Code | as above | accepted |
+| "Your response above was cut off mid-stream. Resume directly from where it stops ..." | Claude Code, when the API's stream breaks off in a reply | as above; it says nothing from outside | accepted in that exact form (since 2026-11-25, ii-014); recorded in the transcript |
 
-Anything not in this table that reaches the artist is a white-room finding (NFR-10).
+Anything not in this table that reaches the artist is a white-room finding (NFR-10). Since 2026-11-25 (the owner:
+getting a work done comes before purity) a finding of the harness's own in a work under way no longer ends the work:
+the sitting is stopped and rolled back as before, the work goes on in a fresh session (twice at most) and may hang,
+with the finding in its manifest and in history.md. A finding that names something of the owner's (a private word, an
+email address, a home path) is handled as before.
 
 ## 4. Roles
 

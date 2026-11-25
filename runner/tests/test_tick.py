@@ -105,7 +105,8 @@ def main():
         (DATA / "run" / "until").write_text("2099-01-01T00:00:00+00:00\n")
         # a work the audit stopped (not Claude's classifier): in the window it is set aside so the night goes on,
         # outside it waits for a person (the owner, 2026-10-11)
-        stopped = type("W", (), {"id": "ii-007", "state": {"state": "stopped", "hits": ["attachment 'date' differs"]}})()
+        stopped = type("W", (), {"id": "ii-007", "state": {"state": "stopped", "hits": ["attachment 'date' differs"]},
+                                 "artist": type("A", (), {"studio": DATA / "no-studio"})()})()
         withdrawn = []
         atelier.open_work = lambda: stopped
         atelier.runner_alive = lambda w: False
@@ -145,6 +146,46 @@ def main():
         s.update(state="stopped", sittings=[{"n": 1, "how": "audit"}], hits=["a safety classifier's notice"])
         tick()
         check("a third: set aside", len(withdrawn) == 1 and "classifier" in withdrawn[0] and len(s["restarted"]) == 2, withdrawn)
+        # a work under way that the audit stopped for the harness's own goes on by itself, twice; a leak never does
+        (studio / "paintings" / "lua").mkdir(parents=True)
+        (studio / "paintings" / "lua" / "painting.lua").write_text("--@ chunk 1\nwait(1)\n")
+        atelier.classifier_misfire = lambda w: False
+        withdrawn.clear(); detached.clear()
+        s.pop("continued", None)
+        s.update(state="stopped", sittings=[{"n": 1, "how": "audit"}], hits=["text the runner didn't send: 'x'"], contaminated=True)
+        budget.in_window = lambda: False
+        tick()
+        check("a stop under way, the harness's own: the work goes on, at any hour", s["state"] == "resumed" and detached == [misfit]
+              and not withdrawn and not s["contaminated"] and s["hits"] and len(s["continued"]) == 1 and "goes on" in events[-1], s)
+        s.update(state="stopped", contaminated=True, hits=s["hits"] + ["line 9: private word 'x'"])
+        tick()
+        check("a leak waits for a person outside the window", s["state"] == "stopped" and s["contaminated"] and len(detached) == 1 and not withdrawn, s)
+        budget.in_window = lambda: True
+        tick()
+        check("... and is set aside in it", len(withdrawn) == 1, withdrawn)
+        withdrawn.clear()
+        s.update(state="stopped", contaminated=True, hits=s["hits"][:1] + ["a tool result the easel didn't send: 'y'"])
+        tick()
+        check("a second stop of the harness's own: on again", s["state"] == "resumed" and len(s["continued"]) == 2 and not withdrawn, s)
+        s.update(state="stopped", contaminated=True, hits=s["hits"] + ["text the runner didn't send: 'z'"])
+        tick()
+        check("a third: set aside", len(withdrawn) == 1 and s["state"] == "stopped" and len(s["continued"]) == 2, withdrawn)
+        (studio / "paintings" / "lua" / "painting.lua").unlink()
+        s.pop("continued", None)
+        s.update(state="stopped", sittings=[{"n": 1, "how": "audit"}], hits=["text the runner didn't send: 'x'"], contaminated=True)
+        withdrawn.clear()
+        tick()
+        check("a stop before any paint is set aside as before", len(withdrawn) == 1 and "continued" not in s, s)
+        atelier.classifier_misfire = lambda w: True
+        # no new work on less of the day's budget than a work costs
+        keep = atelier.open_work, budget.spent_today, budget.daily_cap, atelier.started_lately, atelier.tonights_studio
+        atelier.open_work, atelier.started_lately, atelier.tonights_studio = (lambda: None), (lambda id: False), (lambda: "i")
+        budget.daily_cap = lambda: 20.0
+        budget.spent_today = lambda: 9.62
+        check("$10.38 left of the day: nothing starts", tick() == [])
+        budget.spent_today = lambda: 7.0
+        check("$13 left: the work starts", tick() == ["i"])
+        atelier.open_work, budget.spent_today, budget.daily_cap, atelier.started_lately, atelier.tonights_studio = keep
         # a failed export is tried again by the tick
         exported = []
         atelier.export_now = lambda: exported.append(1)

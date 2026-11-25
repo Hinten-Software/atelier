@@ -73,7 +73,13 @@ any change is an atelier event (history.md).
 - *The window closes during a sitting:* nothing to do; the runner ends the sitting once every call the painter sent
   has its answer, and the work goes on in the next window. (Until 2026-11-23 a look sent along with a paint could be
   cut off, and Claude Code's "Connection closed" for it stopped the work as an audit hit: i-014.)
-- *White-room audit stop:* `atelier status` lists the hits. Read the transcript in the work's run
+- *The API's stream breaks off in a reply:* nothing to do; Claude Code tells the painter its reply was cut off and
+  to go on, and the audit accepts that sentence (since 2026-11-25; ii-014 was stopped for it 3 hours in).
+- *An audit stop while a work is under way* (paint laid), for something of the harness's own (a text or a tool
+  result the audit doesn't know): nothing to do; the tick lets the work go on in a new sitting, twice at most, and it
+  may hang; history.md and the work's manifest keep the hits (the owner, 2026-11-25: getting a work done comes
+  before purity). A stop for a private word, an email address or a home path is not continued.
+- *White-room audit stop* (any other): `atelier status` lists the hits. Read the transcript in the work's run
   folder. Fix the cause (it is ours, not the artist's), log it, then either
   `atelier resume --clear "what was found and fixed"` (the work stays contaminated: not hung, not
   exported) or leave it. The artist's notebook edits from that sitting are already rolled back.
@@ -104,10 +110,10 @@ every); the painter is never told a box's name.
 standing go: until the time in DATA/run/until, it resumes a work a reboot cut off, and otherwise starts the next
 studio's work when it is that studio's night (one a week: Studio I Sunday, II Tuesday, III Thursday night, so a new
 painting hangs Monday, Wednesday and Friday morning; Studio IV, the commission studio, Saturday night; NIGHTS in runner/atelier.py; the owner, 2026-10-13) and the night
-window is open and today's budget allows. A studio that began a work in the last 5 days waits for its next night; a
+window is open and today's budget allows (a new work needs $12 of it left, ATELIER_START_USD: about what one costs). A studio that began a work in the last 5 days waits for its next night; a
 work set aside leaves the night free for another start. `atelier next` lists the nights. If Claude's safety classifier stopped a work's
 first reply before any paint was laid, the same work starts afresh in a new session (twice at most; then it is set
-aside). It never clears any other audit
+aside). A work under way that the audit stopped for the harness's own goes on by itself (above). It never clears any other audit
 stop: in the painting window it sets the stopped work aside (withdrawn, never public, at most 3 a day) so the night
 goes on; outside the window the stop waits for a person. A failed export (DATA/run/export-failed) is tried again. If DATA/run/starts-left holds a number, the tick starts only that many new works and counts down (the
 open work goes on regardless). To end it early: `launchctl unload ~/Library/LaunchAgents/atelier.tick.plist` (or delete DATA/run/until).
